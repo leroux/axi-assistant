@@ -415,7 +415,10 @@ async def run_scheduled_event(entry: dict, channel) -> None:
 
     await send_system(channel, f"**[Scheduled: {entry['name']}]**")
     drain_stderr(master)
-    await master.client.query(entry["prompt"])
+    prompt = entry["prompt"] + \
+        "\n\n(This is a scheduled event. The user will only see your response in Discord, " \
+        "not this prompt. Write your message so it makes sense standalone without any preceding context.)"
+    await master.client.query(prompt)
     await stream_response_to_channel(master, channel)
 
 
