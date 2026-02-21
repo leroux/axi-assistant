@@ -12,6 +12,7 @@ from discord.ext.commands import Bot
 from discord.ext import tasks
 from discord.enums import ChannelType
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+from claude_agent_sdk.types import AssistantMessage, ResultMessage, StreamEvent
 from croniter import croniter
 
 load_dotenv()
@@ -269,14 +270,12 @@ async def send_long(channel, text: str) -> None:
 
 async def stream_response_to_channel(session: AgentSession, channel) -> None:
     """Stream Claude's response from a specific agent session to a Discord channel.
-    Iterates session.client._query.receive_messages(), extracts text_delta,
-    drains stderr, and flushes at 1800 chars."""
+    Uses the public receive_response() API. Flushes the text buffer at each
+    assistant turn boundary so intermediate messages appear immediately."""
     text_buffer = ""
 
     async with channel.typing():
-        async for data in session.client._query.receive_messages():
-            msg_type = data.get("type")
-
+        async for msg in session.client.receive_response():
             # Drain and send any stderr messages first
             for stderr_msg in drain_stderr(session):
                 stderr_text = stderr_msg.strip()
@@ -284,17 +283,25 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
                     for part in split_message(f"```\n{stderr_text}\n```"):
                         await channel.send(part)
 
-            # Extract text from stream events
-            if msg_type == "stream_event":
-                event = data.get("event", {})
+            if isinstance(msg, StreamEvent):
+                # Real-time text deltas — accumulate in buffer
+                event = msg.event
                 if event.get("type") == "content_block_delta":
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
                         text_buffer += delta.get("text", "")
-            elif msg_type == "result":
+
+            elif isinstance(msg, AssistantMessage):
+                # End of an assistant turn — flush buffer as a separate message
+                if text_buffer.strip():
+                    await send_long(channel, text_buffer)
+                    text_buffer = ""
+
+            elif isinstance(msg, ResultMessage):
+                # receive_response() stops after this automatically
                 break
 
-            # When buffer is large enough, flush it
+            # When buffer is large enough, flush it mid-turn
             if len(text_buffer) >= 1800:
                 split_at = text_buffer.rfind("\n", 0, 1800)
                 if split_at == -1:
@@ -360,8 +367,8 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channels: list
             await session.client.query(prompt)
 
             # Consume response silently (don't stream to Discord)
-            async for data in session.client._query.receive_messages():
-                if data.get("type") == "result":
+            async for msg in session.client.receive_response():
+                if isinstance(msg, ResultMessage):
                     break
 
             session.last_activity = datetime.now(timezone.utc)
