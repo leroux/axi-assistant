@@ -20,3 +20,8 @@ build/
 
 # OS
 .DS_Store
+
+# User data
+USER_PROFILE.md
+schedules.json
+schedule_history.json
