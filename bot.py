@@ -283,7 +283,7 @@ async def _receive_response_safe(client: ClaudeSDKClient):
         try:
             parsed = parse_message(data)
         except MessageParseError:
-            logger.debug("Skipping unknown SDK message type: %s", data.get("type"))
+            log.debug("Skipping unknown SDK message type: %s", data.get("type"))
             continue
         yield parsed
         if isinstance(parsed, ResultMessage):
