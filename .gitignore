@@ -29,3 +29,4 @@ schedule_history.json
 # Runtime signals
 .restart_requested
 .spawn_agent
+.rollback_performed

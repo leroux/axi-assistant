@@ -37,6 +37,7 @@ SCHEDULES_PATH = os.path.join(BOT_DIR, "schedules.json")
 HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
 RESTART_SIGNAL_PATH = os.path.join(BOT_DIR, ".restart_requested")
 SPAWN_SIGNAL_PATH = os.path.join(BOT_DIR, ".spawn_agent")
+ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 schedule_last_fired: dict[str, datetime] = {}
 
 # --- Agent session management ---
@@ -789,11 +790,40 @@ async def on_ready():
     check_schedules.start()
     log.info("Schedule checker started")
 
+    # Check for rollback marker (written by run.sh after auto-rollback)
+    rollback_info = None
+    if os.path.exists(ROLLBACK_MARKER_PATH):
+        try:
+            with open(ROLLBACK_MARKER_PATH) as f:
+                rollback_info = json.load(f)
+            os.remove(ROLLBACK_MARKER_PATH)
+            log.info("Rollback marker found and consumed: %s", rollback_info)
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Failed to read rollback marker: %s", e)
+            try:
+                os.remove(ROLLBACK_MARKER_PATH)
+            except OSError:
+                pass
+
     for uid in ALLOWED_USER_IDS:
         try:
             user = await bot.fetch_user(uid)
             dm = await user.create_dm()
-            await dm.send("*System:* Axi restarted.")
+            if rollback_info:
+                exit_code = rollback_info.get("exit_code", "unknown")
+                uptime = rollback_info.get("uptime_seconds", "?")
+                timestamp = rollback_info.get("timestamp", "unknown")
+                await dm.send(
+                    f"*System:* **Automatic rollback performed.**\n"
+                    f"Axi crashed on startup (exit code {exit_code} after {uptime}s) "
+                    f"at {timestamp}.\n"
+                    f"Uncommitted changes were stashed and reverted to the last "
+                    f"committed version.\n"
+                    f"To inspect: `git stash list` and `git stash show -p`\n"
+                    f"To restore: `git stash pop`"
+                )
+            else:
+                await dm.send("*System:* Axi restarted.")
             log.info("Sent restart notification to user %s", uid)
         except Exception:
             log.exception("Failed to send restart notification to user %s", uid)
