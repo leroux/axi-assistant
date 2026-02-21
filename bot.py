@@ -989,6 +989,22 @@ async def config_cmd(
     )
 
 
+@bot.tree.command(name="restart", description="Restart the bot (exit code 42, picked up by run.sh).")
+async def restart_cmd(interaction):
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("*System:* Restarting...")
+    # Write the signal file — the scheduler loop or the next cycle will pick it up,
+    # but we also trigger an immediate exit for faster restarts.
+    with open(RESTART_SIGNAL_PATH, "w") as f:
+        f.write("")
+    log.info("Restart requested via /restart command")
+    await bot.close()
+    os._exit(42)
+
+
 # --- Startup ---
 
 @bot.event

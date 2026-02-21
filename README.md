@@ -142,6 +142,7 @@ Schedule entries with `"agent": true` automatically spawn a dedicated agent when
 | `/kill-agent <name>` | Terminate a session (cannot kill `axi-master`; auto-switches to master if killing the active agent) |
 | `/reset-context [working_dir]` | Wipe the active agent's conversation history, optionally change its working directory |
 | `/config [auto_switch] [visibility]` | View or update agent configuration (see below) |
+| `/restart` | Immediately restart the bot (exit code 42, triggers run.sh relaunch) |
 
 ### Idle Agent Detection
 
