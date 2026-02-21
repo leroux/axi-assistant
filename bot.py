@@ -267,6 +267,11 @@ async def send_long(channel, text: str) -> None:
             await channel.send(chunk)
 
 
+async def send_system(channel, text: str) -> None:
+    """Send a system-prefixed message."""
+    await send_long(channel, f"*System:* {text}")
+
+
 # --- Streaming response ---
 
 async def _receive_response_safe(client: ClaudeSDKClient):
@@ -295,6 +300,17 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
     Uses the public receive_response() API. Flushes the text buffer at each
     assistant turn boundary so intermediate messages appear immediately."""
     text_buffer = ""
+    first_flush = True
+    prefix = f"*{session.name}:* "
+
+    async def flush_text(text: str) -> None:
+        nonlocal first_flush
+        if not text.strip():
+            return
+        if first_flush:
+            text = prefix + text.lstrip()
+            first_flush = False
+        await send_long(channel, text)
 
     async with channel.typing():
         async for msg in _receive_response_safe(session.client):
@@ -315,9 +331,8 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
 
             elif isinstance(msg, AssistantMessage):
                 # End of an assistant turn — flush buffer as a separate message
-                if text_buffer.strip():
-                    await send_long(channel, text_buffer)
-                    text_buffer = ""
+                await flush_text(text_buffer)
+                text_buffer = ""
 
             elif isinstance(msg, ResultMessage):
                 # receive_response() stops after this automatically
@@ -330,8 +345,7 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
                     split_at = 1800
                 to_send = text_buffer[:split_at]
                 text_buffer = text_buffer[split_at:].lstrip("\n")
-                if to_send.strip():
-                    await send_long(channel, to_send)
+                await flush_text(to_send)
 
     # Flush any remaining stderr
     for stderr_msg in drain_stderr(session):
@@ -341,8 +355,10 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
                 await channel.send(part)
 
     # Flush remaining text buffer
-    if text_buffer.strip():
-        await send_long(channel, text_buffer)
+    await flush_text(text_buffer)
+
+    # Notify that the bot is done responding
+    await send_system(channel, "Bot has finished responding and is awaiting input.")
 
 
 # --- Scheduled event runner ---
@@ -357,7 +373,7 @@ async def run_scheduled_event(entry: dict, channel) -> None:
         await reset_session(MASTER_AGENT_NAME)
         master = get_master_session()
 
-    await channel.send(f"**[Scheduled: {entry['name']}]**")
+    await send_system(channel, f"**[Scheduled: {entry['name']}]**")
     drain_stderr(master)
     await master.client.query(entry["prompt"])
     await stream_response_to_channel(master, channel)
@@ -368,13 +384,13 @@ async def run_scheduled_event(entry: dict, channel) -> None:
 async def spawn_agent(name: str, cwd: str, initial_prompt: str, channels: list) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
     for channel in channels:
-        await channel.send(f"Spawning agent **{name}** in `{cwd}`...")
+        await send_system(channel, f"Spawning agent **{name}** in `{cwd}`...")
 
     session = await start_session(name, cwd, system_prompt=None)
 
     if not initial_prompt:
         for channel in channels:
-            await channel.send(f"Agent **{name}** is ready. Use `/switch-agent` to interact.")
+            await send_system(channel, f"Agent **{name}** is ready. Use `/switch-agent` to interact.")
         return
 
     asyncio.create_task(_run_initial_prompt(session, initial_prompt, channels))
@@ -396,14 +412,15 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channels: list
             session.last_activity = datetime.now(timezone.utc)
 
         for channel in channels:
-            await channel.send(
+            await send_system(
+                channel,
                 f"Agent **{session.name}** finished initial task. "
-                f"Use `/switch-agent` to interact with it."
+                f"Use `/switch-agent` to interact with it.",
             )
     except Exception:
         log.exception("Error running initial prompt for agent '%s'", session.name)
         for channel in channels:
-            await channel.send(f"Agent **{session.name}** encountered an error during initial task.")
+            await send_system(channel, f"Agent **{session.name}** encountered an error during initial task.")
 
 
 # --- DM message handler ---
@@ -419,12 +436,13 @@ async def on_message(message):
 
     session = get_active_session()
     if session is None or session.client is None:
-        await message.channel.send("Claude session not ready yet. Please wait.")
+        await send_system(message.channel, "Claude session not ready yet. Please wait.")
         return
 
     if session.query_lock.locked():
-        await message.channel.send(
-            f"Agent **{session.name}** is busy. Please wait or `/switch-agent` to another."
+        await send_system(
+            message.channel,
+            f"Agent **{session.name}** is busy. Please wait or `/switch-agent` to another.",
         )
         return
 
@@ -475,15 +493,15 @@ async def check_schedules():
             elif agent_name == MASTER_AGENT_NAME:
                 log.warning("Cannot spawn agent with reserved name '%s'", MASTER_AGENT_NAME)
                 for ch in spawn_channels:
-                    await ch.send(f"Cannot spawn agent with reserved name **{MASTER_AGENT_NAME}**.")
+                    await send_system(ch, f"Cannot spawn agent with reserved name **{MASTER_AGENT_NAME}**.")
             elif agent_name in agents:
                 log.warning("Agent '%s' already exists, ignoring spawn signal", agent_name)
                 for ch in spawn_channels:
-                    await ch.send(f"Agent **{agent_name}** already exists.")
+                    await send_system(ch, f"Agent **{agent_name}** already exists.")
             elif len(agents) >= MAX_AGENTS:
                 log.warning("Max agents (%d) reached, ignoring spawn signal", MAX_AGENTS)
                 for ch in spawn_channels:
-                    await ch.send(f"Maximum number of agents ({MAX_AGENTS}) reached. Kill an agent first.")
+                    await send_system(ch, f"Maximum number of agents ({MAX_AGENTS}) reached. Kill an agent first.")
             else:
                 log.info("Spawning agent '%s' (cwd=%s)", agent_name, agent_cwd)
                 await spawn_agent(agent_name, agent_cwd, agent_prompt, spawn_channels)
@@ -548,7 +566,7 @@ async def check_schedules():
                         elif len(agents) >= MAX_AGENTS:
                             log.warning("Max agents reached, skipping agent event %s", name)
                             for channel in channels:
-                                await channel.send(f"Scheduled agent **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
+                                await send_system(channel, f"Scheduled agent **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
                         else:
                             await spawn_agent(agent_name, agent_cwd, entry["prompt"], channels)
                         continue
@@ -577,7 +595,7 @@ async def check_schedules():
                         elif len(agents) >= MAX_AGENTS:
                             log.warning("Max agents reached, skipping agent event %s", name)
                             for channel in channels:
-                                await channel.send(f"Scheduled agent **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
+                                await send_system(channel, f"Scheduled agent **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
                         else:
                             await spawn_agent(agent_name, agent_cwd, entry["prompt"], channels)
                     else:
@@ -684,7 +702,7 @@ async def switch_agent(interaction, agent_name: str):
     active_agent = agent_name
     session = agents[agent_name]
     await interaction.response.send_message(
-        f"Switched to agent **{agent_name}** (cwd: `{session.cwd}`)"
+        f"*System:* Switched to agent **{agent_name}** (cwd: `{session.cwd}`)"
     )
 
 
@@ -709,7 +727,7 @@ async def list_agents(interaction):
             f"- **{name}**{marker}{busy}{protected} | cwd: `{session.cwd}` | idle: {idle_minutes}m"
         )
 
-    await interaction.response.send_message("**Agent Sessions:**\n" + "\n".join(lines))
+    await interaction.response.send_message("*System:* **Agent Sessions:**\n" + "\n".join(lines))
 
 
 @bot.tree.command(name="kill-agent", description="Terminate an agent session.")
@@ -738,7 +756,7 @@ async def kill_agent(interaction, agent_name: str):
     if active_agent == agent_name:
         active_agent = MASTER_AGENT_NAME
 
-    await interaction.followup.send(f"Agent **{agent_name}** terminated.")
+    await interaction.followup.send(f"*System:* Agent **{agent_name}** terminated.")
 
 
 @bot.tree.command(name="reset-context", description="Reset the active agent's context. Optionally set a new working directory.")
@@ -750,7 +768,7 @@ async def reset_context(interaction, working_dir: str | None = None):
     await interaction.response.defer()
     session = await reset_session(active_agent, cwd=working_dir)
     await interaction.followup.send(
-        f"Context reset for **{active_agent}**. Working directory: `{session.cwd}`"
+        f"*System:* Context reset for **{active_agent}**. Working directory: `{session.cwd}`"
     )
 
 
@@ -779,7 +797,7 @@ async def on_ready():
         try:
             user = await bot.fetch_user(uid)
             dm = await user.create_dm()
-            await dm.send("Axi restarted.")
+            await dm.send("*System:* Axi restarted.")
             log.info("Sent restart notification to user %s", uid)
         except Exception:
             log.exception("Failed to send restart notification to user %s", uid)
