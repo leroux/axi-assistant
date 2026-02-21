@@ -531,6 +531,55 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channels: list
             await send_system(channel, f"Agent **{session.name}** encountered an error during initial task.")
 
 
+# --- Spawn signal processing ---
+
+
+async def process_spawn_signal() -> None:
+    """Check for and process a pending .spawn_agent signal file."""
+    if not os.path.exists(SPAWN_SIGNAL_PATH):
+        return
+
+    try:
+        with open(SPAWN_SIGNAL_PATH) as f:
+            spawn_data = json.load(f)
+        os.remove(SPAWN_SIGNAL_PATH)
+
+        agent_name = spawn_data.get("name", "").strip()
+        agent_cwd = spawn_data.get("cwd", DEFAULT_CWD)
+        agent_prompt = spawn_data.get("prompt", "")
+
+        # Resolve DM channels for notifications
+        spawn_channels = []
+        for uid in ALLOWED_USER_IDS:
+            try:
+                user = await bot.fetch_user(uid)
+                spawn_channels.append(await user.create_dm())
+            except Exception:
+                continue
+
+        if not agent_name:
+            log.warning("Spawn signal missing 'name' field, ignoring")
+        elif agent_name == MASTER_AGENT_NAME:
+            log.warning("Cannot spawn agent with reserved name '%s'", MASTER_AGENT_NAME)
+            for ch in spawn_channels:
+                await send_system(ch, f"Cannot spawn agent with reserved name **{MASTER_AGENT_NAME}**.")
+        elif agent_name in agents:
+            log.warning("Agent '%s' already exists, ignoring spawn signal", agent_name)
+            for ch in spawn_channels:
+                await send_system(ch, f"Agent **{agent_name}** already exists.")
+        elif len(agents) >= MAX_AGENTS:
+            log.warning("Max agents (%d) reached, ignoring spawn signal", MAX_AGENTS)
+            for ch in spawn_channels:
+                await send_system(ch, f"Maximum number of agents ({MAX_AGENTS}) reached. Kill an agent first.")
+        else:
+            log.info("Spawning agent '%s' (cwd=%s)", agent_name, agent_cwd)
+            await spawn_agent(agent_name, agent_cwd, agent_prompt, spawn_channels)
+    except Exception:
+        log.exception("Error processing spawn signal")
+        if os.path.exists(SPAWN_SIGNAL_PATH):
+            os.remove(SPAWN_SIGNAL_PATH)
+
+
 # --- Message handler ---
 
 @bot.event
@@ -572,6 +621,11 @@ async def on_message(message):
         except TimeoutError:
             await _handle_query_timeout(session, message.channel)
 
+    # Process spawn signal immediately after query completes, so
+    # auto-switch happens right away instead of waiting for the
+    # next scheduler tick (up to 30s).
+    await process_spawn_signal()
+
     await bot.process_commands(message)
 
 
@@ -587,46 +641,7 @@ async def check_schedules():
         os._exit(42)
 
     # Spawn signal check
-    if os.path.exists(SPAWN_SIGNAL_PATH):
-        try:
-            with open(SPAWN_SIGNAL_PATH) as f:
-                spawn_data = json.load(f)
-            os.remove(SPAWN_SIGNAL_PATH)
-
-            agent_name = spawn_data.get("name", "").strip()
-            agent_cwd = spawn_data.get("cwd", DEFAULT_CWD)
-            agent_prompt = spawn_data.get("prompt", "")
-
-            # Resolve DM channels for notifications
-            spawn_channels = []
-            for uid in ALLOWED_USER_IDS:
-                try:
-                    user = await bot.fetch_user(uid)
-                    spawn_channels.append(await user.create_dm())
-                except Exception:
-                    continue
-
-            if not agent_name:
-                log.warning("Spawn signal missing 'name' field, ignoring")
-            elif agent_name == MASTER_AGENT_NAME:
-                log.warning("Cannot spawn agent with reserved name '%s'", MASTER_AGENT_NAME)
-                for ch in spawn_channels:
-                    await send_system(ch, f"Cannot spawn agent with reserved name **{MASTER_AGENT_NAME}**.")
-            elif agent_name in agents:
-                log.warning("Agent '%s' already exists, ignoring spawn signal", agent_name)
-                for ch in spawn_channels:
-                    await send_system(ch, f"Agent **{agent_name}** already exists.")
-            elif len(agents) >= MAX_AGENTS:
-                log.warning("Max agents (%d) reached, ignoring spawn signal", MAX_AGENTS)
-                for ch in spawn_channels:
-                    await send_system(ch, f"Maximum number of agents ({MAX_AGENTS}) reached. Kill an agent first.")
-            else:
-                log.info("Spawning agent '%s' (cwd=%s)", agent_name, agent_cwd)
-                await spawn_agent(agent_name, agent_cwd, agent_prompt, spawn_channels)
-        except Exception:
-            log.exception("Error processing spawn signal")
-            if os.path.exists(SPAWN_SIGNAL_PATH):
-                os.remove(SPAWN_SIGNAL_PATH)
+    await process_spawn_signal()
 
     master = get_master_session()
     if master is None or master.client is None:
