@@ -344,7 +344,14 @@ async def _receive_response_safe(client: ClaudeSDKClient):
 async def stream_response_to_channel(session: AgentSession, channel, show_awaiting_input: bool = True) -> None:
     """Stream Claude's response from a specific agent session to a Discord channel.
     Uses the public receive_response() API. Flushes the text buffer at each
-    assistant turn boundary so intermediate messages appear immediately."""
+    assistant turn boundary so intermediate messages appear immediately.
+
+    Respects ``visibility_mode``: when set to ``"active"`` only the active
+    agent's output is sent to Discord.  The response is always fully consumed
+    and stored in ``session.last_response`` regardless of visibility so that
+    ``/last-response`` still works."""
+    should_stream = (visibility_mode == "all") or (session.name == active_agent)
+
     text_buffer = ""
     full_response_parts: list[str] = []
     prefix = f"*{session.name}:* "
@@ -353,17 +360,21 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
         if not text.strip():
             return
         full_response_parts.append(text.lstrip())
-        text = prefix + text.lstrip()
-        await send_long(channel, text)
+        if should_stream:
+            text = prefix + text.lstrip()
+            await send_long(channel, text)
 
     async with channel.typing():
         async for msg in _receive_response_safe(session.client):
             # Drain and send any stderr messages first
-            for stderr_msg in drain_stderr(session):
-                stderr_text = stderr_msg.strip()
-                if stderr_text:
-                    for part in split_message(f"```\n{stderr_text}\n```"):
-                        await channel.send(part)
+            if should_stream:
+                for stderr_msg in drain_stderr(session):
+                    stderr_text = stderr_msg.strip()
+                    if stderr_text:
+                        for part in split_message(f"```\n{stderr_text}\n```"):
+                            await channel.send(part)
+            else:
+                drain_stderr(session)
 
             if isinstance(msg, StreamEvent):
                 # Real-time text deltas — accumulate in buffer
@@ -392,20 +403,23 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 await flush_text(to_send)
 
     # Flush any remaining stderr
-    for stderr_msg in drain_stderr(session):
-        stderr_text = stderr_msg.strip()
-        if stderr_text:
-            for part in split_message(f"```\n{stderr_text}\n```"):
-                await channel.send(part)
+    if should_stream:
+        for stderr_msg in drain_stderr(session):
+            stderr_text = stderr_msg.strip()
+            if stderr_text:
+                for part in split_message(f"```\n{stderr_text}\n```"):
+                    await channel.send(part)
+    else:
+        drain_stderr(session)
 
     # Flush remaining text buffer
     await flush_text(text_buffer)
 
-    # Store full response for /last-response
+    # Store full response for /last-response (always, regardless of visibility)
     session.last_response = "\n".join(full_response_parts)
 
     # Notify that the bot is done responding
-    if show_awaiting_input:
+    if show_awaiting_input and should_stream:
         await send_system(channel, "Bot has finished responding and is awaiting input.")
 
 
@@ -497,10 +511,10 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channels: list
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(prompt)
 
-                    if visibility_mode == "all" and channels:
+                    if channels:
                         await stream_response_to_channel(session, channels[0], show_awaiting_input=False)
                     else:
-                        # Consume response silently (don't stream to Discord)
+                        # No channel available — silently consume
                         async for msg in _receive_response_safe(session.client):
                             if isinstance(msg, ResultMessage):
                                 session.session_id = getattr(msg, "session_id", None)

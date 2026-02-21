@@ -685,6 +685,7 @@ dependencies = [
     { name = "claude-agent-sdk" },
     { name = "croniter" },
     { name = "discord-py" },
+    { name = "httpx" },
     { name = "python-dotenv" },
 ]
 
@@ -693,6 +694,7 @@ requires-dist = [
     { name = "claude-agent-sdk" },
     { name = "croniter" },
     { name = "discord-py" },
+    { name = "httpx" },
     { name = "python-dotenv" },
 ]
 
