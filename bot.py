@@ -25,16 +25,11 @@ log = logging.getLogger(__name__)
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 ALLOWED_USER_IDS = {int(uid.strip()) for uid in os.environ["ALLOWED_USER_IDS"].split(",")}
 DEFAULT_CWD = os.environ.get("DEFAULT_CWD", os.getcwd())
-ALLOWED_GUILD_IDS = {
-    int(gid.strip())
-    for gid in os.environ.get("ALLOWED_GUILD_IDS", "").split(",")
-    if gid.strip()
-}
 SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 
 # --- Discord bot setup ---
 
-intents = Intents(dm_messages=True, message_content=True, guild_messages=True, guilds=True)
+intents = Intents(dm_messages=True, message_content=True)
 bot = Bot(command_prefix="!", intents=intents)
 
 # --- Scheduler state ---
@@ -45,8 +40,6 @@ HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
 RESTART_SIGNAL_PATH = os.path.join(BOT_DIR, ".restart_requested")
 SPAWN_SIGNAL_PATH = os.path.join(BOT_DIR, ".spawn_agent")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
-SERVER_LOG_PATH = os.path.join(BOT_DIR, "server_log.jsonl")
-SERVER_LOG_MAX_LINES = 1000
 schedule_last_fired: dict[str, datetime] = {}
 
 # --- Agent session management ---
@@ -143,32 +136,6 @@ def prune_history() -> None:
             f.write("\n")
 
 
-def append_server_log(message) -> None:
-    """Append a server message to the rolling JSONL log."""
-    entry = json.dumps({
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "guild": getattr(message.guild, "name", "unknown"),
-        "guild_id": getattr(message.guild, "id", 0),
-        "channel": getattr(message.channel, "name", "unknown"),
-        "channel_id": message.channel.id,
-        "author": str(message.author),
-        "author_id": message.author.id,
-        "content": message.content[:500],
-    })
-    try:
-        with open(SERVER_LOG_PATH, "a") as f:
-            f.write(entry + "\n")
-
-        # Trim to max lines
-        with open(SERVER_LOG_PATH) as f:
-            lines = f.readlines()
-        if len(lines) > SERVER_LOG_MAX_LINES:
-            with open(SERVER_LOG_PATH, "w") as f:
-                f.writelines(lines[-SERVER_LOG_MAX_LINES:])
-    except OSError:
-        log.exception("Failed to write server log")
-
-
 SYSTEM_PROMPT = """\
 You are Axi, a personal assistant communicating over Discord DMs. \
 You are a complete, autonomous system — not just an LLM behind a bot. \
@@ -215,12 +182,40 @@ Rules for spawning agents:
 When the system notifies you about idle agent sessions, remind the user about them \
 and suggest they either switch to the agent to continue work or kill it to free resources.
 
-## Server Message Log
+## Discord Message Query Tool
 
-You have read-only access to Discord server messages via server_log.jsonl in your working directory. \
-This is a rolling JSONL log (max 1000 entries) of recent messages from allowed servers. \
-Each line is a JSON object with: ts, guild, channel, author, content. \
-When the user asks about server activity, read this file to answer their questions. \
+You can query Discord server message history on demand using discord_query.py in your working directory. \
+Run it via bash to look up messages, browse channel history, or search for content.
+
+### List servers the bot is in
+```
+python discord_query.py guilds
+```
+Returns JSONL with guild id and name. Use this to discover guild IDs.
+
+### List channels in a server
+```
+python discord_query.py channels <guild_id>
+```
+Returns JSONL with channel id, name, type, and category.
+
+### Fetch message history from a channel
+```
+python discord_query.py history <channel_id> [--limit 50] [--before DATETIME_OR_ID] [--after DATETIME_OR_ID] [--format text]
+```
+You can use guild_id:channel_name instead of a raw channel ID (e.g. `123456789:general`). \
+Default format is JSONL. Use --format text for human-readable output. \
+Accepts ISO datetimes (e.g. 2026-02-21T10:00:00+00:00) or Discord snowflake IDs for --before/--after. \
+Max 500 messages per query.
+
+### Search messages in a server
+```
+python discord_query.py search <guild_id> "search term" [--channel CHANNEL] [--author USERNAME] [--limit 50] [--format text]
+```
+Case-insensitive substring search over recent message history. \
+Use --channel to limit to a specific channel, --author to filter by username. \
+This scans recent history (not a full-text index), so results are limited to the last ~500 messages per channel.
+
 You do NOT respond in server channels — you only observe and report via DMs.\
 """
 
@@ -543,10 +538,8 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # Guild messages — log passively, never respond
+    # Guild messages — ignore (query tool handles history on demand)
     if message.guild:
-        if message.guild.id in ALLOWED_GUILD_IDS:
-            append_server_log(message)
         return
 
     # DM messages — route to the active agent

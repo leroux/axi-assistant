@@ -7,4 +7,5 @@ dependencies = [
     "claude-agent-sdk",
     "python-dotenv",
     "croniter",
+    "httpx",
 ]
