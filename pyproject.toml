@@ -1,0 +1,10 @@
+[project]
+name = "personal-assistant"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "discord.py",
+    "claude-agent-sdk",
+    "python-dotenv",
+    "croniter",
+]
