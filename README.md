@@ -1,6 +1,6 @@
 # Axi - Autonomous Personal Assistant
 
-Axi is a Discord-based personal assistant powered by Claude Code. It runs as a persistent, self-modifying system that communicates exclusively through Discord DMs. It features a multi-agent architecture, a cron/one-off schedule system, and an automatic restart-and-rollback mechanism that recovers from bad self-edits.
+Axi is a Discord-based personal assistant powered by Claude Code. It runs as a persistent, self-modifying system that communicates through Discord DMs with read-only server message logging. It features a multi-agent architecture, a cron/one-off schedule system, and an automatic restart-and-rollback mechanism that recovers from bad self-edits.
 
 ## Table of Contents
 
@@ -10,6 +10,7 @@ Axi is a Discord-based personal assistant powered by Claude Code. It runs as a p
 - [Schedule System](#schedule-system)
 - [Restart & Rollback System](#restart--rollback-system)
 - [Discord Integration](#discord-integration)
+- [Server Message Logging](#server-message-logging)
 - [Self-Modification](#self-modification)
 - [Configuration](#configuration)
 
@@ -45,6 +46,7 @@ run.sh (process supervisor)
 | `bot.py` | The entire application (~835 lines) |
 | `schedules.json` | User-defined schedule entries (gitignored, auto-created) |
 | `schedule_history.json` | Log of fired one-off events, pruned to 7 days (gitignored) |
+| `server_log.jsonl` | Rolling log of server messages, max 1000 entries (gitignored) |
 | `USER_PROFILE.md` | User preferences, read by Axi for personalization (gitignored) |
 | `.env` | Environment variables (gitignored) |
 
@@ -197,7 +199,7 @@ Plus **one of:**
 
 | Field | Description |
 |---|---|
-| `schedule` | Cron expression for recurring events (parsed by `croniter`) |
+| `schedule` | Cron expression for recurring events in `SCHEDULE_TIMEZONE` (parsed by `croniter`, DST-aware) |
 | `at` | ISO 8601 datetime with timezone for one-off events |
 
 #### Optional Fields
@@ -207,7 +209,6 @@ Plus **one of:**
 | `reset_context` | boolean | `false` | Wipe the master agent's conversation history before firing |
 | `agent` | boolean | `false` | Spawn a dedicated agent session instead of routing through the master |
 | `cwd` | string | `DEFAULT_CWD` | Working directory for the spawned agent (required when `agent` is `true`) |
-| `catch_up` | boolean | `false` | If `true`, fire missed recurring events on startup (by default, missed events are skipped) |
 
 ### How the Scheduler Works
 
@@ -232,9 +233,7 @@ The `check_schedules()` function runs as a `discord.ext.tasks.loop` every **30 s
 
 ### Startup Behavior
 
-On startup, all recurring events (without `catch_up: true`) have their `schedule_last_fired` pre-seeded to the most recent cron occurrence. This prevents every recurring event from firing immediately when the bot starts.
-
-Events with `catch_up: true` skip this seeding, so they **will** fire on startup if they were missed during downtime.
+On startup, recurring events that were due during downtime will fire on the first scheduler cycle (within 30 seconds of boot). The scheduler initializes `schedule_last_fired` on first encounter, so a newly added schedule will fire immediately if its most recent cron occurrence is in the past.
 
 ---
 
@@ -325,9 +324,9 @@ On first run, `run.sh` creates default versions of user data files if they don't
 
 ## Discord Integration
 
-### DM-Only Architecture
+### Architecture
 
-Axi operates exclusively through Discord DMs. The bot requests only two intents: `dm_messages` and `message_content`. There is no server/guild functionality.
+Axi communicates interactively through Discord DMs and passively logs messages from allowed servers. The bot requests four intents: `dm_messages`, `message_content`, `guild_messages`, and `guilds`.
 
 ### Authentication
 
@@ -336,17 +335,22 @@ All interactions are gated by `ALLOWED_USER_IDS`. Unauthorized users are silentl
 ### Message Flow
 
 ```
-User sends DM
+User sends message
   |
-  +-- Ignore if: bot message, non-DM channel, unauthorized user
-  +-- Get active session
-  |    +-- Not ready? --> "Claude session not ready yet."
-  |    +-- Query lock held? --> "Agent is busy."
-  |
-  +-- Acquire query_lock
-  +-- Update last_activity, reset idle state
-  +-- Send query to Claude SDK
-  +-- Stream response to Discord
+  +-- Ignore if: bot message
+  +-- Guild message?
+  |    +-- Guild in ALLOWED_GUILD_IDS? --> append to server_log.jsonl, return
+  |    +-- Otherwise --> ignore
+  +-- DM message?
+  |    +-- Unauthorized user? --> ignore
+  |    +-- Get active session
+  |    |    +-- Not ready? --> "Claude session not ready yet."
+  |    |    +-- Query lock held? --> "Agent is busy."
+  |    |
+  |    +-- Acquire query_lock
+  |    +-- Update last_activity, reset idle state
+  |    +-- Send query to Claude SDK
+  |    +-- Stream response to Discord
 ```
 
 ### Response Streaming
@@ -364,6 +368,38 @@ Responses are streamed to Discord in real-time using the Claude SDK's `include_p
 ### Unknown Message Type Handling
 
 The SDK's message stream can emit unknown message types (e.g., `rate_limit_event`) that would normally crash the parser. `_receive_response_safe()` wraps the raw message stream and silently skips unrecognized types instead of crashing.
+
+---
+
+## Server Message Logging
+
+Axi passively logs messages from allowed Discord servers to `server_log.jsonl`. It never responds in server channels — it only observes. You can ask Axi about server activity via DMs, and it will read the log file to answer.
+
+### Configuration
+
+Set `ALLOWED_GUILD_IDS` in `.env` to a comma-separated list of Discord server IDs to monitor. If empty or unset, no server messages are logged.
+
+### Log Format
+
+Each line in `server_log.jsonl` is a JSON object:
+
+```json
+{"ts": "2026-02-21T10:30:00+00:00", "guild": "My Server", "guild_id": 123456789, "channel": "general", "channel_id": 987654321, "author": "username#1234", "author_id": 111222333, "content": "message text here"}
+```
+
+### Limits
+
+- **Max entries:** 1000 lines (oldest trimmed automatically)
+- **Content truncation:** Message content capped at 500 characters per entry
+- The log file is gitignored and not persisted across clean installs
+
+### How It Works
+
+1. The `on_message` handler checks if the message is from a guild in `ALLOWED_GUILD_IDS`
+2. If so, it appends a JSONL entry with metadata (timestamp, guild, channel, author, content)
+3. After appending, if the file exceeds 1000 lines, it trims to keep the most recent entries
+4. The bot does **not** respond in the channel — it returns immediately after logging
+5. Axi's system prompt tells it about `server_log.jsonl` so it knows to read the file when asked
 
 ---
 
@@ -390,6 +426,8 @@ The [rollback system](#restart--rollback-system) exists specifically as a safety
 |---|---|---|
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `ALLOWED_USER_IDS` | Yes | Comma-separated Discord user IDs authorized to interact |
+| `ALLOWED_GUILD_IDS` | No | Comma-separated Discord server IDs for read-only message logging |
+| `SCHEDULE_TIMEZONE` | No | IANA timezone for cron expressions (e.g., `US/Pacific`). Defaults to `UTC`. Handles DST automatically. |
 | `DEFAULT_CWD` | No | Default working directory for agent sessions (defaults to the bot's directory) |
 
 ### Constants (in `bot.py`)
@@ -399,6 +437,7 @@ The [rollback system](#restart--rollback-system) exists specifically as a safety
 | `MASTER_AGENT_NAME` | `"axi-master"` | Reserved name for the primary agent |
 | `MAX_AGENTS` | `20` | Maximum concurrent agent sessions |
 | `IDLE_REMINDER_THRESHOLDS` | `[30m, 3h, 48h]` | Escalating idle notification intervals (cumulative) |
+| `SERVER_LOG_MAX_LINES` | `1000` | Maximum entries in the server message log |
 
 ### Constants (in `run.sh`)
 

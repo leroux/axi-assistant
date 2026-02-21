@@ -25,6 +25,7 @@ build/
 USER_PROFILE.md
 schedules.json
 schedule_history.json
+server_log.jsonl
 
 # Runtime signals
 .restart_requested

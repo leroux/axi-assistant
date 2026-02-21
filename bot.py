@@ -5,6 +5,7 @@ import threading
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from discord import Intents, app_commands
@@ -24,10 +25,16 @@ log = logging.getLogger(__name__)
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 ALLOWED_USER_IDS = {int(uid.strip()) for uid in os.environ["ALLOWED_USER_IDS"].split(",")}
 DEFAULT_CWD = os.environ.get("DEFAULT_CWD", os.getcwd())
+ALLOWED_GUILD_IDS = {
+    int(gid.strip())
+    for gid in os.environ.get("ALLOWED_GUILD_IDS", "").split(",")
+    if gid.strip()
+}
+SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 
 # --- Discord bot setup ---
 
-intents = Intents(dm_messages=True, message_content=True)
+intents = Intents(dm_messages=True, message_content=True, guild_messages=True, guilds=True)
 bot = Bot(command_prefix="!", intents=intents)
 
 # --- Scheduler state ---
@@ -38,6 +45,8 @@ HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
 RESTART_SIGNAL_PATH = os.path.join(BOT_DIR, ".restart_requested")
 SPAWN_SIGNAL_PATH = os.path.join(BOT_DIR, ".spawn_agent")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
+SERVER_LOG_PATH = os.path.join(BOT_DIR, "server_log.jsonl")
+SERVER_LOG_MAX_LINES = 1000
 schedule_last_fired: dict[str, datetime] = {}
 
 # --- Agent session management ---
@@ -128,6 +137,32 @@ def prune_history() -> None:
             f.write("\n")
 
 
+def append_server_log(message) -> None:
+    """Append a server message to the rolling JSONL log."""
+    entry = json.dumps({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "guild": getattr(message.guild, "name", "unknown"),
+        "guild_id": getattr(message.guild, "id", 0),
+        "channel": getattr(message.channel, "name", "unknown"),
+        "channel_id": message.channel.id,
+        "author": str(message.author),
+        "author_id": message.author.id,
+        "content": message.content[:500],
+    })
+    try:
+        with open(SERVER_LOG_PATH, "a") as f:
+            f.write(entry + "\n")
+
+        # Trim to max lines
+        with open(SERVER_LOG_PATH) as f:
+            lines = f.readlines()
+        if len(lines) > SERVER_LOG_MAX_LINES:
+            with open(SERVER_LOG_PATH, "w") as f:
+                f.writelines(lines[-SERVER_LOG_MAX_LINES:])
+    except OSError:
+        log.exception("Failed to write server log")
+
+
 SYSTEM_PROMPT = """\
 You are Axi, a personal assistant communicating over Discord DMs. \
 You are a complete, autonomous system — not just an LLM behind a bot. \
@@ -140,7 +175,7 @@ Read USER_PROFILE.md at the start of conversations to personalize your responses
 You can schedule events by editing schedules.json in your working directory. \
 Each entry MUST have a "name" field (short identifier) and a "prompt" field (the message/instructions for you to respond to). \
 For one-off events, use an "at" field with a timezone-aware ISO datetime (e.g. "2026-02-21T02:24:17+00:00"). \
-For recurring events, use a "schedule" field with a cron expression. \
+For recurring events, use a "schedule" field with a cron expression (cron times are in the SCHEDULE_TIMEZONE configured in .env, which handles DST automatically). \
 Optional fields: "reset_context" (boolean, resets conversation before firing), \
 "agent" (boolean, spawns a new agent session instead of routing through you — use this for heavy tasks to keep your context clean), \
 "cwd" (string, working directory for the agent — required when "agent" is true). \
@@ -172,7 +207,15 @@ Rules for spawning agents:
 - Only spawn agents when the user explicitly asks or when it clearly makes sense for the task.
 
 When the system notifies you about idle agent sessions, remind the user about them \
-and suggest they either switch to the agent to continue work or kill it to free resources.\
+and suggest they either switch to the agent to continue work or kill it to free resources.
+
+## Server Message Log
+
+You have read-only access to Discord server messages via server_log.jsonl in your working directory. \
+This is a rolling JSONL log (max 1000 entries) of recent messages from allowed servers. \
+Each line is a JSON object with: ts, guild, channel, author, content. \
+When the user asks about server activity, read this file to answer their questions. \
+You do NOT respond in server channels — you only observe and report via DMs.\
 """
 
 
@@ -420,12 +463,20 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channels: list
             await send_system(channel, f"Agent **{session.name}** encountered an error during initial task.")
 
 
-# --- DM message handler ---
+# --- Message handler ---
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
+
+    # Guild messages — log passively, never respond
+    if message.guild:
+        if message.guild.id in ALLOWED_GUILD_IDS:
+            append_server_log(message)
+        return
+
+    # DM messages — route to the active agent
     if message.channel.type != ChannelType.private:
         return
     if message.author.id not in ALLOWED_USER_IDS:
@@ -513,7 +564,8 @@ async def check_schedules():
 
     prune_history()
 
-    now = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    now_local = datetime.now(SCHEDULE_TIMEZONE)
     entries = load_schedules()
     entries_modified = False
 
@@ -537,18 +589,16 @@ async def check_schedules():
 
         try:
             if "schedule" in entry:
-                # Recurring event
+                # Recurring event — cron is evaluated in SCHEDULE_TIMEZONE
                 cron_expr = entry["schedule"]
                 if not croniter.is_valid(cron_expr):
                     log.warning("Invalid cron expression for %s: %s", name, cron_expr)
                     continue
 
-                last_occurrence = croniter(cron_expr, now).get_prev(datetime)
+                last_occurrence = croniter(cron_expr, now_local).get_prev(datetime)
 
                 if name not in schedule_last_fired:
-                    # First time seeing this event — seed it to prevent immediate fire
                     schedule_last_fired[name] = last_occurrence
-                    continue
 
                 if last_occurrence > schedule_last_fired[name]:
                     schedule_last_fired[name] = last_occurrence
@@ -581,11 +631,11 @@ async def check_schedules():
                 # One-off event
                 fire_at = datetime.fromisoformat(entry["at"])
 
-                if fire_at <= now:
+                if fire_at <= now_utc:
                     if entry.get("agent", False):
                         # Spawn a new agent instead of routing through master
                         log.info("Firing one-off agent event: %s", name)
-                        agent_name = f"{name}-{now.strftime('%Y%m%d-%H%M')}"
+                        agent_name = f"{name}-{now_utc.strftime('%Y%m%d-%H%M')}"
                         agent_cwd = entry.get("cwd", DEFAULT_CWD)
                         if agent_name in agents:
                             log.warning("Agent '%s' already exists, skipping", agent_name)
@@ -608,7 +658,7 @@ async def check_schedules():
                     # Remove from schedules and add to history
                     entries.remove(entry)
                     entries_modified = True
-                    append_history(entry, now)
+                    append_history(entry, now_utc)
 
         except Exception:
             log.exception("Error processing scheduled event %s", name)
@@ -627,7 +677,7 @@ async def check_schedules():
 
             # Cumulative threshold: sum of thresholds up to current reminder count
             cumulative = sum(IDLE_REMINDER_THRESHOLDS[:session.idle_reminder_count + 1], timedelta())
-            idle_duration = now - session.last_activity
+            idle_duration = now_utc - session.last_activity
 
             if idle_duration > cumulative:
                 idle_minutes = int(idle_duration.total_seconds() / 60)
@@ -777,15 +827,6 @@ async def on_ready():
     await start_session(MASTER_AGENT_NAME, DEFAULT_CWD, system_prompt=SYSTEM_PROMPT)
     await bot.tree.sync()
     log.info("Slash commands synced")
-
-    # Pre-seed schedule_last_fired for recurring events without catch_up
-    now = datetime.now(timezone.utc)
-    for entry in load_schedules():
-        name = entry.get("name")
-        cron_expr = entry.get("schedule")
-        if name and cron_expr and croniter.is_valid(cron_expr):
-            if not entry.get("catch_up", False):
-                schedule_last_fired[name] = croniter(cron_expr, now).get_prev(datetime)
 
     check_schedules.start()
     log.info("Schedule checker started")
