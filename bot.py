@@ -12,6 +12,7 @@ from discord.ext.commands import Bot
 from discord.ext import tasks
 from discord.enums import ChannelType
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, StreamEvent
 from croniter import croniter
 
@@ -268,6 +269,27 @@ async def send_long(channel, text: str) -> None:
 
 # --- Streaming response ---
 
+async def _receive_response_safe(client: ClaudeSDKClient):
+    """Wrapper around receive_response() that skips unknown message types.
+
+    The SDK's receive_messages() calls parse_message() internally and raises
+    MessageParseError on unrecognised types (e.g. rate_limit_event), which
+    terminates the async generator.  We bypass that by reading raw dicts from
+    the underlying query object and parsing them ourselves with error handling.
+    """
+    from claude_agent_sdk._internal.message_parser import parse_message
+
+    async for data in client._query.receive_messages():
+        try:
+            parsed = parse_message(data)
+        except MessageParseError:
+            logger.debug("Skipping unknown SDK message type: %s", data.get("type"))
+            continue
+        yield parsed
+        if isinstance(parsed, ResultMessage):
+            return
+
+
 async def stream_response_to_channel(session: AgentSession, channel) -> None:
     """Stream Claude's response from a specific agent session to a Discord channel.
     Uses the public receive_response() API. Flushes the text buffer at each
@@ -275,7 +297,7 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
     text_buffer = ""
 
     async with channel.typing():
-        async for msg in session.client.receive_response():
+        async for msg in _receive_response_safe(session.client):
             # Drain and send any stderr messages first
             for stderr_msg in drain_stderr(session):
                 stderr_text = stderr_msg.strip()
@@ -367,7 +389,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channels: list
             await session.client.query(prompt)
 
             # Consume response silently (don't stream to Discord)
-            async for msg in session.client.receive_response():
+            async for msg in _receive_response_safe(session.client):
                 if isinstance(msg, ResultMessage):
                     break
 
