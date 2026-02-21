@@ -40,6 +40,7 @@ HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
 RESTART_SIGNAL_PATH = os.path.join(BOT_DIR, ".restart_requested")
 SPAWN_SIGNAL_PATH = os.path.join(BOT_DIR, ".spawn_agent")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
+CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 schedule_last_fired: dict[str, datetime] = {}
 
 # --- Agent session management ---
@@ -974,6 +975,21 @@ async def on_ready():
             except OSError:
                 pass
 
+    # Check for crash analysis marker (written by run.sh after runtime crash)
+    crash_info = None
+    if os.path.exists(CRASH_ANALYSIS_MARKER_PATH):
+        try:
+            with open(CRASH_ANALYSIS_MARKER_PATH) as f:
+                crash_info = json.load(f)
+            os.remove(CRASH_ANALYSIS_MARKER_PATH)
+            log.info("Crash analysis marker found and consumed")
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Failed to read crash analysis marker: %s", e)
+            try:
+                os.remove(CRASH_ANALYSIS_MARKER_PATH)
+            except OSError:
+                pass
+
     for uid in ALLOWED_USER_IDS:
         try:
             user = await bot.fetch_user(uid)
@@ -1004,12 +1020,68 @@ async def on_ready():
                         "Stashed changes: `git stash list` / `git stash show -p` / `git stash pop`"
                     )
                 await dm.send("\n".join(msg_lines))
+            elif crash_info:
+                exit_code = crash_info.get("exit_code", "unknown")
+                uptime = crash_info.get("uptime_seconds", "?")
+                timestamp = crash_info.get("timestamp", "unknown")
+                await dm.send(
+                    f"*System:* **Runtime crash detected.**\n"
+                    f"Axi crashed after {uptime}s of uptime (exit code {exit_code}) at {timestamp}.\n"
+                    f"Spawning crash analysis agent..."
+                )
             else:
                 await dm.send("*System:* Axi restarted.")
             log.info("Sent restart notification to user %s", uid)
         except Exception:
             log.exception("Failed to send restart notification to user %s", uid)
         await asyncio.sleep(1)
+
+    # Spawn crash handler agent if runtime crash was detected
+    if crash_info:
+        crash_log = crash_info.get("crash_log", "(no crash log available)")
+        exit_code = crash_info.get("exit_code", "unknown")
+        uptime = crash_info.get("uptime_seconds", "?")
+        timestamp = crash_info.get("timestamp", "unknown")
+
+        crash_prompt = (
+            "The Discord bot (bot.py) crashed at runtime. Analyze the crash and create a plan to fix it.\n"
+            "\n"
+            "## Crash Details\n"
+            f"- Exit code: {exit_code}\n"
+            f"- Uptime before crash: {uptime} seconds\n"
+            f"- Timestamp: {timestamp}\n"
+            "\n"
+            "## Crash Log (last 200 lines of output)\n"
+            "```\n"
+            f"{crash_log}\n"
+            "```\n"
+            "\n"
+            "## Instructions\n"
+            "1. Analyze the traceback and error messages to identify the root cause.\n"
+            "2. Examine the relevant source code in this project directory.\n"
+            "3. Create a clear, detailed plan to fix the issue. Describe exactly which files "
+            "need to change and what the changes should be.\n"
+            "4. Do NOT apply any fixes yourself. Only produce the analysis and plan.\n"
+        )
+
+        # Resolve DM channels for the agent spawn notification
+        spawn_channels = []
+        for uid in ALLOWED_USER_IDS:
+            try:
+                user_obj = await bot.fetch_user(uid)
+                spawn_channels.append(await user_obj.create_dm())
+            except Exception:
+                continue
+
+        # Reclaim agent name if a previous crash-handler is still around
+        await reclaim_agent_name("crash-handler", spawn_channels)
+
+        if len(agents) < MAX_AGENTS:
+            await spawn_agent("crash-handler", BOT_DIR, crash_prompt, spawn_channels)
+        else:
+            log.warning("Max agents reached, cannot spawn crash handler")
+            for ch in spawn_channels:
+                await send_system(ch, "Could not spawn crash analysis agent — max agents reached.")
 
 
 if __name__ == "__main__":

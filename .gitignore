@@ -31,3 +31,5 @@ server_log.jsonl
 .restart_requested
 .spawn_agent
 .rollback_performed
+.crash_analysis
+.bot_output.log

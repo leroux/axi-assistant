@@ -3,8 +3,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 RESTART_EXIT_CODE=42
-CRASH_THRESHOLD=30
+CRASH_THRESHOLD=60
 ROLLBACK_MARKER=".rollback_performed"
+CRASH_ANALYSIS_MARKER=".crash_analysis"
+LOG_FILE=".bot_output.log"
+MAX_RUNTIME_CRASHES=3
 
 # Create default user data files if they don't exist
 [ -f USER_PROFILE.md ] || cat > USER_PROFILE.md <<'EOF'
@@ -17,6 +20,7 @@ EOF
 [ -f schedule_history.json ] || echo '[]' > schedule_history.json
 
 rollback_attempted=0
+runtime_crash_count=0
 
 while true; do
     start_time=$(date +%s)
@@ -24,13 +28,16 @@ while true; do
     # Record the commit hash before launch so we can revert committed changes
     pre_launch_commit=$(git rev-parse HEAD 2>/dev/null || echo "")
 
-    code=0
-    uv run python bot.py || code=$?
+    set +o pipefail
+    uv run python bot.py 2>&1 | tee "$LOG_FILE"
+    code=${PIPESTATUS[0]}
+    set -o pipefail
 
     # Normal restart requested — reset rollback flag and relaunch
     if [ $code -eq $RESTART_EXIT_CODE ]; then
         echo "Restart requested, relaunching..."
         rollback_attempted=0
+        runtime_crash_count=0
         pre_launch_commit=$(git rev-parse HEAD 2>/dev/null || echo "")
         continue
     fi
@@ -46,8 +53,33 @@ while true; do
     echo "Bot exited with code $code after ${elapsed}s."
 
     if [ $elapsed -ge $CRASH_THRESHOLD ]; then
-        echo "Crash after ${elapsed}s (>= ${CRASH_THRESHOLD}s threshold). Not a startup crash. Stopping."
-        exit $code
+        runtime_crash_count=$((runtime_crash_count + 1))
+        echo "Runtime crash detected (${elapsed}s >= ${CRASH_THRESHOLD}s threshold). Consecutive count: $runtime_crash_count/$MAX_RUNTIME_CRASHES."
+
+        if [ $runtime_crash_count -ge $MAX_RUNTIME_CRASHES ]; then
+            echo "Max consecutive runtime crashes ($MAX_RUNTIME_CRASHES) reached. Stopping."
+            exit $code
+        fi
+
+        # Save last 200 lines of the log for crash analysis
+        crash_log_snapshot=".crash_log_snapshot"
+        tail -n 200 "$LOG_FILE" > "$crash_log_snapshot" 2>/dev/null || true
+
+        # Write crash analysis marker for bot.py to read on next startup
+        crash_log_content=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" < "$crash_log_snapshot" 2>/dev/null || echo '""')
+        cat > "$CRASH_ANALYSIS_MARKER" <<CRASH_EOF
+{
+    "exit_code": $code,
+    "uptime_seconds": $elapsed,
+    "timestamp": "$(date -Iseconds)",
+    "crash_log": $crash_log_content
+}
+CRASH_EOF
+        rm -f "$crash_log_snapshot"
+
+        echo "Crash analysis marker written. Relaunching for runtime crash recovery..."
+        rollback_attempted=0
+        continue
     fi
 
     echo "Quick crash detected (${elapsed}s < ${CRASH_THRESHOLD}s threshold)."
