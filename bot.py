@@ -813,15 +813,28 @@ async def on_ready():
                 exit_code = rollback_info.get("exit_code", "unknown")
                 uptime = rollback_info.get("uptime_seconds", "?")
                 timestamp = rollback_info.get("timestamp", "unknown")
-                await dm.send(
-                    f"*System:* **Automatic rollback performed.**\n"
-                    f"Axi crashed on startup (exit code {exit_code} after {uptime}s) "
-                    f"at {timestamp}.\n"
-                    f"Uncommitted changes were stashed and reverted to the last "
-                    f"committed version.\n"
-                    f"To inspect: `git stash list` and `git stash show -p`\n"
-                    f"To restore: `git stash pop`"
-                )
+                details = rollback_info.get("rollback_details", "").strip()
+                pre_commit = rollback_info.get("pre_launch_commit", "")
+                crashed_commit = rollback_info.get("crashed_commit", "")
+
+                msg_lines = [
+                    f"*System:* **Automatic rollback performed.**",
+                    f"Axi crashed on startup (exit code {exit_code} after {uptime}s) at {timestamp}.",
+                ]
+                if details:
+                    msg_lines.append(f"Actions taken: {details}.")
+                if pre_commit and crashed_commit and pre_commit != crashed_commit:
+                    msg_lines.append(
+                        f"Reverted from `{crashed_commit[:7]}` to `{pre_commit[:7]}`."
+                    )
+                    msg_lines.append(
+                        "Reverted commits are still in the reflog: `git reflog`"
+                    )
+                if "stashed" in details:
+                    msg_lines.append(
+                        "Stashed changes: `git stash list` / `git stash show -p` / `git stash pop`"
+                    )
+                await dm.send("\n".join(msg_lines))
             else:
                 await dm.send("*System:* Axi restarted.")
             log.info("Sent restart notification to user %s", uid)

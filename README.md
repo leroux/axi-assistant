@@ -256,41 +256,50 @@ The restart and rollback system is split across two files: `run.sh` (process sup
 
 ### Auto-Rollback Flow
 
+The rollback system handles both **uncommitted changes** and **committed changes** made since the last launch.
+
+Before each launch, `run.sh` records the current commit hash (`pre_launch_commit`). If a quick crash occurs, it compares `HEAD` against this snapshot to detect new commits.
+
 ```
-1. Axi edits bot.py with a bug
+1. Axi edits bot.py with a bug (committed or uncommitted)
 2. Axi restarts (exit code 42)
 3. bot.py crashes on startup (non-zero exit, <30s uptime)
 4. run.sh detects "quick crash" (uptime < CRASH_THRESHOLD of 30s)
-5. run.sh checks for uncommitted git changes
-6. run.sh stashes all changes: git stash push --include-untracked -m "auto-rollback: ..."
-7. run.sh writes .rollback_performed marker with crash details
-8. run.sh sets rollback_attempted=1 (prevents infinite loops)
-9. run.sh re-launches bot.py with the last committed code
-10. on_ready() reads .rollback_performed, sends detailed notification:
+5. run.sh checks for rollback-able changes:
+   a. Uncommitted changes? --> git stash push --include-untracked
+   b. HEAD moved since pre-launch? --> git reset --hard <pre_launch_commit>
+6. run.sh writes .rollback_performed marker with crash details
+7. run.sh sets rollback_attempted=1 (prevents infinite loops)
+8. run.sh re-launches bot.py with the pre-launch code
+9. on_ready() reads .rollback_performed, sends detailed notification:
 
     "Automatic rollback performed.
      Axi crashed on startup (exit code 1 after 2s) at 2026-02-20T...
-     Uncommitted changes were stashed and reverted to the last committed version.
-     To inspect: git stash list and git stash show -p
-     To restore: git stash pop"
+     Actions taken: uncommitted changes stashed + 2 commit(s) reverted.
+     Reverted from abc1234 to def5678.
+     Reverted commits are still in the reflog: git reflog
+     Stashed changes: git stash list / git stash show -p / git stash pop"
 ```
+
+Both rollback types can happen simultaneously — if Axi made some commits *and* left uncommitted changes, the stash happens first, then the reset.
 
 ### run.sh Decision Tree
 
 ```
 bot.py exits
   |
-  +-- exit code 42? --> restart (reset rollback flag, loop)
+  +-- exit code 42? --> restart (reset rollback flag, update pre_launch_commit, loop)
   +-- exit code 0?  --> clean stop, exit supervisor
   +-- uptime >= 30s? --> not a startup crash, exit supervisor
   +-- uptime < 30s (quick crash):
        |
        +-- rollback already attempted? --> stop (prevent infinite loop)
        +-- not in a git repo? --> stop
-       +-- no uncommitted changes? --> stop
-       +-- uncommitted changes exist:
-            +-- git stash push --include-untracked
-            +-- write .rollback_performed marker (JSON with exit_code, uptime, stash_output, timestamp)
+       +-- no uncommitted changes AND HEAD unchanged? --> stop (nothing to roll back)
+       +-- changes exist:
+            +-- if uncommitted changes: git stash push --include-untracked
+            +-- if HEAD != pre_launch_commit: git reset --hard <pre_launch_commit>
+            +-- write .rollback_performed marker (JSON)
             +-- set rollback_attempted=1
             +-- re-launch bot.py
 ```

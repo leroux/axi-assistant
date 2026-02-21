@@ -20,6 +20,10 @@ rollback_attempted=0
 
 while true; do
     start_time=$(date +%s)
+
+    # Record the commit hash before launch so we can revert committed changes
+    pre_launch_commit=$(git rev-parse HEAD 2>/dev/null || echo "")
+
     code=0
     uv run python bot.py || code=$?
 
@@ -27,6 +31,7 @@ while true; do
     if [ $code -eq $RESTART_EXIT_CODE ]; then
         echo "Restart requested, relaunching..."
         rollback_attempted=0
+        pre_launch_commit=$(git rev-parse HEAD 2>/dev/null || echo "")
         continue
     fi
 
@@ -58,29 +63,54 @@ while true; do
         exit $code
     fi
 
-    # Check for uncommitted changes to roll back
-    if git diff --quiet HEAD 2>/dev/null && git diff --cached --quiet 2>/dev/null; then
-        echo "No uncommitted changes to roll back. Stopping."
+    current_commit=$(git rev-parse HEAD 2>/dev/null || echo "")
+    has_uncommitted=0
+    git diff --quiet HEAD 2>/dev/null && git diff --cached --quiet 2>/dev/null || has_uncommitted=1
+
+    # Nothing to roll back — no new commits and no uncommitted changes
+    if [ "$current_commit" = "$pre_launch_commit" ] && [ $has_uncommitted -eq 0 ]; then
+        echo "No changes (committed or uncommitted) to roll back. Stopping."
         exit $code
     fi
 
-    # Perform the rollback — stash bad changes and revert to last commit
-    echo "Uncommitted changes detected. Stashing and rolling back..."
-    stash_output=$(git stash push --include-untracked -m "auto-rollback: crash with exit code $code" 2>&1)
-    echo "$stash_output"
+    rollback_details=""
+
+    # Stash uncommitted changes first (if any)
+    if [ $has_uncommitted -eq 1 ]; then
+        echo "Stashing uncommitted changes..."
+        stash_output=$(git stash push --include-untracked -m "auto-rollback: crash with exit code $code" 2>&1)
+        echo "$stash_output"
+        rollback_details="uncommitted changes stashed"
+    fi
+
+    # Revert committed changes if HEAD moved since pre-launch
+    if [ -n "$pre_launch_commit" ] && [ "$current_commit" != "$pre_launch_commit" ]; then
+        new_commits=$(git rev-list --count "$pre_launch_commit".."$current_commit" 2>/dev/null || echo "?")
+        echo "HEAD moved from ${pre_launch_commit:0:7} to ${current_commit:0:7} ($new_commits new commit(s)). Resetting..."
+        git reset --hard "$pre_launch_commit"
+        if [ -n "$rollback_details" ]; then
+            rollback_details="$rollback_details + $new_commits commit(s) reverted"
+        else
+            rollback_details="$new_commits commit(s) reverted"
+        fi
+    fi
 
     # Write rollback marker for bot.py to read on next startup
-    stash_output_json=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$stash_output")
+    stash_output_json=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "${stash_output:-}")
+    rollback_details_json=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$rollback_details")
     cat > "$ROLLBACK_MARKER" <<ROLLBACK_EOF
 {
     "exit_code": $code,
     "uptime_seconds": $elapsed,
     "stash_output": $stash_output_json,
+    "rollback_details": $rollback_details_json,
+    "pre_launch_commit": "$pre_launch_commit",
+    "crashed_commit": "$current_commit",
     "timestamp": "$(date -Iseconds)"
 }
 ROLLBACK_EOF
 
-    echo "Rollback marker written. Relaunching with last committed code..."
+    echo "Rollback marker written. Relaunching with pre-launch code (${pre_launch_commit:0:7})..."
     rollback_attempted=1
     continue
 done
