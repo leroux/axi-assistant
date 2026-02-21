@@ -14,7 +14,14 @@ from discord.ext import tasks
 from discord.enums import ChannelType
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 from claude_agent_sdk._errors import MessageParseError
-from claude_agent_sdk.types import AssistantMessage, ResultMessage, StreamEvent
+from claude_agent_sdk.types import (
+    AssistantMessage,
+    ResultMessage,
+    StreamEvent,
+    ToolPermissionContext,
+    PermissionResultAllow,
+    PermissionResultDeny,
+)
 from croniter import croniter
 
 load_dotenv()
@@ -89,6 +96,38 @@ def drain_stderr(session: AgentSession) -> list[str]:
         msgs = list(session.stderr_buffer)
         session.stderr_buffer.clear()
     return msgs
+
+
+async def _as_stream(text: str):
+    """Wrap a string prompt as an AsyncIterable for streaming mode (required by can_use_tool)."""
+    yield {
+        "type": "user",
+        "session_id": "",
+        "message": {"role": "user", "content": text},
+        "parent_tool_use_id": None,
+    }
+
+
+def make_cwd_permission_callback(allowed_cwd: str):
+    """Create a can_use_tool callback that restricts file writes to allowed_cwd."""
+    allowed = os.path.realpath(allowed_cwd)
+
+    async def _check_permission(
+        tool_name: str, tool_input: dict, ctx: ToolPermissionContext,
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        # File-writing tools — check path is within cwd
+        if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+            path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+            resolved = os.path.realpath(path)
+            if resolved == allowed or resolved.startswith(allowed + os.sep):
+                return PermissionResultAllow()
+            return PermissionResultDeny(
+                message=f"Access denied: {path} is outside working directory {allowed}"
+            )
+        # Everything else (Bash handled by sandbox, reads allowed everywhere)
+        return PermissionResultAllow()
+
+    return _check_permission
 
 
 # --- Schedule helpers ---
@@ -231,12 +270,14 @@ async def start_session(name: str, cwd: str, system_prompt: str | None = None, r
         system_prompt=system_prompt,
     )
     options = ClaudeAgentOptions(
-        permission_mode="bypassPermissions",
+        permission_mode="default",
+        can_use_tool=make_cwd_permission_callback(cwd),
         cwd=cwd,
         system_prompt=system_prompt,
         include_partial_messages=True,
         stderr=make_stderr_callback(session),
         resume=resume,
+        sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
     )
     session.client = ClaudeSDKClient(options=options)
     await session.client.__aenter__()
@@ -510,7 +551,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channels: list
             drain_stderr(session)
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT):
-                    await session.client.query(prompt)
+                    await session.client.query(_as_stream(prompt))
 
                     if channels:
                         await stream_response_to_channel(session, channels[0], show_awaiting_input=False)
@@ -631,7 +672,7 @@ async def on_message(message):
         drain_stderr(session)
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
-                await session.client.query(message.content)
+                await session.client.query(_as_stream(message.content))
                 await stream_response_to_channel(session, message.channel)
         except TimeoutError:
             await _handle_query_timeout(session, message.channel)
