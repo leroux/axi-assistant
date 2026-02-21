@@ -96,7 +96,7 @@ def append_history(entry: dict, fired_at: datetime) -> None:
 
 def prune_history() -> None:
     history = load_history()
-    cutoff = datetime.now() - timedelta(days=7)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     pruned = [h for h in history if datetime.fromisoformat(h["fired_at"]) > cutoff]
     if len(pruned) != len(history):
         with open(HISTORY_PATH, "w") as f:
@@ -118,9 +118,10 @@ For recurring events, use a "schedule" field with a cron expression. \
 Optional fields: "reset_context" (boolean, resets conversation before firing). \
 Example one-off: {"name": "reminder", "prompt": "Say hello in 10 languages", "at": "2026-02-21T03:00:00+00:00"}. \
 Example recurring: {"name": "daily-standup", "prompt": "Ask me what I'm working on today", "schedule": "0 9 * * *"}. \
-To restart yourself (e.g., after editing your own source code), create the file \
+To restart yourself, create the file \
 .restart_requested in your project directory (e.g., `touch .restart_requested`). \
-The system will automatically restart within 30 seconds.\
+The system will automatically restart within 30 seconds. \
+Only restart when the user explicitly asks you to — do not restart after every self-edit.\
 """
 
 
@@ -290,18 +291,17 @@ async def check_schedules():
     entries = load_schedules()
     entries_modified = False
 
-    # Resolve DM channel for scheduled events
-    channel = None
+    # Resolve DM channels for all approved members
+    channels = []
     for uid in ALLOWED_USER_IDS:
         try:
             user = await bot.fetch_user(uid)
-            channel = await user.create_dm()
-            break
+            channels.append(await user.create_dm())
         except Exception:
             continue
 
-    if channel is None:
-        log.warning("Could not resolve DM channel for scheduled events")
+    if not channels:
+        log.warning("Could not resolve any DM channels for scheduled events")
         return
 
     for entry in list(entries):
@@ -332,7 +332,8 @@ async def check_schedules():
                     async with query_lock:
                         log.info("Firing recurring event: %s", name)
                         schedule_last_fired[name] = last_occurrence
-                        await run_scheduled_event(entry, channel)
+                        for channel in channels:
+                            await run_scheduled_event(entry, channel)
 
             elif "at" in entry:
                 # One-off event
@@ -345,7 +346,8 @@ async def check_schedules():
 
                     async with query_lock:
                         log.info("Firing one-off event: %s", name)
-                        await run_scheduled_event(entry, channel)
+                        for channel in channels:
+                            await run_scheduled_event(entry, channel)
 
                     # Remove from schedules and add to history
                     entries.remove(entry)
@@ -388,7 +390,7 @@ async def on_ready():
     log.info("Slash commands synced")
 
     # Pre-seed schedule_last_fired for recurring events without catch_up
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     for entry in load_schedules():
         name = entry.get("name")
         cron_expr = entry.get("schedule")

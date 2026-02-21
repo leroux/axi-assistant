@@ -1,1 +1,12 @@
-[]
+[
+  {
+    "name": "hello-languages",
+    "prompt": "Say hello in 10 different languages. Keep it simple \u2014 just list them out.",
+    "fired_at": "2026-02-21T02:38:06.962188+00:00"
+  },
+  {
+    "name": "hello-10-langs",
+    "prompt": "Say hello in 10 different languages. Just the greetings, keep it simple.",
+    "fired_at": "2026-02-21T02:51:46.297135+00:00"
+  }
+]
