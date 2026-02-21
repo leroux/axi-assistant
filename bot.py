@@ -3,10 +3,11 @@ import json
 import asyncio
 import threading
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from discord import Intents
+from discord import Intents, app_commands
 from discord.ext.commands import Bot
 from discord.ext import tasks
 from discord.enums import ChannelType
@@ -27,34 +28,54 @@ DEFAULT_CWD = os.environ.get("DEFAULT_CWD", os.getcwd())
 intents = Intents(dm_messages=True, message_content=True)
 bot = Bot(command_prefix="!", intents=intents)
 
-# --- Claude session state ---
-
-client: ClaudeSDKClient | None = None
-current_cwd: str = DEFAULT_CWD
-
-# Thread-safe stderr buffer
-stderr_lock = threading.Lock()
-stderr_buffer: list[str] = []
-
 # --- Scheduler state ---
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEDULES_PATH = os.path.join(BOT_DIR, "schedules.json")
 HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
 RESTART_SIGNAL_PATH = os.path.join(BOT_DIR, ".restart_requested")
+SPAWN_SIGNAL_PATH = os.path.join(BOT_DIR, ".spawn_agent")
 schedule_last_fired: dict[str, datetime] = {}
-query_lock = asyncio.Lock()
+
+# --- Agent session management ---
+
+MASTER_AGENT_NAME = "axi-master"
+MAX_AGENTS = 20
+IDLE_REMINDER_THRESHOLDS = [timedelta(minutes=30), timedelta(hours=3), timedelta(hours=48)]
 
 
-def stderr_callback(text: str) -> None:
-    with stderr_lock:
-        stderr_buffer.append(text)
+@dataclass
+class AgentSession:
+    name: str
+    client: ClaudeSDKClient | None = None
+    cwd: str = ""
+    query_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    stderr_buffer: list[str] = field(default_factory=list)
+    stderr_lock: threading.Lock = field(default_factory=threading.Lock)
+    last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    system_prompt: str | None = None
+    last_idle_notified: datetime | None = None
+    idle_reminder_count: int = 0
 
 
-def drain_stderr() -> list[str]:
-    with stderr_lock:
-        msgs = list(stderr_buffer)
-        stderr_buffer.clear()
+agents: dict[str, AgentSession] = {}
+active_agent: str = MASTER_AGENT_NAME
+
+
+def make_stderr_callback(session: AgentSession):
+    """Create a stderr callback bound to a specific agent session."""
+    def callback(text: str) -> None:
+        with session.stderr_lock:
+            session.stderr_buffer.append(text)
+    return callback
+
+
+def drain_stderr(session: AgentSession) -> list[str]:
+    """Drain stderr buffer for a specific agent session."""
+    with session.stderr_lock:
+        msgs = list(session.stderr_buffer)
+        session.stderr_buffer.clear()
     return msgs
 
 
@@ -117,45 +138,105 @@ You can schedule events by editing schedules.json in your working directory. \
 Each entry MUST have a "name" field (short identifier) and a "prompt" field (the message/instructions for you to respond to). \
 For one-off events, use an "at" field with a timezone-aware ISO datetime (e.g. "2026-02-21T02:24:17+00:00"). \
 For recurring events, use a "schedule" field with a cron expression. \
-Optional fields: "reset_context" (boolean, resets conversation before firing). \
+Optional fields: "reset_context" (boolean, resets conversation before firing), \
+"agent" (boolean, spawns a new agent session instead of routing through you — use this for heavy tasks to keep your context clean), \
+"cwd" (string, working directory for the agent — required when "agent" is true). \
 Example one-off: {"name": "reminder", "prompt": "Say hello in 10 languages", "at": "2026-02-21T03:00:00+00:00"}. \
 Example recurring: {"name": "daily-standup", "prompt": "Ask me what I'm working on today", "schedule": "0 9 * * *"}. \
+Example agent schedule: {"name": "weekly-cleanup", "prompt": "Clean up unused imports", "schedule": "0 9 * * 1", "cwd": "/home/pride/coding-projects/my-app", "agent": true}. \
 To restart yourself, create the file \
 .restart_requested in your project directory (e.g., `touch .restart_requested`). \
 The system will automatically restart within 30 seconds. \
-Only restart when the user explicitly asks you to — do not restart after every self-edit.\
+Only restart when the user explicitly asks you to — do not restart after every self-edit.
+
+## Agent Spawning
+
+You can spawn independent Claude Code agent sessions to work on tasks autonomously. \
+To spawn an agent, create a file called `.spawn_agent` in your project directory \
+(~/coding-projects/personal-assistant/) with the following JSON format:
+
+{"name": "agent-name", "cwd": "/absolute/path/to/project", "prompt": "Initial instructions for the agent"}
+
+Rules for spawning agents:
+- "name" must be unique, short, and descriptive (e.g. "feature-auth", "fix-bug-123"). No spaces.
+- "cwd" must be the absolute path to the project directory the agent should work in.
+- "prompt" is the initial task description. Be specific and detailed since the agent works independently.
+- The spawned agent is a standard Claude Code session — it does NOT have your Axi personality or custom instructions.
+- The system picks up the file within 30 seconds and spawns the session automatically.
+- The user will be notified when the agent starts and when it finishes its initial task.
+- The user can interact with spawned agents using /switch-agent, view them with /list-agents, and terminate them with /kill-agent.
+- You cannot spawn an agent named "axi-master" — that is reserved for you.
+- Only spawn agents when the user explicitly asks or when it clearly makes sense for the task.
+
+When the system notifies you about idle agent sessions, remind the user about them \
+and suggest they either switch to the agent to continue work or kill it to free resources.\
 """
 
 
-async def start_session(cwd: str) -> None:
-    global client, current_cwd
-    current_cwd = cwd
+# --- Session lifecycle ---
+
+async def start_session(name: str, cwd: str, system_prompt: str | None = None) -> AgentSession:
+    """Start a new named Claude session. Returns the AgentSession."""
+    session = AgentSession(
+        name=name,
+        cwd=cwd,
+        system_prompt=system_prompt,
+    )
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=cwd,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         include_partial_messages=True,
-        stderr=stderr_callback,
+        stderr=make_stderr_callback(session),
     )
-    client = ClaudeSDKClient(options=options)
-    await client.__aenter__()
-    log.info("Claude session started (cwd=%s)", cwd)
+    session.client = ClaudeSDKClient(options=options)
+    await session.client.__aenter__()
+    agents[name] = session
+    log.info("Claude session '%s' started (cwd=%s)", name, cwd)
+    return session
 
 
-async def end_session() -> None:
-    global client
-    if client is not None:
+async def end_session(name: str) -> None:
+    """End a named Claude session and remove it from the registry."""
+    session = agents.get(name)
+    if session is None:
+        return
+    if session.client is not None:
         try:
-            await asyncio.wait_for(client.__aexit__(None, None, None), timeout=5.0)
+            await asyncio.wait_for(session.client.__aexit__(None, None, None), timeout=5.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
-            log.warning("Claude session shutdown timed out or was cancelled")
-        client = None
-    log.info("Claude session ended")
+            log.warning("Claude session '%s' shutdown timed out or was cancelled", name)
+        except RuntimeError as e:
+            # anyio cancel scopes must be exited from the same task that entered
+            # them. When end_session is called from a different task (e.g. a
+            # Discord command handler) than the one that called __aenter__, this
+            # error is expected and the session resources are already released.
+            if "cancel scope" in str(e):
+                log.debug("Claude session '%s' cross-task cleanup (expected): %s", name, e)
+            else:
+                raise
+        session.client = None
+    agents.pop(name, None)
+    log.info("Claude session '%s' ended", name)
 
 
-async def reset_session(cwd: str | None = None) -> None:
-    await end_session()
-    await start_session(cwd or current_cwd)
+async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
+    """Reset a named session. Preserves its system prompt."""
+    session = agents.get(name)
+    old_cwd = session.cwd if session else DEFAULT_CWD
+    old_prompt = session.system_prompt if session else SYSTEM_PROMPT
+    await end_session(name)
+    return await start_session(name, cwd or old_cwd, old_prompt)
+
+
+def get_active_session() -> AgentSession | None:
+    """Get the currently active agent session."""
+    return agents.get(active_agent)
+
+
+def get_master_session() -> AgentSession | None:
+    """Get the axi-master session."""
+    return agents.get(MASTER_AGENT_NAME)
 
 
 # --- Message splitting ---
@@ -186,18 +267,18 @@ async def send_long(channel, text: str) -> None:
 
 # --- Streaming response ---
 
-async def stream_response_to_channel(channel) -> None:
-    """Stream Claude's response to a Discord channel.
-    Iterates client._query.receive_messages(), extracts text_delta,
+async def stream_response_to_channel(session: AgentSession, channel) -> None:
+    """Stream Claude's response from a specific agent session to a Discord channel.
+    Iterates session.client._query.receive_messages(), extracts text_delta,
     drains stderr, and flushes at 1800 chars."""
     text_buffer = ""
 
     async with channel.typing():
-        async for data in client._query.receive_messages():
+        async for data in session.client._query.receive_messages():
             msg_type = data.get("type")
 
             # Drain and send any stderr messages first
-            for stderr_msg in drain_stderr():
+            for stderr_msg in drain_stderr(session):
                 stderr_text = stderr_msg.strip()
                 if stderr_text:
                     for part in split_message(f"```\n{stderr_text}\n```"):
@@ -224,7 +305,7 @@ async def stream_response_to_channel(channel) -> None:
                     await send_long(channel, to_send)
 
     # Flush any remaining stderr
-    for stderr_msg in drain_stderr():
+    for stderr_msg in drain_stderr(session):
         stderr_text = stderr_msg.strip()
         if stderr_text:
             for part in split_message(f"```\n{stderr_text}\n```"):
@@ -238,14 +319,62 @@ async def stream_response_to_channel(channel) -> None:
 # --- Scheduled event runner ---
 
 async def run_scheduled_event(entry: dict, channel) -> None:
-    """Run a scheduled event: optionally reset context, send header, query Claude, stream response."""
+    """Run a scheduled event using the master session."""
+    master = get_master_session()
+    if master is None or master.client is None:
+        return
+
     if entry.get("reset_context", False):
-        await reset_session()
+        await reset_session(MASTER_AGENT_NAME)
+        master = get_master_session()
 
     await channel.send(f"**[Scheduled: {entry['name']}]**")
-    drain_stderr()
-    await client.query(entry["prompt"])
-    await stream_response_to_channel(channel)
+    drain_stderr(master)
+    await master.client.query(entry["prompt"])
+    await stream_response_to_channel(master, channel)
+
+
+# --- Agent spawning ---
+
+async def spawn_agent(name: str, cwd: str, initial_prompt: str, channels: list) -> None:
+    """Spawn a new agent session and run its initial prompt in the background."""
+    for channel in channels:
+        await channel.send(f"Spawning agent **{name}** in `{cwd}`...")
+
+    session = await start_session(name, cwd, system_prompt=None)
+
+    if not initial_prompt:
+        for channel in channels:
+            await channel.send(f"Agent **{name}** is ready. Use `/switch-agent` to interact.")
+        return
+
+    asyncio.create_task(_run_initial_prompt(session, initial_prompt, channels))
+
+
+async def _run_initial_prompt(session: AgentSession, prompt: str, channels: list) -> None:
+    """Run the initial prompt for a spawned agent. Notifies when done."""
+    try:
+        async with session.query_lock:
+            session.last_activity = datetime.now(timezone.utc)
+            drain_stderr(session)
+            await session.client.query(prompt)
+
+            # Consume response silently (don't stream to Discord)
+            async for data in session.client._query.receive_messages():
+                if data.get("type") == "result":
+                    break
+
+            session.last_activity = datetime.now(timezone.utc)
+
+        for channel in channels:
+            await channel.send(
+                f"Agent **{session.name}** finished initial task. "
+                f"Use `/switch-agent` to interact with it."
+            )
+    except Exception:
+        log.exception("Error running initial prompt for agent '%s'", session.name)
+        for channel in channels:
+            await channel.send(f"Agent **{session.name}** encountered an error during initial task.")
 
 
 # --- DM message handler ---
@@ -258,18 +387,25 @@ async def on_message(message):
         return
     if message.author.id not in ALLOWED_USER_IDS:
         return
-    if client is None:
+
+    session = get_active_session()
+    if session is None or session.client is None:
         await message.channel.send("Claude session not ready yet. Please wait.")
         return
 
-    if query_lock.locked():
-        await message.channel.send("Currently running a scheduled task. Please wait.")
+    if session.query_lock.locked():
+        await message.channel.send(
+            f"Agent **{session.name}** is busy. Please wait or `/switch-agent` to another."
+        )
         return
 
-    async with query_lock:
-        drain_stderr()
-        await client.query(message.content)
-        await stream_response_to_channel(message.channel)
+    async with session.query_lock:
+        session.last_activity = datetime.now(timezone.utc)
+        session.last_idle_notified = None
+        session.idle_reminder_count = 0
+        drain_stderr(session)
+        await session.client.query(message.content)
+        await stream_response_to_channel(session, message.channel)
 
     await bot.process_commands(message)
 
@@ -278,13 +414,57 @@ async def on_message(message):
 
 @tasks.loop(seconds=30)
 async def check_schedules():
+    # Restart signal check
     if os.path.exists(RESTART_SIGNAL_PATH):
         os.remove(RESTART_SIGNAL_PATH)
         log.info("Restart signal detected, exiting with code 42")
         await bot.close()
         os._exit(42)
 
-    if client is None:
+    # Spawn signal check
+    if os.path.exists(SPAWN_SIGNAL_PATH):
+        try:
+            with open(SPAWN_SIGNAL_PATH) as f:
+                spawn_data = json.load(f)
+            os.remove(SPAWN_SIGNAL_PATH)
+
+            agent_name = spawn_data.get("name", "").strip()
+            agent_cwd = spawn_data.get("cwd", DEFAULT_CWD)
+            agent_prompt = spawn_data.get("prompt", "")
+
+            # Resolve DM channels for notifications
+            spawn_channels = []
+            for uid in ALLOWED_USER_IDS:
+                try:
+                    user = await bot.fetch_user(uid)
+                    spawn_channels.append(await user.create_dm())
+                except Exception:
+                    continue
+
+            if not agent_name:
+                log.warning("Spawn signal missing 'name' field, ignoring")
+            elif agent_name == MASTER_AGENT_NAME:
+                log.warning("Cannot spawn agent with reserved name '%s'", MASTER_AGENT_NAME)
+                for ch in spawn_channels:
+                    await ch.send(f"Cannot spawn agent with reserved name **{MASTER_AGENT_NAME}**.")
+            elif agent_name in agents:
+                log.warning("Agent '%s' already exists, ignoring spawn signal", agent_name)
+                for ch in spawn_channels:
+                    await ch.send(f"Agent **{agent_name}** already exists.")
+            elif len(agents) >= MAX_AGENTS:
+                log.warning("Max agents (%d) reached, ignoring spawn signal", MAX_AGENTS)
+                for ch in spawn_channels:
+                    await ch.send(f"Maximum number of agents ({MAX_AGENTS}) reached. Kill an agent first.")
+            else:
+                log.info("Spawning agent '%s' (cwd=%s)", agent_name, agent_cwd)
+                await spawn_agent(agent_name, agent_cwd, agent_prompt, spawn_channels)
+        except Exception:
+            log.exception("Error processing spawn signal")
+            if os.path.exists(SPAWN_SIGNAL_PATH):
+                os.remove(SPAWN_SIGNAL_PATH)
+
+    master = get_master_session()
+    if master is None or master.client is None:
         return
 
     prune_history()
@@ -327,13 +507,29 @@ async def check_schedules():
                     continue
 
                 if last_occurrence > schedule_last_fired[name]:
-                    if query_lock.locked():
+                    schedule_last_fired[name] = last_occurrence
+
+                    if entry.get("agent", False):
+                        # Spawn a new agent instead of routing through master
+                        log.info("Firing recurring agent event: %s", name)
+                        agent_name = f"{name}-{last_occurrence.strftime('%Y%m%d-%H%M')}"
+                        agent_cwd = entry.get("cwd", DEFAULT_CWD)
+                        if agent_name in agents:
+                            log.warning("Agent '%s' already exists, skipping", agent_name)
+                        elif len(agents) >= MAX_AGENTS:
+                            log.warning("Max agents reached, skipping agent event %s", name)
+                            for channel in channels:
+                                await channel.send(f"Scheduled agent **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
+                        else:
+                            await spawn_agent(agent_name, agent_cwd, entry["prompt"], channels)
+                        continue
+
+                    if master.query_lock.locked():
                         log.info("Skipping scheduled event %s — query in progress", name)
                         continue
 
-                    async with query_lock:
+                    async with master.query_lock:
                         log.info("Firing recurring event: %s", name)
-                        schedule_last_fired[name] = last_occurrence
                         for channel in channels:
                             await run_scheduled_event(entry, channel)
 
@@ -342,14 +538,28 @@ async def check_schedules():
                 fire_at = datetime.fromisoformat(entry["at"])
 
                 if fire_at <= now:
-                    if query_lock.locked():
-                        log.info("Skipping one-off event %s — query in progress", name)
-                        continue
+                    if entry.get("agent", False):
+                        # Spawn a new agent instead of routing through master
+                        log.info("Firing one-off agent event: %s", name)
+                        agent_name = f"{name}-{now.strftime('%Y%m%d-%H%M')}"
+                        agent_cwd = entry.get("cwd", DEFAULT_CWD)
+                        if agent_name in agents:
+                            log.warning("Agent '%s' already exists, skipping", agent_name)
+                        elif len(agents) >= MAX_AGENTS:
+                            log.warning("Max agents reached, skipping agent event %s", name)
+                            for channel in channels:
+                                await channel.send(f"Scheduled agent **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
+                        else:
+                            await spawn_agent(agent_name, agent_cwd, entry["prompt"], channels)
+                    else:
+                        if master.query_lock.locked():
+                            log.info("Skipping one-off event %s — query in progress", name)
+                            continue
 
-                    async with query_lock:
-                        log.info("Firing one-off event: %s", name)
-                        for channel in channels:
-                            await run_scheduled_event(entry, channel)
+                        async with master.query_lock:
+                            log.info("Firing one-off event: %s", name)
+                            for channel in channels:
+                                await run_scheduled_event(entry, channel)
 
                     # Remove from schedules and add to history
                     entries.remove(entry)
@@ -362,6 +572,45 @@ async def check_schedules():
     if entries_modified:
         save_schedules(entries)
 
+    # --- Idle agent detection ---
+    if master.client and not master.query_lock.locked():
+        idle_agents = []
+        for agent_name, session in agents.items():
+            if agent_name == MASTER_AGENT_NAME:
+                continue
+            if session.idle_reminder_count >= len(IDLE_REMINDER_THRESHOLDS):
+                continue  # All reminders already sent
+
+            # Cumulative threshold: sum of thresholds up to current reminder count
+            cumulative = sum(IDLE_REMINDER_THRESHOLDS[:session.idle_reminder_count + 1], timedelta())
+            idle_duration = now - session.last_activity
+
+            if idle_duration > cumulative:
+                idle_minutes = int(idle_duration.total_seconds() / 60)
+                idle_agents.append((session, f"{agent_name} (idle {idle_minutes}m, cwd: {session.cwd})"))
+
+        if idle_agents and channels:
+            try:
+                async with master.query_lock:
+                    master.last_activity = datetime.now(timezone.utc)
+                    idle_list = ", ".join(desc for _, desc in idle_agents)
+                    reminder_prompt = (
+                        f"The following spawned agent sessions have been idle: {idle_list}. "
+                        f"Remind the user about these idle agents. They can use /kill-agent to terminate "
+                        f"them or /switch-agent to resume working with them."
+                    )
+                    drain_stderr(master)
+                    await master.client.query(reminder_prompt)
+                    for channel in channels:
+                        await stream_response_to_channel(master, channel)
+
+                # Update idle notification state
+                for session, _ in idle_agents:
+                    session.idle_reminder_count += 1
+                    session.last_idle_notified = datetime.now(timezone.utc)
+            except Exception:
+                log.exception("Error sending idle agent reminders")
+
 
 @check_schedules.before_loop
 async def before_check_schedules():
@@ -370,16 +619,110 @@ async def before_check_schedules():
 
 # --- Slash commands ---
 
-@bot.tree.command(name="reset-context", description="Reset Claude context. Optionally set a new working directory.")
+async def agent_autocomplete(interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete callback for agent name parameters."""
+    return [
+        app_commands.Choice(name=name, value=name)
+        for name in agents.keys()
+        if current.lower() in name.lower()
+    ][:25]
+
+
+async def killable_agent_autocomplete(interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete callback excluding axi-master."""
+    return [
+        app_commands.Choice(name=name, value=name)
+        for name in agents.keys()
+        if name != MASTER_AGENT_NAME and current.lower() in name.lower()
+    ][:25]
+
+
+@bot.tree.command(name="switch-agent", description="Switch the active agent for chat.")
+@app_commands.autocomplete(agent_name=agent_autocomplete)
+async def switch_agent(interaction, agent_name: str):
+    global active_agent
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    if agent_name not in agents:
+        await interaction.response.send_message(
+            f"Agent **{agent_name}** not found. Use `/list-agents` to see available agents.",
+            ephemeral=True,
+        )
+        return
+
+    active_agent = agent_name
+    session = agents[agent_name]
+    await interaction.response.send_message(
+        f"Switched to agent **{agent_name}** (cwd: `{session.cwd}`)"
+    )
+
+
+@bot.tree.command(name="list-agents", description="List all active agent sessions.")
+async def list_agents(interaction):
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    if not agents:
+        await interaction.response.send_message("No active agents.", ephemeral=True)
+        return
+
+    now = datetime.now(timezone.utc)
+    lines = []
+    for name, session in agents.items():
+        idle_minutes = int((now - session.last_activity).total_seconds() / 60)
+        marker = " **(active)**" if name == active_agent else ""
+        busy = " [busy]" if session.query_lock.locked() else ""
+        protected = " [protected]" if name == MASTER_AGENT_NAME else ""
+        lines.append(
+            f"- **{name}**{marker}{busy}{protected} | cwd: `{session.cwd}` | idle: {idle_minutes}m"
+        )
+
+    await interaction.response.send_message("**Agent Sessions:**\n" + "\n".join(lines))
+
+
+@bot.tree.command(name="kill-agent", description="Terminate an agent session.")
+@app_commands.autocomplete(agent_name=killable_agent_autocomplete)
+async def kill_agent(interaction, agent_name: str):
+    global active_agent
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    if agent_name == MASTER_AGENT_NAME:
+        await interaction.response.send_message(
+            "Cannot kill the axi-master session.", ephemeral=True
+        )
+        return
+
+    if agent_name not in agents:
+        await interaction.response.send_message(
+            f"Agent **{agent_name}** not found.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer()
+    await end_session(agent_name)
+
+    if active_agent == agent_name:
+        active_agent = MASTER_AGENT_NAME
+
+    await interaction.followup.send(f"Agent **{agent_name}** terminated.")
+
+
+@bot.tree.command(name="reset-context", description="Reset the active agent's context. Optionally set a new working directory.")
 async def reset_context(interaction, working_dir: str | None = None):
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
 
     await interaction.response.defer()
-    await reset_session(cwd=working_dir)
-    new_cwd = working_dir or current_cwd
-    await interaction.followup.send(f"Context reset. Working directory: `{new_cwd}`")
+    session = await reset_session(active_agent, cwd=working_dir)
+    await interaction.followup.send(
+        f"Context reset for **{active_agent}**. Working directory: `{session.cwd}`"
+    )
 
 
 # --- Startup ---
@@ -387,7 +730,7 @@ async def reset_context(interaction, working_dir: str | None = None):
 @bot.event
 async def on_ready():
     log.info("Bot ready as %s", bot.user)
-    await start_session(DEFAULT_CWD)
+    await start_session(MASTER_AGENT_NAME, DEFAULT_CWD, system_prompt=SYSTEM_PROMPT)
     await bot.tree.sync()
     log.info("Slash commands synced")
 
@@ -408,8 +751,10 @@ async def on_ready():
             user = await bot.fetch_user(uid)
             dm = await user.create_dm()
             await dm.send("Axi restarted.")
+            log.info("Sent restart notification to user %s", uid)
         except Exception:
-            continue
+            log.exception("Failed to send restart notification to user %s", uid)
+        await asyncio.sleep(1)
 
 
 if __name__ == "__main__":
