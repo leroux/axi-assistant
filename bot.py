@@ -300,16 +300,12 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
     Uses the public receive_response() API. Flushes the text buffer at each
     assistant turn boundary so intermediate messages appear immediately."""
     text_buffer = ""
-    first_flush = True
     prefix = f"*{session.name}:* "
 
     async def flush_text(text: str) -> None:
-        nonlocal first_flush
         if not text.strip():
             return
-        if first_flush:
-            text = prefix + text.lstrip()
-            first_flush = False
+        text = prefix + text.lstrip()
         await send_long(channel, text)
 
     async with channel.typing():
