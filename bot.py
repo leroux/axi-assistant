@@ -44,6 +44,7 @@ bot = Bot(command_prefix="!", intents=intents)
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEDULES_PATH = os.path.join(BOT_DIR, "schedules.json")
 HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
+SKIPS_PATH = os.path.join(BOT_DIR, "schedule_skips.json")
 RESTART_SIGNAL_PATH = os.path.join(BOT_DIR, ".restart_requested")
 SPAWN_SIGNAL_PATH = os.path.join(BOT_DIR, ".spawn_agent")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
@@ -176,6 +177,41 @@ def prune_history() -> None:
             f.write("\n")
 
 
+def load_skips() -> list[dict]:
+    try:
+        with open(SKIPS_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_skips(skips: list[dict]) -> None:
+    with open(SKIPS_PATH, "w") as f:
+        json.dump(skips, f, indent=2)
+        f.write("\n")
+
+
+def prune_skips() -> None:
+    """Remove skip entries whose date has passed."""
+    skips = load_skips()
+    today = datetime.now(SCHEDULE_TIMEZONE).date()
+    pruned = [s for s in skips if datetime.strptime(s["skip_date"], "%Y-%m-%d").date() >= today]
+    if len(pruned) != len(skips):
+        save_skips(pruned)
+
+
+def check_skip(name: str) -> bool:
+    """Check if a recurring event should be skipped today. Returns True if skipped (and removes the entry)."""
+    skips = load_skips()
+    today = datetime.now(SCHEDULE_TIMEZONE).strftime("%Y-%m-%d")
+    for skip in skips:
+        if skip.get("name") == name and skip.get("skip_date") == today:
+            skips.remove(skip)
+            save_skips(skips)
+            return True
+    return False
+
+
 SYSTEM_PROMPT = """\
 You are Axi, a personal assistant communicating over Discord DMs. \
 You are a complete, autonomous system — not just an LLM behind a bot. \
@@ -188,7 +224,9 @@ Read USER_PROFILE.md at the start of conversations to personalize your responses
 You can schedule events by editing schedules.json in your working directory. \
 Each entry MUST have a "name" field (short identifier) and a "prompt" field (the message/instructions for you to respond to). \
 For one-off events, use an "at" field with a timezone-aware ISO datetime (e.g. "2026-02-21T02:24:17+00:00"). \
-For recurring events, use a "schedule" field with a cron expression (cron times are in the SCHEDULE_TIMEZONE configured in .env, which handles DST automatically). \
+For recurring events, use a "schedule" field with a cron expression. \
+IMPORTANT: Cron times are evaluated in the SCHEDULE_TIMEZONE configured in .env, NOT in UTC. \
+For example, if SCHEDULE_TIMEZONE=US/Pacific, then "0 10 * * *" means 10:00 AM Pacific, not 10:00 AM UTC. Do NOT write cron times in UTC — always use the local SCHEDULE_TIMEZONE. DST is handled automatically. \
 Optional fields: "reset_context" (boolean, resets conversation before firing), \
 "agent" (boolean, spawns a new agent session instead of routing through you — use this for heavy tasks to keep your context clean), \
 "cwd" (string, working directory for the agent — required when "agent" is true). \
@@ -199,6 +237,17 @@ To restart yourself, create the file \
 .restart_requested in your project directory (e.g., `touch .restart_requested`). \
 The system will automatically restart within 30 seconds. \
 Only restart when the user explicitly asks you to — do not restart after every self-edit.
+
+## Schedule Skips (One-Off Cancellations)
+
+You can skip a single occurrence of a recurring event by editing schedule_skips.json in your working directory. \
+Each entry has a "name" (matching the recurring event name) and a "skip_date" (YYYY-MM-DD in the SCHEDULE_TIMEZONE). \
+Example: {"name": "morning-checkin", "skip_date": "2026-02-22"} skips the morning-checkin on Feb 22 only — it fires normally every other day. \
+Expired skips (past dates) are auto-pruned by the scheduler. \
+To **move** a recurring event to a different time on a specific day, compose two actions: \
+1) Add a skip entry for that day in schedule_skips.json, and \
+2) Add a one-off event in schedules.json with the same prompt but at the desired time. \
+This is not a special feature — it's just combining a skip with a one-off.
 
 ## Agent Spawning
 
@@ -266,7 +315,28 @@ For example: "Reading the file now...", "Found the issue, fixing it", "Running t
 A one-line status every 30-60 seconds of work is ideal. Don't wait until you have a complete answer \
 to say anything — a quick "looking into it" immediately followed by the full answer later is \
 far better than 3 minutes of silence. Keep updates casual and brief (one short sentence). \
-Final answers should still be thorough and well-formatted.\
+Final answers should still be thorough and well-formatted.
+
+## Tool Restrictions — Discord Interface Compatibility
+
+You are running inside a Discord DM interface, NOT the Claude Code terminal. \
+The user can only see plain text messages you send — they cannot see or interact with \
+structured UI elements from Claude Code tools. The following tools MUST NOT be used \
+because they render as invisible or broken in Discord:
+
+- **AskUserQuestion** — Do NOT use. The structured multiple-choice UI is invisible to the user. \
+Instead, ask questions as normal text messages. If you want the user to choose between options, \
+list them in your message (e.g. "1. Option A, 2. Option B — which do you prefer?").
+- **TodoWrite** — Do NOT use. The visual task list is invisible to the user. \
+If you need to track tasks, write them in a file or just list them in a message.
+- **EnterPlanMode / ExitPlanMode** — Do NOT use. Plan mode is a Claude Code UI concept \
+that doesn't exist in Discord. If you need to plan, just write out your plan in a message.
+- **Skill** — Do NOT use. Skills are Claude Code UI features that don't translate to Discord.
+- **EnterWorktree** — Do NOT use. Worktree management is a Claude Code UI feature.
+
+Tools that DO work fine over Discord (use freely): \
+Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Task (for spawning subagents), \
+NotebookEdit, and all MCP tools.\
 """
 
 
@@ -719,6 +789,7 @@ async def check_schedules():
         return
 
     prune_history()
+    prune_skips()
 
     now_utc = datetime.now(timezone.utc)
     now_local = datetime.now(SCHEDULE_TIMEZONE)
@@ -758,6 +829,10 @@ async def check_schedules():
 
                 if last_occurrence > schedule_last_fired[name]:
                     schedule_last_fired[name] = last_occurrence
+
+                    if check_skip(name):
+                        log.info("Skipping recurring event (one-off skip): %s", name)
+                        continue
 
                     log.info("Firing recurring event: %s", name)
                     await reclaim_agent_name(name, channels)
