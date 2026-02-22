@@ -85,6 +85,19 @@ Axi maintains a registry of named Claude Code sessions. One session is always ac
 - **Active agent:** The session that currently receives your DM messages. Only one agent is active at a time.
 - **Hard limit:** Maximum 20 concurrent agent sessions (`MAX_AGENTS`).
 
+### Session Configuration
+
+All agent sessions are created with the following Claude SDK options:
+
+| Option | Value | Description |
+|---|---|---|
+| `model` | `opus` | Uses Claude Opus for all sessions |
+| `effort` | `high` | High reasoning effort |
+| `thinking` | `adaptive` | Enables adaptive extended thinking |
+| `betas` | `context-1m-2025-08-07` | 1M context window beta |
+| `setting_sources` | `user, project, local` | Reads settings from all config layers |
+| `permission_mode` | `default` | Standard permission handling |
+
 ### Agent Lifecycle
 
 ```
@@ -271,13 +284,13 @@ The restart and rollback system is split across two files: `run.sh` (process sup
 ### Restart Flow
 
 ```
-1. User asks Axi to restart (or Axi decides to after a self-edit)
-2. Axi runs: touch .restart_requested
-3. check_schedules() detects the file within 30 seconds
-4. File is deleted, bot exits with code 42
-5. run.sh sees exit code 42, treats it as intentional restart
-6. run.sh re-launches: uv run python bot.py
-7. on_ready() sends "Axi restarted." DM to all authorized users
+1. User asks Axi to restart (or uses /restart, or Axi decides to after a self-edit)
+2. Via /restart: bot exits immediately with code 42
+   Via signal file: Axi runs touch .restart_requested, check_schedules() detects it within 30s
+3. run.sh sees exit code 42, treats it as intentional restart
+4. run.sh re-launches: uv run python bot.py
+5. on_ready() starts the master session (retries up to 3 times with exponential backoff)
+6. on_ready() sends "Axi restarted." DM to all authorized users
 ```
 
 ### Auto-Rollback Flow (Startup Crashes)
@@ -291,13 +304,15 @@ Before each launch, `run.sh` records the current commit hash (`pre_launch_commit
 2. Axi restarts (exit code 42)
 3. bot.py crashes on startup (non-zero exit, <60s uptime)
 4. run.sh detects "quick crash" (uptime < CRASH_THRESHOLD of 60s)
-5. run.sh checks for rollback-able changes:
+5. run.sh snapshots the last 200 lines of .bot_output.log for crash analysis
+6. run.sh checks for rollback-able changes:
    a. Uncommitted changes? --> git stash push --include-untracked
    b. HEAD moved since pre-launch? --> git reset --hard <pre_launch_commit>
-6. run.sh writes .rollback_performed marker with crash details
-7. run.sh sets rollback_attempted=1 (prevents infinite loops)
-8. run.sh re-launches bot.py with the pre-launch code
-9. on_ready() reads .rollback_performed, sends detailed notification
+7. run.sh writes .rollback_performed marker with crash details (including crash log)
+8. run.sh sets rollback_attempted=1 (prevents infinite loops)
+9. run.sh re-launches bot.py with the pre-launch code
+10. on_ready() reads .rollback_performed, sends detailed notification
+11. on_ready() spawns a "crash-handler" agent to analyze the crash
 ```
 
 Both rollback types can happen simultaneously — if Axi made some commits *and* left uncommitted changes, the stash happens first, then the reset.
@@ -318,9 +333,12 @@ When the bot crashes **after** 60 seconds of uptime (a runtime crash, not caused
 9. The crash handler agent analyzes the traceback and creates a fix plan (no auto-apply)
 ```
 
-The crash handler agent:
+### Crash Handler Agent
+
+Both startup crashes (after rollback) and runtime crashes spawn a `crash-handler` agent. The agent:
 - Appears in `/list-agents` and can be switched to with `/switch-agent crash-handler`
 - Gets the full crash log embedded in its initial prompt
+- For startup crashes, also receives rollback context (reverted commits, stashed changes)
 - Is instructed to analyze the root cause and produce a plan, **not** to apply fixes automatically
 - Is recycled if a previous crash-handler session still exists
 
@@ -356,7 +374,7 @@ bot.py exits
 |---|---|---|
 | `.restart_requested` | Axi (bot.py) | Signals the bot to exit with code 42 for a clean restart |
 | `.spawn_agent` | Axi (bot.py) | Signals the scheduler to spawn a new agent session |
-| `.rollback_performed` | run.sh | Communicates startup crash rollback details to bot.py on next startup |
+| `.rollback_performed` | run.sh | Communicates startup crash rollback details to bot.py, including crash log snapshot |
 | `.crash_analysis` | run.sh | Communicates runtime crash details to bot.py for crash handler agent |
 | `.bot_output.log` | run.sh | Captures bot stdout/stderr via `tee` for crash log snapshots |
 
@@ -376,6 +394,10 @@ On first run, `run.sh` creates default versions of user data files if they don't
 ### Architecture
 
 Axi communicates interactively through Discord DMs. The bot requests two intents: `dm_messages` and `message_content`. Server message history is queried on-demand via the [Discord Query Tool](#discord-query-tool) rather than passively logged.
+
+### Communication Style
+
+The system prompt instructs Axi to send short progress updates during long-running tasks (e.g., "Reading the file now...", "Found the issue, fixing it") so the user doesn't experience long silences in DMs. Final answers are still thorough and well-formatted.
 
 ### Authentication
 
