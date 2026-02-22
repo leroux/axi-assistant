@@ -47,6 +47,7 @@ HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
 SKIPS_PATH = os.path.join(BOT_DIR, "schedule_skips.json")
 RESTART_SIGNAL_PATH = os.path.join(BOT_DIR, ".restart_requested")
 SPAWN_SIGNAL_PATH = os.path.join(BOT_DIR, ".spawn_agent")
+AGENT_HISTORY_PATH = os.path.join(BOT_DIR, "agent_history.json")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 schedule_last_fired: dict[str, datetime] = {}
@@ -212,6 +213,67 @@ def check_skip(name: str) -> bool:
     return False
 
 
+# --- Agent history helpers ---
+
+def load_agent_history() -> list[dict]:
+    try:
+        with open(AGENT_HISTORY_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_agent_history(history: list[dict]) -> None:
+    with open(AGENT_HISTORY_PATH, "w") as f:
+        json.dump(history, f, indent=2)
+        f.write("\n")
+
+
+def record_agent_spawn(name: str, cwd: str, session_id: str | None = None, resumed_from: str | None = None) -> None:
+    """Record an agent spawn event in persistent history."""
+    history = load_agent_history()
+    history.append({
+        "name": name,
+        "cwd": cwd,
+        "session_id": session_id,
+        "spawned_at": datetime.now(timezone.utc).isoformat(),
+        "status": "active",
+        "resumed_from": resumed_from,
+    })
+    save_agent_history(history)
+
+
+def update_agent_history_session_id(name: str, session_id: str) -> None:
+    """Update the session_id for the most recent entry of an agent."""
+    history = load_agent_history()
+    for entry in reversed(history):
+        if entry["name"] == name and entry["status"] == "active":
+            entry["session_id"] = session_id
+            break
+    save_agent_history(history)
+
+
+def mark_agent_killed(name: str, session_id: str | None = None) -> None:
+    """Mark the most recent active entry for an agent as killed."""
+    history = load_agent_history()
+    for entry in reversed(history):
+        if entry["name"] == name and entry["status"] == "active":
+            entry["status"] = "killed"
+            entry["killed_at"] = datetime.now(timezone.utc).isoformat()
+            if session_id:
+                entry["session_id"] = session_id
+            break
+    save_agent_history(history)
+
+
+def _set_session_id(session: AgentSession, msg: ResultMessage) -> None:
+    """Extract session_id from a ResultMessage and persist to agent history."""
+    sid = getattr(msg, "session_id", None)
+    session.session_id = sid
+    if sid and session.name != MASTER_AGENT_NAME:
+        update_agent_history_session_id(session.name, sid)
+
+
 SYSTEM_PROMPT = """\
 You are Axi, a personal assistant communicating over Discord DMs. \
 You are a complete, autonomous system — not just an LLM behind a bot. \
@@ -257,10 +319,18 @@ To spawn an agent, create a file called `.spawn_agent` in your project directory
 
 {"name": "agent-name", "cwd": "/absolute/path/to/project", "prompt": "Initial instructions for the agent"}
 
+To resume a previous agent session, include the "resume" field with the session ID:
+{"name": "agent-name", "cwd": "/absolute/path/to/project", "prompt": "Continue where you left off", "resume": "session-id-here"}
+
 Rules for spawning agents:
 - "name" must be unique, short, and descriptive (e.g. "feature-auth", "fix-bug-123"). No spaces.
 - "cwd" must be the absolute path to the project directory the agent should work in.
 - "prompt" is the initial task description. Be specific and detailed since the agent works independently.
+- "resume" is an optional session ID from a previously killed agent. When provided, the new agent resumes \
+with the full conversation context of the old session. Session IDs are shown when agents are killed, \
+in /list-agents output, and persisted in agent_history.json. \
+To find a previous agent's session ID, read agent_history.json — it logs every spawn and kill with \
+the agent name, session ID, cwd, and timestamps.
 - The spawned agent is a standard Claude Code session — it does NOT have your Axi personality or custom instructions.
 - The system picks up the file within 30 seconds and spawns the session automatically.
 - The user will be notified when the agent starts and when it finishes its initial task.
@@ -517,7 +587,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 text_buffer = ""
 
             elif isinstance(msg, ResultMessage):
-                session.session_id = getattr(msg, "session_id", None)
+                _set_session_id(session, msg)
                 break
 
             # When buffer is large enough, flush it mid-turn
@@ -560,7 +630,7 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
         async with asyncio.timeout(INTERRUPT_TIMEOUT):
             async for msg in _receive_response_safe(session.client):
                 if isinstance(msg, ResultMessage):
-                    session.session_id = getattr(msg, "session_id", None)
+                    _set_session_id(session, msg)
                     break
         session.last_activity = datetime.now(timezone.utc)
         await send_system(
@@ -595,6 +665,8 @@ async def reclaim_agent_name(name: str, channels: list) -> None:
     if name not in agents:
         return
     log.info("Reclaiming agent name '%s' — terminating existing session", name)
+    session = agents.get(name)
+    mark_agent_killed(name, session.session_id if session else None)
     await end_session(name)
     if active_agent == name:
         active_agent = MASTER_AGENT_NAME
@@ -602,13 +674,18 @@ async def reclaim_agent_name(name: str, channels: list) -> None:
         await send_system(channel, f"Recycled previous **{name}** session for new scheduled run.")
 
 
-async def spawn_agent(name: str, cwd: str, initial_prompt: str, channels: list) -> None:
+async def spawn_agent(name: str, cwd: str, initial_prompt: str, channels: list, resume: str | None = None) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
     global active_agent
-    for channel in channels:
-        await send_system(channel, f"Spawning agent **{name}** in `{cwd}`...")
+    if resume:
+        for channel in channels:
+            await send_system(channel, f"Resuming agent **{name}** (session `{resume[:8]}…`) in `{cwd}`...")
+    else:
+        for channel in channels:
+            await send_system(channel, f"Spawning agent **{name}** in `{cwd}`...")
 
-    session = await start_session(name, cwd, system_prompt=None)
+    session = await start_session(name, cwd, system_prompt=None, resume=resume)
+    record_agent_spawn(name, cwd, session_id=resume, resumed_from=resume)
 
     auto_switched = False
     if auto_switch_enabled:
@@ -644,7 +721,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channels: list
                         # No channel available — silently consume
                         async for msg in _receive_response_safe(session.client):
                             if isinstance(msg, ResultMessage):
-                                session.session_id = getattr(msg, "session_id", None)
+                                _set_session_id(session, msg)
                                 break
 
                     session.last_activity = datetime.now(timezone.utc)
@@ -688,6 +765,7 @@ async def process_spawn_signal() -> None:
         agent_name = spawn_data.get("name", "").strip()
         agent_cwd = spawn_data.get("cwd", DEFAULT_CWD)
         agent_prompt = spawn_data.get("prompt", "")
+        agent_resume = spawn_data.get("resume")  # optional session ID to resume
 
         # Resolve DM channels for notifications
         spawn_channels = []
@@ -713,8 +791,8 @@ async def process_spawn_signal() -> None:
             for ch in spawn_channels:
                 await send_system(ch, f"Maximum number of agents ({MAX_AGENTS}) reached. Kill an agent first.")
         else:
-            log.info("Spawning agent '%s' (cwd=%s)", agent_name, agent_cwd)
-            await spawn_agent(agent_name, agent_cwd, agent_prompt, spawn_channels)
+            log.info("Spawning agent '%s' (cwd=%s, resume=%s)", agent_name, agent_cwd, agent_resume)
+            await spawn_agent(agent_name, agent_cwd, agent_prompt, spawn_channels, resume=agent_resume)
     except Exception:
         log.exception("Error processing spawn signal")
         if os.path.exists(SPAWN_SIGNAL_PATH):
@@ -964,8 +1042,9 @@ async def list_agents(interaction):
         marker = " **(active)**" if name == active_agent else ""
         busy = " [busy]" if session.query_lock.locked() else ""
         protected = " [protected]" if name == MASTER_AGENT_NAME else ""
+        sid = f" | sid: `{session.session_id[:8]}…`" if session.session_id else ""
         lines.append(
-            f"- **{name}**{marker}{busy}{protected} | cwd: `{session.cwd}` | idle: {idle_minutes}m"
+            f"- **{name}**{marker}{busy}{protected} | cwd: `{session.cwd}` | idle: {idle_minutes}m{sid}"
         )
 
     await interaction.response.send_message("*System:* **Agent Sessions:**\n" + "\n".join(lines))
@@ -992,12 +1071,21 @@ async def kill_agent(interaction, agent_name: str):
         return
 
     await interaction.response.defer()
+    session = agents.get(agent_name)
+    session_id = session.session_id if session else None
+    mark_agent_killed(agent_name, session_id)
     await end_session(agent_name)
 
     if active_agent == agent_name:
         active_agent = MASTER_AGENT_NAME
 
-    await interaction.followup.send(f"*System:* Agent **{agent_name}** terminated.")
+    if session_id:
+        await interaction.followup.send(
+            f"*System:* Agent **{agent_name}** terminated.\n"
+            f"Session ID: `{session_id}` — use this to resume later."
+        )
+    else:
+        await interaction.followup.send(f"*System:* Agent **{agent_name}** terminated.")
 
 
 @bot.tree.command(name="reset-context", description="Reset the active agent's context. Optionally set a new working directory.")
