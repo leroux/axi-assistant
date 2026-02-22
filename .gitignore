@@ -24,9 +24,12 @@ build/
 # User data
 USER_PROFILE.md
 schedules.json
+schedule_skips.json
 schedule_history.json
 agent_history.json
 server_log.jsonl
+projects/
+personal/
 
 # Runtime signals
 .restart_requested
