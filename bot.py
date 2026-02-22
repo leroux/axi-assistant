@@ -270,6 +270,11 @@ async def start_session(name: str, cwd: str, system_prompt: str | None = None, r
         system_prompt=system_prompt,
     )
     options = ClaudeAgentOptions(
+        model="opus",
+        effort="high",
+        thinking={"type": "adaptive"},
+        betas=["context-1m-2025-08-07"],
+        setting_sources=["user", "project", "local"],
         permission_mode="default",
         can_use_tool=make_cwd_permission_callback(cwd),
         cwd=cwd,
@@ -1010,7 +1015,20 @@ async def restart_cmd(interaction):
 @bot.event
 async def on_ready():
     log.info("Bot ready as %s", bot.user)
-    await start_session(MASTER_AGENT_NAME, DEFAULT_CWD, system_prompt=SYSTEM_PROMPT)
+
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            await start_session(MASTER_AGENT_NAME, DEFAULT_CWD, system_prompt=SYSTEM_PROMPT)
+            break
+        except Exception:
+            log.exception("start_session failed (attempt %d/%d)", attempt, max_retries)
+            if attempt < max_retries:
+                await asyncio.sleep(5 * attempt)
+            else:
+                log.critical("All %d session startup attempts failed — exiting", max_retries)
+                os._exit(1)
+
     await bot.tree.sync()
     log.info("Slash commands synced")
 
@@ -1076,6 +1094,7 @@ async def on_ready():
                     msg_lines.append(
                         "Stashed changes: `git stash list` / `git stash show -p` / `git stash pop`"
                     )
+                msg_lines.append("Spawning crash analysis agent...")
                 await dm.send("\n".join(msg_lines))
             elif crash_info:
                 exit_code = crash_info.get("exit_code", "unknown")
@@ -1093,8 +1112,65 @@ async def on_ready():
             log.exception("Failed to send restart notification to user %s", uid)
         await asyncio.sleep(1)
 
-    # Spawn crash handler agent if runtime crash was detected
-    if crash_info:
+    # Spawn crash handler agent if a crash was detected (startup or runtime)
+    if rollback_info:
+        crash_log = rollback_info.get("crash_log", "(no crash log available)")
+        exit_code = rollback_info.get("exit_code", "unknown")
+        uptime = rollback_info.get("uptime_seconds", "?")
+        timestamp = rollback_info.get("timestamp", "unknown")
+        details = rollback_info.get("rollback_details", "").strip()
+        pre_commit = rollback_info.get("pre_launch_commit", "")
+        crashed_commit = rollback_info.get("crashed_commit", "")
+
+        rollback_context = f"- Rollback actions: {details}\n" if details else ""
+        if pre_commit and crashed_commit and pre_commit != crashed_commit:
+            rollback_context += f"- Reverted from commit {crashed_commit[:7]} to {pre_commit[:7]}\n"
+        if "stashed" in details:
+            rollback_context += "- Uncommitted changes were stashed (see `git stash list`)\n"
+
+        crash_prompt = (
+            "The Discord bot (bot.py) crashed on startup and was auto-rolled-back. "
+            "Analyze the crash and create a plan to fix it.\n"
+            "\n"
+            "## Crash Details\n"
+            f"- Exit code: {exit_code}\n"
+            f"- Uptime before crash: {uptime} seconds\n"
+            f"- Timestamp: {timestamp}\n"
+            f"{rollback_context}"
+            "\n"
+            "## Crash Log (last 200 lines of output before crash)\n"
+            "```\n"
+            f"{crash_log}\n"
+            "```\n"
+            "\n"
+            "## Instructions\n"
+            "1. Analyze the traceback and error messages to identify the root cause.\n"
+            "2. Examine the relevant source code in this project directory.\n"
+            "3. Check the rolled-back commits or stashed changes (if any) to understand what "
+            "code changes caused the crash.\n"
+            "4. Create a clear, detailed plan to fix the issue. Describe exactly which files "
+            "need to change and what the changes should be.\n"
+            "5. Do NOT apply any fixes yourself. Only produce the analysis and plan.\n"
+        )
+
+        spawn_channels = []
+        for uid in ALLOWED_USER_IDS:
+            try:
+                user_obj = await bot.fetch_user(uid)
+                spawn_channels.append(await user_obj.create_dm())
+            except Exception:
+                continue
+
+        await reclaim_agent_name("crash-handler", spawn_channels)
+
+        if len(agents) < MAX_AGENTS:
+            await spawn_agent("crash-handler", BOT_DIR, crash_prompt, spawn_channels)
+        else:
+            log.warning("Max agents reached, cannot spawn crash handler")
+            for ch in spawn_channels:
+                await send_system(ch, "Could not spawn crash analysis agent — max agents reached.")
+
+    elif crash_info:
         crash_log = crash_info.get("crash_log", "(no crash log available)")
         exit_code = crash_info.get("exit_code", "unknown")
         uptime = crash_info.get("uptime_seconds", "?")

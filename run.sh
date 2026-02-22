@@ -84,6 +84,10 @@ CRASH_EOF
 
     echo "Quick crash detected (${elapsed}s < ${CRASH_THRESHOLD}s threshold)."
 
+    # Save last 200 lines of the log for crash analysis
+    crash_log_snapshot=".crash_log_snapshot"
+    tail -n 200 "$LOG_FILE" > "$crash_log_snapshot" 2>/dev/null || true
+
     if [ $rollback_attempted -eq 1 ]; then
         echo "Rollback already attempted. Stopping to prevent infinite loop."
         exit $code
@@ -130,6 +134,7 @@ CRASH_EOF
     # Write rollback marker for bot.py to read on next startup
     stash_output_json=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "${stash_output:-}")
     rollback_details_json=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$rollback_details")
+    crash_log_content=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" < "$crash_log_snapshot" 2>/dev/null || echo '""')
     cat > "$ROLLBACK_MARKER" <<ROLLBACK_EOF
 {
     "exit_code": $code,
@@ -138,9 +143,11 @@ CRASH_EOF
     "rollback_details": $rollback_details_json,
     "pre_launch_commit": "$pre_launch_commit",
     "crashed_commit": "$current_commit",
-    "timestamp": "$(date -Iseconds)"
+    "timestamp": "$(date -Iseconds)",
+    "crash_log": $crash_log_content
 }
 ROLLBACK_EOF
+    rm -f "$crash_log_snapshot"
 
     echo "Rollback marker written. Relaunching with pre-launch code (${pre_launch_commit:0:7})..."
     rollback_attempted=1
