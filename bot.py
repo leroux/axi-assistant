@@ -386,10 +386,13 @@ IMPORTANT: Cron times are evaluated in the SCHEDULE_TIMEZONE configured in .env,
 For example, if SCHEDULE_TIMEZONE=US/Pacific, then "0 10 * * *" means 10:00 AM Pacific, not 10:00 AM UTC. Do NOT write cron times in UTC — always use the local SCHEDULE_TIMEZONE. DST is handled automatically. \
 Optional fields: "reset_context" (boolean, resets conversation before firing), \
 "agent" (boolean, spawns a new agent session instead of routing through you — use this for heavy tasks to keep your context clean), \
-"cwd" (string, working directory for the agent — required when "agent" is true). \
+"cwd" (string, working directory for the agent — required when "agent" is true), \
+"session" (string, agent session name to reuse — multiple events with the same "session" value share one persistent agent. \
+If the session already exists when an event fires, the prompt is sent to the existing agent instead of spawning a new one). \
 Example one-off: {"name": "reminder", "prompt": "Say hello in 10 languages", "at": "2026-02-21T03:00:00+00:00"}. \
 Example recurring: {"name": "daily-standup", "prompt": "Ask me what I'm working on today", "schedule": "0 9 * * *"}. \
 Example agent schedule: {"name": "weekly-cleanup", "prompt": "Clean up unused imports", "schedule": "0 9 * * 1", "cwd": "/home/pride/coding-projects/my-app", "agent": true}. \
+Example shared session: multiple events with "session": "my-agent" will all route to the same persistent agent session. \
 To restart yourself, create the file \
 .restart_requested in your project directory (e.g., `touch .restart_requested`). \
 The system will automatically restart within 30 seconds. \
@@ -931,6 +934,26 @@ async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | No
     asyncio.create_task(_run_initial_prompt(session, initial_prompt, channel))
 
 
+async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
+    """Send a prompt to an existing agent session in the background.
+
+    Used by the scheduler when a 'session' field maps to an already-running agent.
+    Queues the prompt just like a user message would, streaming the response to the
+    agent's Discord channel.
+    """
+    session = agents.get(agent_name)
+    if session is None or session.client is None:
+        log.warning("send_prompt_to_agent: agent '%s' not found or has no client", agent_name)
+        return
+
+    channel = await get_agent_channel(agent_name)
+    if channel is None:
+        log.warning("send_prompt_to_agent: no channel for agent '%s'", agent_name)
+        return
+
+    asyncio.create_task(_run_initial_prompt(session, prompt, channel))
+
+
 async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextChannel) -> None:
     """Run the initial prompt for a spawned agent. Notifies when done."""
     try:
@@ -1198,14 +1221,20 @@ async def check_schedules():
                         continue
 
                     log.info("Firing recurring event: %s", name)
-                    await reclaim_agent_name(name)
+                    agent_name = entry.get("session", name)
                     agent_cwd = entry.get("cwd", DEFAULT_CWD)
-                    if len(agents) >= MAX_AGENTS:
+
+                    if agent_name in agents:
+                        # Session already exists — send prompt to it
+                        log.info("Routing event '%s' to existing session '%s'", name, agent_name)
+                        await send_prompt_to_agent(agent_name, entry["prompt"])
+                    elif len(agents) >= MAX_AGENTS:
                         log.warning("Max agents reached, skipping event %s", name)
                         if master_ch:
                             await send_system(master_ch, f"Scheduled event **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
                     else:
-                        await spawn_agent(name, agent_cwd, entry["prompt"])
+                        await reclaim_agent_name(agent_name)
+                        await spawn_agent(agent_name, agent_cwd, entry["prompt"])
 
             elif "at" in entry:
                 # One-off event
@@ -1213,14 +1242,19 @@ async def check_schedules():
 
                 if fire_at <= now_utc:
                     log.info("Firing one-off event: %s", name)
-                    await reclaim_agent_name(name)
+                    agent_name = entry.get("session", name)
                     agent_cwd = entry.get("cwd", DEFAULT_CWD)
-                    if len(agents) >= MAX_AGENTS:
+
+                    if agent_name in agents:
+                        log.info("Routing event '%s' to existing session '%s'", name, agent_name)
+                        await send_prompt_to_agent(agent_name, entry["prompt"])
+                    elif len(agents) >= MAX_AGENTS:
                         log.warning("Max agents reached, skipping event %s", name)
                         if master_ch:
                             await send_system(master_ch, f"Scheduled event **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
                     else:
-                        await spawn_agent(name, agent_cwd, entry["prompt"])
+                        await reclaim_agent_name(agent_name)
+                        await spawn_agent(agent_name, agent_cwd, entry["prompt"])
 
                     # Remove from schedules and add to history
                     entries.remove(entry)
