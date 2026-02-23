@@ -29,7 +29,7 @@ while true; do
     pre_launch_commit=$(git rev-parse HEAD 2>/dev/null || echo "")
 
     set +o pipefail
-    uv run python bot.py 2>&1 | tee "$LOG_FILE"
+    uv run python bot.py 2>&1 | tee -a "$LOG_FILE"
     code=${PIPESTATUS[0]}
     set -o pipefail
 
