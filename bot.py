@@ -640,7 +640,7 @@ _utils_mcp_server = create_sdk_mcp_server(
 )
 async def axi_restart(args):
     log.info("Restart requested via MCP tool")
-    asyncio.create_task(_graceful_shutdown("MCP tool"))
+    asyncio.create_task(_graceful_shutdown("MCP tool", skip_agent=MASTER_AGENT_NAME))
     return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
 
 
@@ -1553,8 +1553,12 @@ async def _sleep_all_agents() -> None:
                 log.exception("Error sleeping agent '%s' during shutdown", name)
 
 
-async def _graceful_shutdown(source: str) -> None:
-    """Wait for all busy agents to finish, then exit with code 42."""
+async def _graceful_shutdown(source: str, skip_agent: str | None = None) -> None:
+    """Wait for all busy agents to finish, then exit with code 42.
+
+    *skip_agent* is excluded from the busy-wait (used when an agent triggers
+    its own restart to avoid deadlocking on itself).
+    """
     global _shutdown_requested
     if _shutdown_requested:
         log.info("Graceful shutdown already in progress (ignoring duplicate from %s)", source)
@@ -1562,8 +1566,8 @@ async def _graceful_shutdown(source: str) -> None:
     _shutdown_requested = True
     log.info("Graceful shutdown initiated from %s", source)
 
-    # Find busy agents
-    busy = {name: s for name, s in agents.items() if s.query_lock.locked()}
+    # Find busy agents (exclude the agent that triggered the shutdown)
+    busy = {name: s for name, s in agents.items() if s.query_lock.locked() and name != skip_agent}
 
     if not busy:
         log.info("No agents busy — exiting immediately")
@@ -1586,7 +1590,7 @@ async def _graceful_shutdown(source: str) -> None:
         await asyncio.sleep(5)
         elapsed += 5
 
-        still_busy = {name: s for name, s in agents.items() if s.query_lock.locked()}
+        still_busy = {name: s for name, s in agents.items() if s.query_lock.locked() and name != skip_agent}
         if not still_busy:
             log.info("All agents finished after %ds — exiting", elapsed)
             await _sleep_all_agents()
@@ -1602,7 +1606,7 @@ async def _graceful_shutdown(source: str) -> None:
                     await send_system(channel, f"Still waiting for **{name}** to finish... ({elapsed}s)")
 
     # Hard timeout
-    still_busy = [name for name, s in agents.items() if s.query_lock.locked()]
+    still_busy = [name for name, s in agents.items() if s.query_lock.locked() and name != skip_agent]
     log.warning("Hard timeout reached (%ds) — force exiting. Still busy: %s", HARD_TIMEOUT, still_busy)
     await _sleep_all_agents()
     await bot.close()
