@@ -94,6 +94,9 @@ class AgentSession:
 
 agents: dict[str, AgentSession] = {}
 
+# Graceful shutdown flag
+_shutdown_requested = False
+
 # Guild infrastructure (populated in on_ready)
 target_guild: discord.Guild | None = None
 active_category: CategoryChannel | None = None
@@ -985,6 +988,9 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextC
 async def _process_message_queue(session: AgentSession) -> None:
     """Process any queued messages for an agent after the current query finishes."""
     while not session.message_queue.empty():
+        if _shutdown_requested:
+            log.info("Shutdown requested — not processing further queued messages for '%s'", session.name)
+            break
         content, channel = session.message_queue.get_nowait()
         if session.client is None:
             await send_system(channel, f"Agent **{session.name}** session ended — dropping queued message.")
@@ -1125,6 +1131,65 @@ async def process_kill_signal() -> None:
             os.remove(KILL_SIGNAL_PATH)
 
 
+# --- Graceful shutdown ---
+
+
+async def _graceful_shutdown(source: str) -> None:
+    """Wait for all busy agents to finish, then exit with code 42."""
+    global _shutdown_requested
+    if _shutdown_requested:
+        log.info("Graceful shutdown already in progress (ignoring duplicate from %s)", source)
+        return
+    _shutdown_requested = True
+    log.info("Graceful shutdown initiated from %s", source)
+
+    # Find busy agents
+    busy = {name: s for name, s in agents.items() if s.query_lock.locked()}
+
+    if not busy:
+        log.info("No agents busy — exiting immediately")
+        save_active_sessions()
+        await bot.close()
+        os._exit(42)
+
+    # Notify each busy agent's channel
+    for name, session in busy.items():
+        channel = await get_agent_channel(name)
+        if channel:
+            await send_system(channel, f"Restart pending — waiting for **{name}** to finish current task...")
+
+    # Wait loop: check every 5s, message every 30s, hard timeout at 10 min
+    HARD_TIMEOUT = QUERY_TIMEOUT  # 10 minutes
+    elapsed = 0
+    last_status_msg = 0
+
+    while elapsed < HARD_TIMEOUT:
+        await asyncio.sleep(5)
+        elapsed += 5
+
+        still_busy = {name: s for name, s in agents.items() if s.query_lock.locked()}
+        if not still_busy:
+            log.info("All agents finished after %ds — exiting", elapsed)
+            save_active_sessions()
+            await bot.close()
+            os._exit(42)
+
+        # Send status update every 30s
+        if elapsed - last_status_msg >= 30:
+            last_status_msg = elapsed
+            for name in still_busy:
+                channel = await get_agent_channel(name)
+                if channel:
+                    await send_system(channel, f"Still waiting for **{name}** to finish... ({elapsed}s)")
+
+    # Hard timeout
+    still_busy = [name for name, s in agents.items() if s.query_lock.locked()]
+    log.warning("Hard timeout reached (%ds) — force exiting. Still busy: %s", HARD_TIMEOUT, still_busy)
+    save_active_sessions()
+    await bot.close()
+    os._exit(42)
+
+
 # --- Message handler ---
 
 @bot.event
@@ -1153,6 +1218,10 @@ async def on_message(message):
         return
 
     log.info("Message from %s in #%s: %s", message.author, message.channel.name, message.content[:200])
+
+    if _shutdown_requested:
+        await send_system(message.channel, "Bot is restarting — not accepting new messages.")
+        return
 
     # Look up which agent owns this channel
     agent_name = channel_to_agent.get(message.channel.id)
@@ -1215,15 +1284,18 @@ async def on_message(message):
 
 # --- Scheduler loop ---
 
-@tasks.loop(seconds=30)
+@tasks.loop(seconds=10)
 async def check_schedules():
     # Restart signal check
     if os.path.exists(RESTART_SIGNAL_PATH):
         os.remove(RESTART_SIGNAL_PATH)
-        log.info("Restart signal detected, exiting with code 42")
-        save_active_sessions()
-        await bot.close()
-        os._exit(42)
+        log.info("Restart signal detected")
+        await _graceful_shutdown("restart signal file")
+        return
+
+    # If shutdown is in progress, skip all scheduled work
+    if _shutdown_requested:
+        return
 
     # Kill/spawn signal checks
     await process_kill_signal()
@@ -1484,17 +1556,23 @@ async def reset_context(interaction, agent_name: str | None = None, working_dir:
     )
 
 
-@bot.tree.command(name="restart", description="Restart the bot (exit code 42, picked up by run.sh).")
-async def restart_cmd(interaction):
+@bot.tree.command(name="restart", description="Restart the bot. Use force=True to skip waiting for agents.")
+@app_commands.describe(force="Skip waiting for busy agents and restart immediately")
+async def restart_cmd(interaction, force: bool = False):
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
 
-    await interaction.response.send_message("*System:* Restarting...")
+    if force:
+        await interaction.response.send_message("*System:* Force restarting...")
+        log.info("Force restart requested via /restart command")
+        save_active_sessions()
+        await bot.close()
+        os._exit(42)
+
+    await interaction.response.send_message("*System:* Initiating graceful restart...")
     log.info("Restart requested via /restart command")
-    save_active_sessions()
-    await bot.close()
-    os._exit(42)
+    await _graceful_shutdown("slash command")
 
 
 # --- Startup ---
