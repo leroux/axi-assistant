@@ -1244,6 +1244,7 @@ async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | No
 
     if not initial_prompt:
         await send_system(channel, f"Agent **{name}** is ready.")
+        await sleep_agent(session)
         return
 
     asyncio.create_task(_run_initial_prompt(session, initial_prompt, channel))
@@ -1303,6 +1304,12 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextC
         await send_system(channel, f"Agent **{session.name}** encountered an error during initial task.")
 
     await _process_message_queue(session)
+
+    # Sleep agent after completing initial prompt and draining the queue
+    try:
+        await sleep_agent(session)
+    except Exception:
+        log.exception("Error sleeping agent '%s' after initial prompt", session.name)
 
 
 async def _process_message_queue(session: AgentSession) -> None:
