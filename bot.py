@@ -65,7 +65,7 @@ schedule_last_fired: dict[str, datetime] = {}
 MASTER_AGENT_NAME = "axi-master"
 MAX_AGENTS = 20
 IDLE_REMINDER_THRESHOLDS = [timedelta(minutes=30), timedelta(hours=3), timedelta(hours=48)]
-QUERY_TIMEOUT = 600  # 10 minutes
+QUERY_TIMEOUT = 43200  # 12 hours
 INTERRUPT_TIMEOUT = 15  # seconds to wait after interrupt
 
 ACTIVE_CATEGORY_NAME = "Active"
