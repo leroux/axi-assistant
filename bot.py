@@ -1419,8 +1419,7 @@ async def _rate_limit_retry_worker() -> None:
 
 async def _receive_response_safe(session: AgentSession):
     """Wrapper around receive_messages() that skips unknown message types.
-    Continues past ResultMessages if there are injected queries pending.
-    Raw dicts are yielded for known-but-unparsed types (e.g. rate_limit_event)."""
+    Continues past ResultMessages if there are injected queries pending."""
     from claude_agent_sdk._internal.message_parser import parse_message
 
     async for data in session.client._query.receive_messages():
@@ -1429,7 +1428,7 @@ async def _receive_response_safe(session: AgentSession):
         except MessageParseError:
             msg_type = data.get("type")
             if msg_type == "rate_limit_event":
-                yield data  # Forward raw dict so the caller can display it
+                log.info("Rate limit event: %s", data)
             else:
                 log.debug("Skipping unknown SDK message type: %s", msg_type)
             continue
@@ -1462,26 +1461,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                     for part in split_message(f"```\n{stderr_text}\n```"):
                         await channel.send(part)
 
-            # Raw dict: rate_limit_event forwarded from _receive_response_safe
-            if isinstance(msg, dict) and msg.get("type") == "rate_limit_event":
-                rl = msg.get("event", msg)  # inner event, or top-level if flat
-                # Build a concise summary from whatever fields are present
-                parts = []
-                for key in ("requests_remaining", "requests_limit",
-                            "tokens_remaining", "tokens_limit",
-                            "requests_reset", "tokens_reset"):
-                    val = rl.get(key)
-                    if val is not None:
-                        label = key.replace("_", " ").title()
-                        parts.append(f"**{label}:** {val}")
-                if parts:
-                    detail = " · ".join(parts)
-                else:
-                    # Fallback: show the raw payload so nothing is lost
-                    detail = f"`{msg}`"
-                await send_system(channel, f"⏳ Rate limit info — {detail}")
-
-            elif isinstance(msg, StreamEvent):
+            if isinstance(msg, StreamEvent):
                 if not hit_rate_limit:
                     event = msg.event
                     if event.get("type") == "content_block_delta":
