@@ -117,7 +117,6 @@ class AgentSession:
     discord_channel_id: int | None = None
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     mcp_servers: dict | None = None
-    injected_count: int = 0  # queries injected mid-stream via query()
     _log: logging.Logger | None = None
 
     def __post_init__(self):
@@ -1054,8 +1053,9 @@ async def wake_agent(session: AgentSession) -> None:
         )
 
         try:
-            session.client = ClaudeSDKClient(options=options)
-            await session.client.__aenter__()
+            client = ClaudeSDKClient(options=options)
+            await client.__aenter__()
+            session.client = client  # Only expose after fully initialized
             log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
             if session._log:
                 session._log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
@@ -1078,8 +1078,9 @@ async def wake_agent(session: AgentSession) -> None:
                 sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
                 mcp_servers=session.mcp_servers or {},
             )
-            session.client = ClaudeSDKClient(options=options)
-            await session.client.__aenter__()
+            client = ClaudeSDKClient(options=options)
+            await client.__aenter__()
+            session.client = client  # Only expose after fully initialized
             session.session_id = None
             log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
             if session._log:
@@ -1487,41 +1488,68 @@ async def _rate_limit_retry_worker() -> None:
 # --- Streaming response ---
 
 async def _receive_response_safe(session: AgentSession):
-    """Wrapper around receive_messages() that skips unknown message types.
-    Continues past ResultMessages if there are injected queries pending."""
+    """Wrapper around receive_messages() that handles unknown message types.
+
+    Yields parsed SDK messages until a ResultMessage is received (one per query).
+    Unknown message types are logged as warnings and skipped — never silently dropped.
+    """
     from claude_agent_sdk._internal.message_parser import parse_message
 
     async for data in session.client._query.receive_messages():
         try:
             parsed = parse_message(data)
         except MessageParseError:
-            msg_type = data.get("type")
+            msg_type = data.get("type", "?")
             if msg_type == "rate_limit_event":
-                log.info("Rate limit event: %s", data)
+                log.info("Rate limit event for '%s': %s", session.name, data)
+                if session._log:
+                    session._log.info("RATE_LIMIT_EVENT: %s", json.dumps(data)[:500])
             else:
-                log.debug("Skipping unknown SDK message type: %s", msg_type)
+                log.warning("Unknown SDK message type from '%s': type=%s data=%s",
+                            session.name, msg_type, json.dumps(data)[:500])
+                if session._log:
+                    session._log.warning("UNKNOWN_MSG: type=%s data=%s", msg_type, json.dumps(data)[:500])
             continue
         yield parsed
         if isinstance(parsed, ResultMessage):
-            if session.injected_count > 0:
-                session.injected_count -= 1
-                continue  # More responses expected from injected queries
             return
 
 
 async def stream_response_to_channel(session: AgentSession, channel, show_awaiting_input: bool = True) -> None:
     """Stream Claude's response from a specific agent session to a Discord channel.
-    Each agent always streams to its own channel — no visibility filtering needed."""
+
+    Message flow:
+      1. StreamEvents arrive in real-time as Claude generates tokens.
+         - content_block_delta/text_delta → buffer text for Discord
+         - message_delta with stop_reason "end_turn" → Claude is done, stop typing
+      2. AssistantMessage arrives after each API round (may include tool calls).
+         - Flush any buffered text, log content to agent log.
+         - On error (rate_limit, etc.) → handle specially.
+      3. ResultMessage arrives once per query (cost/session bookkeeping).
+         - Extract session_id, stop typing if still active.
+         - Generator terminates here — loop exits.
+
+    The typing indicator is stopped as soon as we detect end_turn in the stream
+    events (step 1), NOT when ResultMessage arrives (step 3). This prevents
+    the typing indicator from lingering during SDK bookkeeping.
+    """
 
     log.debug("Streaming response for '%s'", session.name)
 
     text_buffer = ""
     hit_rate_limit = False
+    typing_stopped = False
 
     async def flush_text(text: str) -> None:
         if not text.strip():
             return
         await send_long(channel, text.lstrip())
+
+    def stop_typing() -> None:
+        nonlocal typing_stopped
+        if not typing_stopped and _typing_ctx and _typing_ctx.task:
+            _typing_ctx.task.cancel()
+            typing_stopped = True
 
     async with channel.typing() as _typing_ctx:
         async for msg in _receive_response_safe(session):
@@ -1533,62 +1561,102 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                         await channel.send(part)
 
             if isinstance(msg, StreamEvent):
-                if not hit_rate_limit:
-                    event = msg.event
-                    if event.get("type") == "content_block_delta":
+                event = msg.event
+                event_type = event.get("type", "")
+
+                # Log all stream events to agent log
+                if session._log:
+                    if event_type == "content_block_delta":
                         delta = event.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text_buffer += delta.get("text", "")
+                        delta_type = delta.get("type", "")
+                        # Don't log full text/thinking deltas (too noisy), just note them
+                        if delta_type not in ("text_delta", "thinking_delta", "signature_delta"):
+                            session._log.debug("STREAM: %s delta=%s", event_type, delta_type)
+                    elif event_type in ("content_block_start", "content_block_stop"):
+                        block = event.get("content_block", {})
+                        session._log.debug("STREAM: %s type=%s index=%s",
+                                           event_type, block.get("type", "?"), event.get("index"))
+                    elif event_type == "message_start":
+                        msg_data = event.get("message", {})
+                        session._log.debug("STREAM: message_start model=%s", msg_data.get("model", "?"))
+                    elif event_type == "message_delta":
+                        delta = event.get("delta", {})
+                        session._log.debug("STREAM: message_delta stop_reason=%s", delta.get("stop_reason"))
+                    elif event_type == "message_stop":
+                        session._log.debug("STREAM: message_stop")
+                    else:
+                        session._log.debug("STREAM: %s %s", event_type, json.dumps(event)[:300])
+
+                if hit_rate_limit:
+                    continue
+
+                # Buffer text deltas for Discord
+                if event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text_buffer += delta.get("text", "")
+
+                # Detect end_turn — Claude is done generating, stop typing immediately.
+                # This fires BEFORE the AssistantMessage/ResultMessage, so the typing
+                # indicator stops as soon as the API signals completion.
+                elif event_type == "message_delta":
+                    stop_reason = event.get("delta", {}).get("stop_reason")
+                    if stop_reason == "end_turn":
+                        await flush_text(text_buffer)
+                        text_buffer = ""
+                        stop_typing()
 
             elif isinstance(msg, AssistantMessage):
                 if msg.error in ("rate_limit", "billing_error"):
-                    # Collect error text from buffer and message content for timing parsing
                     error_text = text_buffer
                     for block in (msg.content or []):
                         if hasattr(block, "text"):
                             error_text += " " + block.text
                     log.warning("Agent '%s' hit %s error: %s", session.name, msg.error, error_text[:200])
-                    if _typing_ctx and _typing_ctx.task:
-                        _typing_ctx.task.cancel()
+                    stop_typing()
                     await _handle_rate_limit(error_text, session, channel)
                     text_buffer = ""
                     hit_rate_limit = True
                 elif msg.error:
-                    # Other API errors (server_error, authentication_failed, etc.)
                     error_text = text_buffer
                     for block in (msg.content or []):
                         if hasattr(block, "text"):
                             error_text += " " + block.text
                     log.warning("Agent '%s' hit API error (%s): %s", session.name, msg.error, error_text[:200])
-                    if _typing_ctx and _typing_ctx.task:
-                        _typing_ctx.task.cancel()
+                    stop_typing()
                     await flush_text(text_buffer)
                     text_buffer = ""
                 else:
+                    # Normal response — flush any remaining text and stop typing.
+                    # Usually end_turn already stopped typing, but this is a safety net
+                    # for responses that end with tool_use (no end_turn event).
                     await flush_text(text_buffer)
                     text_buffer = ""
-                    # Stop the typing indicator — response text has been sent.
-                    # The background typing task fires every 5s; if left running
-                    # it re-sends a typing event AFTER our message, making the
-                    # indicator reappear and persist until ResultMessage arrives.
-                    if _typing_ctx and _typing_ctx.task:
-                        _typing_ctx.task.cancel()
-                    # Log assistant response content to per-agent log
-                    if session._log:
-                        for block in (msg.content or []):
-                            if hasattr(block, "text"):
-                                session._log.info("ASSISTANT: %s", block.text[:2000])
-                            elif hasattr(block, "type") and block.type == "tool_use":
-                                session._log.info("TOOL_USE: %s(%s)", block.name, json.dumps(block.input)[:500] if hasattr(block, "input") else "")
+                    stop_typing()
+
+                # Log assistant response content to per-agent log
+                if session._log:
+                    for block in (msg.content or []):
+                        if hasattr(block, "text"):
+                            session._log.info("ASSISTANT: %s", block.text[:2000])
+                        elif hasattr(block, "type") and block.type == "tool_use":
+                            session._log.info("TOOL_USE: %s(%s)", block.name,
+                                              json.dumps(block.input)[:500] if hasattr(block, "input") else "")
 
             elif isinstance(msg, ResultMessage):
-                if _typing_ctx and _typing_ctx.task:
-                    _typing_ctx.task.cancel()
+                stop_typing()
                 await _set_session_id(session, msg)
                 if not hit_rate_limit:
                     await flush_text(text_buffer)
                 text_buffer = ""
-                # Generator terminates after final ResultMessage; no explicit break needed
+                if session._log:
+                    session._log.info("RESULT: cost=$%s turns=%d duration=%dms session=%s",
+                                      msg.total_cost_usd, msg.num_turns, msg.duration_ms, msg.session_id)
+
+            else:
+                # Log any other parsed message types (UserMessage, SystemMessage, etc.)
+                if session._log:
+                    session._log.debug("OTHER_MSG: %s", type(msg).__name__)
 
             # When buffer is large enough, flush it mid-turn
             if not hit_rate_limit and len(text_buffer) >= 1800:
@@ -1607,15 +1675,12 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 await channel.send(part)
 
     if hit_rate_limit:
-        # Rate limit handler already notified the user — don't show "awaiting input"
         return
 
-    # Flush remaining text buffer
     await flush_text(text_buffer)
 
     log.debug("Stream complete for '%s'", session.name)
 
-    # Notify that the bot is done responding
     if show_awaiting_input:
         await send_system(channel, "Bot has finished responding and is awaiting input.")
 
@@ -1626,7 +1691,7 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
 
     # Step 1: Try graceful interrupt
     try:
-        session.injected_count = 0  # interrupt cancels all pending queries
+        # interrupt cancels current query
         await session.client.interrupt()
         async with asyncio.timeout(INTERRUPT_TIMEOUT):
             async for msg in _receive_response_safe(session):
@@ -2012,24 +2077,14 @@ async def on_message(message):
         return
 
     if session.query_lock.locked():
-        if session.client is not None:
-            # Inject directly into running conversation
-            session.injected_count += 1
-            log.debug("Injecting message into running query for '%s' (injected_count=%d)", agent_name, session.injected_count)
-            await session.client.query(_as_stream(message.content))
-            await send_system(
-                message.channel,
-                f"Message sent to **{agent_name}** — will process after current turn.",
-            )
-        else:
-            # Edge case: locked but no client (shouldn't happen, but be safe)
-            await session.message_queue.put((message.content, message.channel))
-            position = session.message_queue.qsize()
-            log.debug("Agent '%s' locked but no client, queuing (queue_size=%d)", agent_name, position)
-            await send_system(
-                message.channel,
-                f"Agent **{agent_name}** is busy — message queued (position {position}).",
-            )
+        await session.message_queue.put((message.content, message.channel))
+        position = session.message_queue.qsize()
+        log.debug("Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position)
+        await send_system(
+            message.channel,
+            f"Agent **{agent_name}** is busy — message queued (position {position}). "
+            f"Will process after current turn.",
+        )
         return
 
     async with session.query_lock:
@@ -2414,7 +2469,7 @@ async def stop_agent(interaction, agent_name: str | None = None):
         return
 
     try:
-        session.injected_count = 0  # interrupt cancels all pending queries
+        # interrupt cancels current query
         await session.client.interrupt()
         await interaction.response.send_message(f"*System:* Interrupt signal sent to **{agent_name}**.")
     except Exception as e:
