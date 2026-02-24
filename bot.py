@@ -532,6 +532,9 @@ async def axi_kill_agent(args):
     session = agents.get(agent_name)
     session_id = session.session_id if session else None
 
+    # Remove from agents dict immediately so the name is freed for respawn
+    agents.pop(agent_name, None)
+
     async def _do_kill():
         try:
             agent_ch = await get_agent_channel(agent_name)
@@ -1788,6 +1791,8 @@ async def kill_agent(interaction, agent_name: str):
         else:
             await send_system(agent_ch, f"Agent **{agent_name}** moved to Killed.")
 
+    # Remove from agents dict immediately so the name is freed for respawn
+    agents.pop(agent_name, None)
     await sleep_agent(session)
     await move_channel_to_killed(agent_name)
 
