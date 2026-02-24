@@ -39,6 +39,7 @@ AXI_USER_DATA = os.environ.get("AXI_USER_DATA", os.path.expanduser("~/axi-user-d
 SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
+DISABLE_CRASH_HANDLER = os.environ.get("DISABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
 
 # --- Discord bot setup ---
 
@@ -95,6 +96,10 @@ agents: dict[str, AgentSession] = {}
 
 # Graceful shutdown flag
 _shutdown_requested = False
+
+# Global rate limit state (all agents share the same API account)
+_rate_limited_until: datetime | None = None
+_rate_limit_retry_task: asyncio.Task | None = None
 
 # Guild infrastructure (populated in on_ready)
 target_guild: discord.Guild | None = None
@@ -1084,6 +1089,146 @@ async def send_system(channel, text: str) -> None:
     await send_long(channel, f"*System:* {text}")
 
 
+# --- Rate limit handling ---
+
+def _parse_rate_limit_seconds(text: str) -> int:
+    """Parse wait duration from rate limit error text. Returns seconds.
+
+    Tries common patterns from the Claude API/CLI. Falls back to 300s (5 min).
+    """
+    text_lower = text.lower()
+
+    # "in X seconds/minutes/hours" or "after X seconds/minutes/hours"
+    match = re.search(r'(?:in|after)\s+(\d+)\s*(seconds?|minutes?|mins?|hours?|hrs?)', text_lower)
+    if match:
+        value = int(match.group(1))
+        unit = match.group(2)
+        if unit.startswith('min'):
+            return value * 60
+        elif unit.startswith('hour') or unit.startswith('hr'):
+            return value * 3600
+        return value
+
+    # "retry after X" (seconds implied)
+    match = re.search(r'retry\s+after\s+(\d+)', text_lower)
+    if match:
+        return int(match.group(1))
+
+    # "X seconds" anywhere
+    match = re.search(r'(\d+)\s*(?:seconds?|secs?)', text_lower)
+    if match:
+        return int(match.group(1))
+
+    # "X minutes" anywhere
+    match = re.search(r'(\d+)\s*(?:minutes?|mins?)', text_lower)
+    if match:
+        return int(match.group(1)) * 60
+
+    # Default: 5 minutes
+    return 300
+
+
+def _format_time_remaining(seconds: int) -> str:
+    """Format seconds into a human-readable duration string."""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        secs = seconds % 60
+        return f"{minutes}m {secs}s" if secs else f"{minutes}m"
+    else:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+
+
+def _is_rate_limited() -> bool:
+    """Check if we're currently rate limited."""
+    global _rate_limited_until
+    if _rate_limited_until is None:
+        return False
+    if datetime.now(timezone.utc) >= _rate_limited_until:
+        _rate_limited_until = None
+        return False
+    return True
+
+
+def _rate_limit_remaining_seconds() -> int:
+    """Get remaining rate limit time in seconds."""
+    if _rate_limited_until is None:
+        return 0
+    remaining = (_rate_limited_until - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(remaining))
+
+
+async def _handle_rate_limit(error_text: str, session: AgentSession, channel) -> None:
+    """Handle a rate limit error: set global state, notify user, schedule retry."""
+    global _rate_limited_until, _rate_limit_retry_task
+
+    wait_seconds = _parse_rate_limit_seconds(error_text)
+    new_limit = datetime.now(timezone.utc) + timedelta(seconds=wait_seconds)
+    already_limited = _is_rate_limited()
+
+    # Update expiry (extend if needed)
+    if _rate_limited_until is None or new_limit > _rate_limited_until:
+        _rate_limited_until = new_limit
+
+    log.warning("Rate limited — waiting %ds (until %s)", wait_seconds, _rate_limited_until.isoformat())
+
+    # Only notify user if this is a new rate limit (avoid spam during queue processing)
+    if not already_limited:
+        remaining = _format_time_remaining(wait_seconds)
+        await send_system(
+            channel,
+            f"⚠️ **Rate limited.** Usage will be available again in ~**{remaining}**. "
+            f"Messages sent during this time will be queued and processed automatically.",
+        )
+
+    # Schedule/reschedule retry worker if not already running
+    if _rate_limit_retry_task is None or _rate_limit_retry_task.done():
+        _rate_limit_retry_task = asyncio.create_task(_rate_limit_retry_worker())
+
+
+async def _rate_limit_retry_worker() -> None:
+    """Background task: waits for rate limit to expire, then drains all agent queues."""
+    global _rate_limited_until
+    try:
+        while True:
+            # Wait for rate limit to expire (poll every 30s to pick up extensions)
+            while _rate_limited_until and datetime.now(timezone.utc) < _rate_limited_until:
+                wait = (_rate_limited_until - datetime.now(timezone.utc)).total_seconds()
+                await asyncio.sleep(max(1, min(wait + 1, 30)))
+
+            _rate_limited_until = None
+            log.info("Rate limit expired — processing queued messages for all agents")
+
+            # Check if any agent has queued messages
+            has_queued = any(not s.message_queue.empty() for s in agents.values())
+            if not has_queued:
+                return
+
+            # Process queued messages for each agent
+            re_limited = False
+            for name, session in list(agents.items()):
+                if _is_rate_limited():
+                    re_limited = True
+                    break
+                if session.message_queue.empty():
+                    continue
+                channel = bot.get_channel(session.discord_channel_id) if session.discord_channel_id else None
+                if channel:
+                    await send_system(channel, "✅ Rate limit expired — processing queued messages…")
+                    await _process_message_queue(session)
+
+            if not re_limited:
+                return  # All done — exit worker
+            # Re-rate-limited during processing — loop back and wait again
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        log.exception("Error in rate limit retry worker")
+
+
 # --- Streaming response ---
 
 async def _receive_response_safe(session: AgentSession):
@@ -1110,6 +1255,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
     Each agent always streams to its own channel — no visibility filtering needed."""
 
     text_buffer = ""
+    hit_rate_limit = False
 
     async def flush_text(text: str) -> None:
         if not text.strip():
@@ -1126,24 +1272,46 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                         await channel.send(part)
 
             if isinstance(msg, StreamEvent):
-                event = msg.event
-                if event.get("type") == "content_block_delta":
-                    delta = event.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        text_buffer += delta.get("text", "")
+                if not hit_rate_limit:
+                    event = msg.event
+                    if event.get("type") == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text_buffer += delta.get("text", "")
 
             elif isinstance(msg, AssistantMessage):
-                await flush_text(text_buffer)
-                text_buffer = ""
+                if msg.error in ("rate_limit", "billing_error"):
+                    # Collect error text from buffer and message content for timing parsing
+                    error_text = text_buffer
+                    for block in (msg.content or []):
+                        if hasattr(block, "text"):
+                            error_text += " " + block.text
+                    log.warning("Agent '%s' hit %s error: %s", session.name, msg.error, error_text[:200])
+                    await _handle_rate_limit(error_text, session, channel)
+                    text_buffer = ""
+                    hit_rate_limit = True
+                elif msg.error:
+                    # Other API errors (server_error, authentication_failed, etc.)
+                    error_text = text_buffer
+                    for block in (msg.content or []):
+                        if hasattr(block, "text"):
+                            error_text += " " + block.text
+                    log.warning("Agent '%s' hit API error (%s): %s", session.name, msg.error, error_text[:200])
+                    await flush_text(text_buffer)
+                    text_buffer = ""
+                else:
+                    await flush_text(text_buffer)
+                    text_buffer = ""
 
             elif isinstance(msg, ResultMessage):
                 await _set_session_id(session, msg)
-                await flush_text(text_buffer)
+                if not hit_rate_limit:
+                    await flush_text(text_buffer)
                 text_buffer = ""
                 # Generator terminates after final ResultMessage; no explicit break needed
 
             # When buffer is large enough, flush it mid-turn
-            if len(text_buffer) >= 1800:
+            if not hit_rate_limit and len(text_buffer) >= 1800:
                 split_at = text_buffer.rfind("\n", 0, 1800)
                 if split_at == -1:
                     split_at = 1800
@@ -1157,6 +1325,10 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
         if stderr_text:
             for part in split_message(f"```\n{stderr_text}\n```"):
                 await channel.send(part)
+
+    if hit_rate_limit:
+        # Rate limit handler already notified the user — don't show "awaiting input"
+        return
 
     # Flush remaining text buffer
     await flush_text(text_buffer)
@@ -1324,6 +1496,10 @@ async def _process_message_queue(session: AgentSession) -> None:
         if _shutdown_requested:
             log.info("Shutdown requested — not processing further queued messages for '%s'", session.name)
             break
+        if _is_rate_limited():
+            log.info("Rate limited — pausing queue processing for '%s' (%d messages pending)",
+                     session.name, session.message_queue.qsize())
+            break  # Retry worker will resume processing when rate limit expires
         content, channel = session.message_queue.get_nowait()
 
         remaining = session.message_queue.qsize()
@@ -1482,6 +1658,18 @@ async def on_message(message):
     # Block interaction with killed agents
     if killed_category and hasattr(message.channel, "category_id") and message.channel.category_id == killed_category.id:
         await send_system(message.channel, "This agent has been killed. Use `/spawn` to create a new one.")
+        return
+
+    # Queue messages while rate limited (don't waste API calls)
+    if _is_rate_limited() and not session.query_lock.locked():
+        await session.message_queue.put((message.content, message.channel))
+        position = session.message_queue.qsize()
+        remaining = _format_time_remaining(_rate_limit_remaining_seconds())
+        await send_system(
+            message.channel,
+            f"⏳ Currently rate limited — ~**{remaining}** remaining. "
+            f"Message queued (position {position}) and will be sent automatically.",
+        )
         return
 
     if session.query_lock.locked():
@@ -2103,7 +2291,9 @@ async def on_ready():
         log.info("Sent restart notification to master channel")
 
     # Spawn crash handler agent if a crash was detected (startup or runtime)
-    if rollback_info:
+    if DISABLE_CRASH_HANDLER and (rollback_info or crash_info):
+        log.info("Crash handler disabled via DISABLE_CRASH_HANDLER; skipping agent spawn")
+    elif rollback_info:
         crash_log = rollback_info.get("crash_log", "(no crash log available)")
         exit_code = rollback_info.get("exit_code", "unknown")
         uptime = rollback_info.get("uptime_seconds", "?")
