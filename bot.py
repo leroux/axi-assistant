@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import signal
 import asyncio
 import threading
 import logging
@@ -170,20 +171,22 @@ def drain_sdk_buffer(session: AgentSession) -> int:
 
 
 def make_cwd_permission_callback(allowed_cwd: str):
-    """Create a can_use_tool callback that restricts file writes to allowed_cwd."""
+    """Create a can_use_tool callback that restricts file writes to allowed_cwd and AXI_USER_DATA."""
     allowed = os.path.realpath(allowed_cwd)
+    user_data = os.path.realpath(AXI_USER_DATA)
 
     async def _check_permission(
         tool_name: str, tool_input: dict, ctx: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
-        # File-writing tools — check path is within cwd
+        # File-writing tools — check path is within cwd or user data
         if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
             resolved = os.path.realpath(path)
-            if resolved == allowed or resolved.startswith(allowed + os.sep):
-                return PermissionResultAllow()
+            for base in (allowed, user_data):
+                if resolved == base or resolved.startswith(base + os.sep):
+                    return PermissionResultAllow()
             return PermissionResultDeny(
-                message=f"Access denied: {path} is outside working directory {allowed}"
+                message=f"Access denied: {path} is outside working directory {allowed} and user data {user_data}"
             )
         # Everything else (Bash handled by sandbox, reads allowed everywhere)
         return PermissionResultAllow()
@@ -320,7 +323,8 @@ You are a complete, autonomous system — not just an LLM behind a bot. \
 Your surrounding infrastructure can send messages independently (e.g. startup notifications, scheduled events), not only in response to user messages. \
 Keep responses concise and well-formatted for Discord (markdown, code blocks). \
 Your user's profile and preferences are in USER_PROFILE.md in the current working directory. \
-The default working directory for spawned agents is %(axi_user_data)s. \
+The default working directory for spawned agents is %(axi_user_data)s/agents/<agent-name>/. \
+The top-level user data directory (%(axi_user_data)s) is reserved for user-level files (profile, todos, plans, etc.) — agents get their own subdirectories. \
 Your own source code is in %(bot_dir)s — when spawning agents to work on it, pass that path as cwd. \
 Read USER_PROFILE.md at the start of conversations to personalize your responses. \
 You can schedule events by editing schedules.json in your working directory. \
@@ -463,7 +467,7 @@ NotebookEdit, and all MCP tools.\
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "Unique short name, no spaces (e.g. 'feature-auth', 'fix-bug-123')"},
-            "cwd": {"type": "string", "description": "Absolute path to the working directory for the agent"},
+            "cwd": {"type": "string", "description": "Absolute path to the working directory for the agent. Defaults to a per-agent subdirectory under user data (agents/<name>/)."},
             "prompt": {"type": "string", "description": "Initial task instructions for the agent"},
             "resume": {"type": "string", "description": "Optional session ID to resume a previous agent session"},
         },
@@ -472,7 +476,8 @@ NotebookEdit, and all MCP tools.\
 )
 async def axi_spawn_agent(args):
     agent_name = args.get("name", "").strip()
-    agent_cwd = os.path.realpath(os.path.expanduser(args.get("cwd", AXI_USER_DATA)))
+    default_cwd = os.path.join(AXI_USER_DATA, "agents", agent_name) if agent_name else AXI_USER_DATA
+    agent_cwd = os.path.realpath(os.path.expanduser(args.get("cwd", default_cwd)))
     agent_prompt = args.get("prompt", "")
     agent_resume = args.get("resume")
 
@@ -662,21 +667,71 @@ async def start_session(name: str, cwd: str, system_prompt: str | None = None, r
     return session
 
 
+def _get_subprocess_pid(client: ClaudeSDKClient) -> int | None:
+    """Extract the PID of the underlying CLI subprocess from a ClaudeSDKClient.
+
+    Returns None if the client has no live subprocess.
+    """
+    try:
+        transport = getattr(client, "_transport", None) or getattr(
+            getattr(client, "_query", None), "transport", None
+        )
+        if transport is None:
+            return None
+        proc = getattr(transport, "_process", None)
+        if proc is None:
+            return None
+        return proc.pid
+    except Exception:
+        return None
+
+
+def _ensure_process_dead(pid: int | None, label: str) -> None:
+    """Send SIGTERM to *pid* if it is still alive.
+
+    Workaround for a bug in claude-agent-sdk where Query.close()'s anyio
+    cancel-scope leaks a CancelledError into the asyncio event loop,
+    preventing SubprocessCLITransport.close() from calling
+    process.terminate().  See test_process_leak.py for a reproducer.
+    """
+    if pid is None:
+        return
+    try:
+        os.kill(pid, 0)  # check if alive (raises OSError if dead)
+    except OSError:
+        return  # already dead — nothing to do
+    log.warning("Subprocess %d for '%s' survived disconnect — sending SIGTERM (SDK bug workaround)", pid, label)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
+async def _disconnect_client(client: ClaudeSDKClient, label: str) -> None:
+    """Disconnect a ClaudeSDKClient and ensure its subprocess is terminated.
+
+    Handles the anyio cancel-scope leak in the SDK gracefully.
+    """
+    pid = _get_subprocess_pid(client)
+    try:
+        await asyncio.wait_for(client.__aexit__(None, None, None), timeout=5.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        log.warning("'%s' shutdown timed out or was cancelled", label)
+    except RuntimeError as e:
+        if "cancel scope" in str(e):
+            log.debug("'%s' cross-task cleanup (expected): %s", label, e)
+        else:
+            raise
+    _ensure_process_dead(pid, label)
+
+
 async def end_session(name: str) -> None:
     """End a named Claude session and remove it from the registry."""
     session = agents.get(name)
     if session is None:
         return
     if session.client is not None:
-        try:
-            await asyncio.wait_for(session.client.__aexit__(None, None, None), timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            log.warning("Claude session '%s' shutdown timed out or was cancelled", name)
-        except RuntimeError as e:
-            if "cancel scope" in str(e):
-                log.debug("Claude session '%s' cross-task cleanup (expected): %s", name, e)
-            else:
-                raise
+        await _disconnect_client(session.client, name)
         session.client = None
     agents.pop(name, None)
     log.info("Claude session '%s' ended", name)
@@ -704,15 +759,7 @@ async def sleep_agent(session: AgentSession) -> None:
         return
 
     log.info("Sleeping agent '%s'", session.name)
-    try:
-        await asyncio.wait_for(session.client.__aexit__(None, None, None), timeout=5.0)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        log.warning("Agent '%s' sleep shutdown timed out or was cancelled", session.name)
-    except RuntimeError as e:
-        if "cancel scope" in str(e):
-            log.debug("Agent '%s' sleep cross-task cleanup (expected): %s", session.name, e)
-        else:
-            raise
+    await _disconnect_client(session.client, session.name)
     session.client = None
     log.info("Agent '%s' is now sleeping", session.name)
 
@@ -1507,7 +1554,7 @@ async def check_schedules():
 
                     log.info("Firing recurring event: %s", name)
                     agent_name = entry.get("session", name)
-                    agent_cwd = entry.get("cwd", AXI_USER_DATA)
+                    agent_cwd = entry.get("cwd", os.path.join(AXI_USER_DATA, "agents", agent_name))
 
                     if agent_name in agents:
                         # Session already exists — send prompt to it
@@ -1528,7 +1575,7 @@ async def check_schedules():
                 if fire_at <= now_utc:
                     log.info("Firing one-off event: %s", name)
                     agent_name = entry.get("session", name)
-                    agent_cwd = entry.get("cwd", AXI_USER_DATA)
+                    agent_cwd = entry.get("cwd", os.path.join(AXI_USER_DATA, "agents", agent_name))
 
                     if agent_name in agents:
                         log.info("Routing event '%s' to existing session '%s'", name, agent_name)
@@ -1799,6 +1846,72 @@ async def reset_context(interaction, agent_name: str | None = None, working_dir:
     await interaction.followup.send(
         f"*System:* Context reset for **{agent_name}**. Working directory: `{session.cwd}`"
     )
+
+
+async def _run_agent_sdk_command(interaction, agent_name: str | None, command: str, label: str):
+    """Run a Claude Code CLI slash command (e.g. /compact, /clear) on an agent via the SDK."""
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    # Infer agent from channel if not specified
+    if agent_name is None:
+        agent_name = channel_to_agent.get(interaction.channel_id)
+        if agent_name is None:
+            await interaction.response.send_message(
+                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
+            )
+            return
+
+    session = agents.get(agent_name)
+    if session is None:
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+        return
+
+    if session.query_lock.locked():
+        await interaction.response.send_message(f"Agent **{agent_name}** is busy.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    async with session.query_lock:
+        if session.client is None:
+            try:
+                await wake_agent(session)
+            except Exception:
+                log.exception("Failed to wake agent '%s'", agent_name)
+                await interaction.followup.send(f"Failed to wake agent **{agent_name}**.")
+                return
+
+        session.last_activity = datetime.now(timezone.utc)
+        drain_stderr(session)
+        drain_sdk_buffer(session)
+
+        try:
+            async with asyncio.timeout(QUERY_TIMEOUT):
+                await session.client.query(_as_stream(command))
+                channel = bot.get_channel(session.discord_channel_id) or interaction.channel
+                await stream_response_to_channel(session, channel, show_awaiting_input=False)
+            await interaction.followup.send(f"*System:* {label} for **{agent_name}**.")
+        except TimeoutError:
+            await interaction.followup.send(f"*System:* {label} timed out for **{agent_name}**.")
+        except Exception as e:
+            log.exception("Failed to %s agent '%s'", label.lower(), agent_name)
+            await interaction.followup.send(f"Failed to {label.lower()} **{agent_name}**: {e}")
+
+
+@bot.tree.command(name="compact", description="Compact an agent's conversation context. Infers agent from current channel.")
+@app_commands.autocomplete(agent_name=agent_autocomplete)
+async def compact_context(interaction, agent_name: str | None = None):
+    log.info("Slash command /compact agent=%s from %s", agent_name, interaction.user)
+    await _run_agent_sdk_command(interaction, agent_name, "/compact", "Context compacted")
+
+
+@bot.tree.command(name="clear", description="Clear an agent's conversation context. Infers agent from current channel.")
+@app_commands.autocomplete(agent_name=agent_autocomplete)
+async def clear_context(interaction, agent_name: str | None = None):
+    log.info("Slash command /clear agent=%s from %s", agent_name, interaction.user)
+    await _run_agent_sdk_command(interaction, agent_name, "/clear", "Context cleared")
 
 
 @bot.tree.command(name="restart", description="Restart the bot. Use force=True to skip waiting for agents.")
