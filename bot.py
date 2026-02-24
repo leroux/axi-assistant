@@ -926,13 +926,10 @@ async def reconstruct_agents_from_channels() -> int:
     Returns the number of agents reconstructed.
     """
     reconstructed = 0
-    categories = []
-    if active_category:
-        categories.append(active_category)
-    if killed_category:
-        categories.append(killed_category)
+    if not active_category:
+        return reconstructed
 
-    for cat in categories:
+    for cat in [active_category]:
         for ch in cat.text_channels:
             agent_name = ch.name  # channel name IS the agent name (normalized)
 
@@ -1460,7 +1457,16 @@ async def on_message(message):
 
     session = agents.get(agent_name)
     if session is None:
+        # Check if this channel is in the Killed category
+        if killed_category and hasattr(message.channel, "category_id") and message.channel.category_id == killed_category.id:
+            await send_system(message.channel, "This agent has been killed. Use `/spawn` to create a new one.")
+            return
         return  # Truly unknown channel
+
+    # Block interaction with killed agents
+    if killed_category and hasattr(message.channel, "category_id") and message.channel.category_id == killed_category.id:
+        await send_system(message.channel, "This agent has been killed. Use `/spawn` to create a new one.")
+        return
 
     if session.query_lock.locked():
         if session.client is not None:
