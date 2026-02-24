@@ -31,6 +31,9 @@ server_log.jsonl
 projects/
 personal/
 
+# Nova instructions (instance-specific)
+nova_instructions.md
+
 # Runtime signals and state
 .restart_requested
 .rollback_performed

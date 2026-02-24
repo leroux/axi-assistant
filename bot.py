@@ -40,6 +40,8 @@ SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
 DISABLE_CRASH_HANDLER = os.environ.get("DISABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
+EXTRA_ALLOWED_DIRS = [os.path.realpath(d.strip()) for d in os.environ.get("EXTRA_ALLOWED_DIRS", "").split(",") if d.strip()]
+EXTRA_SYSTEM_PROMPT_FILE = os.environ.get("EXTRA_SYSTEM_PROMPT_FILE", "")
 
 # --- Discord bot setup ---
 
@@ -188,7 +190,7 @@ def make_cwd_permission_callback(allowed_cwd: str):
         if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
             resolved = os.path.realpath(path)
-            for base in (allowed, user_data):
+            for base in (allowed, user_data, *EXTRA_ALLOWED_DIRS):
                 if resolved == base or resolved.startswith(base + os.sep):
                     return PermissionResultAllow()
             return PermissionResultDeny(
@@ -464,6 +466,10 @@ Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Task (for spawning sub
 NotebookEdit, and all MCP tools.\
 """ % {"axi_user_data": AXI_USER_DATA, "bot_dir": BOT_DIR}
 
+if EXTRA_SYSTEM_PROMPT_FILE and os.path.isfile(EXTRA_SYSTEM_PROMPT_FILE):
+    with open(EXTRA_SYSTEM_PROMPT_FILE) as f:
+        SYSTEM_PROMPT += "\n\n" + f.read()
+
 
 # --- MCP tools for master agent ---
 
@@ -489,7 +495,7 @@ async def axi_spawn_agent(args):
     agent_prompt = args.get("prompt", "")
     agent_resume = args.get("resume")
 
-    ALLOWED_CWDS = (os.path.realpath(AXI_USER_DATA), os.path.realpath(BOT_DIR))
+    ALLOWED_CWDS = (os.path.realpath(AXI_USER_DATA), os.path.realpath(BOT_DIR), *EXTRA_ALLOWED_DIRS)
     if not any(agent_cwd == d or agent_cwd.startswith(d + os.sep) for d in ALLOWED_CWDS):
         return {"content": [{"type": "text", "text": f"Error: cwd must be under {AXI_USER_DATA} or {BOT_DIR}."}], "is_error": True}
 
@@ -648,6 +654,125 @@ _axi_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
     tools=[axi_spawn_agent, axi_kill_agent, axi_restart],
+)
+
+
+# --- Discord REST MCP tools (for cross-server messaging) ---
+
+import httpx
+
+_discord_api = httpx.AsyncClient(
+    base_url="https://discord.com/api/v10",
+    headers={"Authorization": f"Bot {DISCORD_TOKEN}"},
+    timeout=15.0,
+)
+
+
+async def _discord_request(method: str, path: str, **kwargs) -> httpx.Response:
+    """Make a Discord API request with rate-limit retry."""
+    for attempt in range(3):
+        resp = await _discord_api.request(method, path, **kwargs)
+        if resp.status_code == 429:
+            retry_after = resp.json().get("retry_after", 1.0)
+            log.warning("Discord API rate limited on %s %s, retrying after %.1fs", method, path, retry_after)
+            await asyncio.sleep(retry_after)
+            continue
+        resp.raise_for_status()
+        return resp
+    resp.raise_for_status()
+    return resp
+
+
+@tool(
+    "discord_list_channels",
+    "List text channels in a Discord guild/server. Returns channel id, name, and category.",
+    {
+        "type": "object",
+        "properties": {
+            "guild_id": {"type": "string", "description": "The Discord guild (server) ID"},
+        },
+        "required": ["guild_id"],
+    },
+)
+async def discord_list_channels(args):
+    guild_id = args["guild_id"]
+    try:
+        resp = await _discord_request("GET", f"/guilds/{guild_id}/channels")
+        channels = resp.json()
+        # Filter to text channels (type 0) and format
+        text_channels = []
+        # Build category map
+        categories = {c["id"]: c["name"] for c in channels if c["type"] == 4}
+        for ch in channels:
+            if ch["type"] == 0:  # GUILD_TEXT
+                text_channels.append({
+                    "id": ch["id"],
+                    "name": ch["name"],
+                    "category": categories.get(ch.get("parent_id"), None),
+                })
+        return {"content": [{"type": "text", "text": json.dumps(text_channels, indent=2)}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
+
+
+@tool(
+    "discord_read_messages",
+    "Read recent messages from a Discord channel. Returns formatted message history.",
+    {
+        "type": "object",
+        "properties": {
+            "channel_id": {"type": "string", "description": "The Discord channel ID"},
+            "limit": {"type": "integer", "description": "Number of messages to fetch (default 20, max 100)"},
+        },
+        "required": ["channel_id"],
+    },
+)
+async def discord_read_messages(args):
+    channel_id = args["channel_id"]
+    limit = min(args.get("limit", 20), 100)
+    try:
+        resp = await _discord_request("GET", f"/channels/{channel_id}/messages", params={"limit": limit})
+        messages = resp.json()
+        # Messages come newest-first; reverse for chronological order
+        messages.reverse()
+        formatted = []
+        for msg in messages:
+            author = msg.get("author", {}).get("username", "unknown")
+            content = msg.get("content", "")
+            timestamp = msg.get("timestamp", "")
+            formatted.append(f"[{timestamp}] {author}: {content}")
+        return {"content": [{"type": "text", "text": "\n".join(formatted)}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
+
+
+@tool(
+    "discord_send_message",
+    "Send a message to a Discord channel.",
+    {
+        "type": "object",
+        "properties": {
+            "channel_id": {"type": "string", "description": "The Discord channel ID"},
+            "content": {"type": "string", "description": "The message content to send"},
+        },
+        "required": ["channel_id", "content"],
+    },
+)
+async def discord_send_message(args):
+    channel_id = args["channel_id"]
+    content = args["content"]
+    try:
+        resp = await _discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
+        msg = resp.json()
+        return {"content": [{"type": "text", "text": f"Message sent (id: {msg['id']})"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
+
+
+_discord_mcp_server = create_sdk_mcp_server(
+    name="discord",
+    version="1.0.0",
+    tools=[discord_list_channels, discord_read_messages, discord_send_message],
 )
 
 
@@ -1636,7 +1761,9 @@ async def _graceful_shutdown(source: str, skip_agent: str | None = None) -> None
 
 @bot.event
 async def on_message(message):
-    if message.author.bot:
+    if message.author.id == bot.user.id:
+        return
+    if message.author.bot and message.author.id not in ALLOWED_USER_IDS:
         return
 
     # DM messages — redirect to guild
@@ -2251,12 +2378,15 @@ async def on_ready():
     _on_ready_fired = True
 
     # Register master agent as sleeping — it will wake on first message
+    master_mcp = {"axi": _axi_mcp_server}
+    if EXTRA_ALLOWED_DIRS:
+        master_mcp["discord"] = _discord_mcp_server
     master_session = AgentSession(
         name=MASTER_AGENT_NAME,
         cwd=DEFAULT_CWD,
         system_prompt=SYSTEM_PROMPT,
         client=None,
-        mcp_servers={"axi": _axi_mcp_server},
+        mcp_servers=master_mcp,
     )
     agents[MASTER_AGENT_NAME] = master_session
     log.info("Master agent registered (sleeping, will wake on first message)")
