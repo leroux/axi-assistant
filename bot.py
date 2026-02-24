@@ -886,21 +886,32 @@ async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel,
         elif cat.name == KILLED_CATEGORY_NAME:
             killed_cat = cat
 
-    if active_cat is None:
-        active_cat = await guild.create_category(ACTIVE_CATEGORY_NAME, overwrites=overwrites)
-        log.info("Created '%s' category", ACTIVE_CATEGORY_NAME)
-    else:
-        # Sync permissions on existing category
-        await active_cat.edit(overwrites=overwrites)
-        log.info("Synced permissions on '%s' category", ACTIVE_CATEGORY_NAME)
-    active_category = active_cat
+    def _overwrites_match(
+        existing: dict[discord.Role | discord.Member | discord.Object, discord.PermissionOverwrite],
+        desired: dict[discord.Object | discord.Member | discord.Role, discord.PermissionOverwrite],
+    ) -> bool:
+        """Compare overwrites by target ID, ignoring key type differences."""
+        a = {getattr(k, "id", k): v for k, v in existing.items()}
+        b = {getattr(k, "id", k): v for k, v in desired.items()}
+        return a == b
 
-    if killed_cat is None:
-        killed_cat = await guild.create_category(KILLED_CATEGORY_NAME, overwrites=overwrites)
-        log.info("Created '%s' category", KILLED_CATEGORY_NAME)
-    else:
-        await killed_cat.edit(overwrites=overwrites)
-        log.info("Synced permissions on '%s' category", KILLED_CATEGORY_NAME)
+    for name, cat in [
+        (ACTIVE_CATEGORY_NAME, active_cat),
+        (KILLED_CATEGORY_NAME, killed_cat),
+    ]:
+        if cat is None:
+            cat = await guild.create_category(name, overwrites=overwrites)
+            log.info("Created '%s' category", name)
+        elif not _overwrites_match(cat.overwrites, overwrites):
+            await cat.edit(overwrites=overwrites)
+            log.info("Synced permissions on '%s' category", name)
+        else:
+            log.info("Permissions already current on '%s' category", name)
+        if name == ACTIVE_CATEGORY_NAME:
+            active_cat = cat
+        else:
+            killed_cat = cat
+    active_category = active_cat
     killed_category = killed_cat
 
     return guild, active_cat, killed_cat
