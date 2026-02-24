@@ -67,6 +67,7 @@ schedule_last_fired: dict[str, datetime] = {}
 
 MASTER_AGENT_NAME = "axi-master"
 MAX_AGENTS = 20
+MAX_AWAKE_AGENTS = 5  # max concurrent awake agents (each ~280MB); set based on available RAM
 IDLE_REMINDER_THRESHOLDS = [timedelta(minutes=30), timedelta(hours=3), timedelta(hours=48)]
 QUERY_TIMEOUT = 43200  # 12 hours
 INTERRUPT_TIMEOUT = 15  # seconds to wait after interrupt
@@ -95,6 +96,7 @@ class AgentSession:
 
 
 agents: dict[str, AgentSession] = {}
+_wake_lock = asyncio.Lock()  # Serializes wake_agent calls to prevent TOCTOU races on concurrency limit
 
 # Graceful shutdown flag
 _shutdown_requested = False
@@ -874,6 +876,61 @@ async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
     return new_session
 
 
+def _count_awake_agents() -> int:
+    """Count the number of agents that are currently awake (client is not None)."""
+    return sum(1 for s in agents.values() if s.client is not None)
+
+
+async def _evict_idle_agent(exclude: str | None = None) -> bool:
+    """Sleep the most idle non-busy awake agent to free a slot.
+
+    Returns True if an agent was evicted, False if none available.
+    """
+    candidates = []
+    for name, s in agents.items():
+        if name == exclude:
+            continue
+        if s.client is None:
+            continue  # already sleeping
+        if s.query_lock.locked():
+            continue  # busy
+        idle_duration = (datetime.now(timezone.utc) - s.last_activity).total_seconds()
+        candidates.append((idle_duration, name, s))
+
+    if not candidates:
+        return False
+
+    # Evict the longest-idle agent
+    candidates.sort(reverse=True, key=lambda x: x[0])
+    idle_secs, evict_name, evict_session = candidates[0]
+    log.info("Evicting idle agent '%s' (idle %.0fs) to free concurrency slot", evict_name, idle_secs)
+    try:
+        await sleep_agent(evict_session)
+    except Exception:
+        log.exception("Error evicting agent '%s'", evict_name)
+        return False
+    return True
+
+
+async def _ensure_awake_slot(requesting_agent: str) -> bool:
+    """Ensure there is a free awake-agent slot, evicting idle agents if needed.
+
+    Call this before wake_agent() to enforce the concurrency limit.
+    Returns True if a slot is available, False if all slots are busy.
+    """
+    while _count_awake_agents() >= MAX_AWAKE_AGENTS:
+        evicted = await _evict_idle_agent(exclude=requesting_agent)
+        if not evicted:
+            log.warning("Cannot free awake slot for '%s' — all %d slots busy", requesting_agent, MAX_AWAKE_AGENTS)
+            return False
+    return True
+
+
+class ConcurrencyLimitError(Exception):
+    """Raised when the awake-agent concurrency limit is reached and no slots can be freed."""
+    pass
+
+
 async def sleep_agent(session: AgentSession) -> None:
     """Shut down a session's ClaudeSDKClient but keep the AgentSession in the agents dict.
 
@@ -893,37 +950,28 @@ async def wake_agent(session: AgentSession) -> None:
 
     No-op if the session is already awake (client is not None).
     Falls back to a fresh session if resume fails.
+    Enforces the awake-agent concurrency limit by evicting idle agents if needed.
+    Uses _wake_lock to prevent TOCTOU races when multiple agents try to wake concurrently.
     """
     if session.client is not None:
         return
 
-    log.info("Waking agent '%s' (session_id=%s)", session.name, session.session_id)
-    resume_id = session.session_id
+    # Serialize concurrency check + wake to prevent races
+    async with _wake_lock:
+        if session.client is not None:
+            return  # Re-check after acquiring lock
 
-    options = ClaudeAgentOptions(
-        model="opus",
-        effort="high",
-        thinking={"type": "adaptive"},
-        betas=["context-1m-2025-08-07"],
-        setting_sources=["user", "project", "local"],
-        permission_mode="default",
-        can_use_tool=make_cwd_permission_callback(session.cwd),
-        cwd=session.cwd,
-        system_prompt=session.system_prompt,
-        include_partial_messages=True,
-        stderr=make_stderr_callback(session),
-        resume=resume_id,
-        sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
-        mcp_servers=session.mcp_servers or {},
-    )
+        # Enforce concurrency limit before waking
+        slot_available = await _ensure_awake_slot(session.name)
+        if not slot_available:
+            raise ConcurrencyLimitError(
+                f"Cannot wake agent '{session.name}': all {MAX_AWAKE_AGENTS} awake slots are busy. "
+                f"Message will be queued and processed when a slot opens."
+            )
 
-    try:
-        session.client = ClaudeSDKClient(options=options)
-        await session.client.__aenter__()
-        log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
-    except Exception:
-        log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
-        # Retry without resume
+        log.info("Waking agent '%s' (session_id=%s)", session.name, session.session_id)
+        resume_id = session.session_id
+
         options = ClaudeAgentOptions(
             model="opus",
             effort="high",
@@ -936,14 +984,38 @@ async def wake_agent(session: AgentSession) -> None:
             system_prompt=session.system_prompt,
             include_partial_messages=True,
             stderr=make_stderr_callback(session),
-            resume=None,
+            resume=resume_id,
             sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
             mcp_servers=session.mcp_servers or {},
         )
-        session.client = ClaudeSDKClient(options=options)
-        await session.client.__aenter__()
-        session.session_id = None
-        log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
+
+        try:
+            session.client = ClaudeSDKClient(options=options)
+            await session.client.__aenter__()
+            log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
+        except Exception:
+            log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
+            # Retry without resume
+            options = ClaudeAgentOptions(
+                model="opus",
+                effort="high",
+                thinking={"type": "adaptive"},
+                betas=["context-1m-2025-08-07"],
+                setting_sources=["user", "project", "local"],
+                permission_mode="default",
+                can_use_tool=make_cwd_permission_callback(session.cwd),
+                cwd=session.cwd,
+                system_prompt=session.system_prompt,
+                include_partial_messages=True,
+                stderr=make_stderr_callback(session),
+                resume=None,
+                sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
+                mcp_servers=session.mcp_servers or {},
+            )
+            session.client = ClaudeSDKClient(options=options)
+            await session.client.__aenter__()
+            session.session_id = None
+            log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
 
 
 def get_master_session() -> AgentSession | None:
@@ -1586,6 +1658,16 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextC
             if session.client is None:
                 try:
                     await wake_agent(session)
+                except ConcurrencyLimitError:
+                    log.info("Concurrency limit hit for '%s' initial prompt — queuing", session.name)
+                    await session.message_queue.put((prompt, channel))
+                    awake = _count_awake_agents()
+                    await send_system(
+                        channel,
+                        f"⏳ All {awake} agent slots are busy. "
+                        f"Initial prompt queued — will run when a slot opens.",
+                    )
+                    return
                 except Exception:
                     log.exception("Failed to wake agent '%s' for initial prompt", session.name)
                     await send_system(channel, f"Failed to wake agent **{session.name}**.")
@@ -1846,6 +1928,17 @@ async def on_message(message):
         if session.client is None:
             try:
                 await wake_agent(session)
+            except ConcurrencyLimitError:
+                log.info("Concurrency limit hit for '%s' — queuing message", agent_name)
+                await session.message_queue.put((message.content, message.channel))
+                position = session.message_queue.qsize()
+                awake = _count_awake_agents()
+                await send_system(
+                    message.channel,
+                    f"⏳ All {awake} agent slots are busy. "
+                    f"Message queued (position {position}) — will process when a slot opens.",
+                )
+                return
             except Exception:
                 log.exception("Failed to wake agent '%s'", agent_name)
                 await send_system(
@@ -2015,27 +2108,37 @@ async def check_schedules():
         session.last_idle_notified = datetime.now(timezone.utc)
 
     # --- Stranded-message safety net ---
-    # Catch any messages stranded by the tiny race between queue-empty check and sleep
-    for agent_name, session in agents.items():
-        if agent_name == MASTER_AGENT_NAME:
-            continue
-        if (session.client is None
-                and not session.message_queue.empty()
-                and not session.query_lock.locked()):
-            content, ch = session.message_queue.get_nowait()
-            log.info("Stranded message found for sleeping agent '%s', waking", agent_name)
-            asyncio.create_task(_run_initial_prompt(session, content, ch))
+    # Catch any messages stranded by the tiny race between queue-empty check and sleep.
+    # Only attempt if there's an awake slot available to avoid re-queuing loops.
+    if _count_awake_agents() < MAX_AWAKE_AGENTS:
+        for agent_name, session in agents.items():
+            if agent_name == MASTER_AGENT_NAME:
+                continue
+            if (session.client is None
+                    and not session.message_queue.empty()
+                    and not session.query_lock.locked()):
+                content, ch = session.message_queue.get_nowait()
+                log.info("Stranded message found for sleeping agent '%s', waking", agent_name)
+                asyncio.create_task(_run_initial_prompt(session, content, ch))
+                break  # One at a time to respect concurrency limit
 
     # --- Delayed sleep for idle awake agents ---
-    # Sleep agents that have been idle for over 1 minute
+    # Under concurrency pressure, sleep idle agents immediately; otherwise wait 1 minute.
+    awake_count = _count_awake_agents()
+    under_pressure = awake_count >= MAX_AWAKE_AGENTS
+    idle_threshold = timedelta(seconds=0) if under_pressure else timedelta(minutes=1)
+    if under_pressure:
+        log.info("Concurrency pressure: %d/%d awake agents — aggressive idle sleep", awake_count, MAX_AWAKE_AGENTS)
+
     for agent_name, session in list(agents.items()):
         if session.client is None:
             continue  # Already sleeping
         if session.query_lock.locked():
             continue  # Busy
         idle_duration = now_utc - session.last_activity
-        if idle_duration > timedelta(minutes=1):
-            log.info("Auto-sleeping idle agent '%s' (idle %.0fs)", agent_name, idle_duration.total_seconds())
+        if idle_duration > idle_threshold:
+            log.info("Auto-sleeping idle agent '%s' (idle %.0fs, pressure=%s)",
+                     agent_name, idle_duration.total_seconds(), under_pressure)
             try:
                 await sleep_agent(session)
             except Exception:
@@ -2103,7 +2206,9 @@ async def list_agents(interaction):
             f"- **{name}**{status}{killed_tag}{protected}{ch_mention} | cwd: `{session.cwd}` | idle: {idle_minutes}m{sid}"
         )
 
-    await interaction.response.send_message("*System:* **Agent Sessions:**\n" + "\n".join(lines))
+    awake = _count_awake_agents()
+    header = f"*System:* **Agent Sessions** ({awake}/{MAX_AWAKE_AGENTS} awake):\n"
+    await interaction.response.send_message(header + "\n".join(lines))
 
 
 @bot.tree.command(name="kill-agent", description="Terminate an agent session.")
