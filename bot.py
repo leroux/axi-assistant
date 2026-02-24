@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import signal
 import asyncio
 import threading
@@ -652,36 +653,6 @@ _axi_mcp_server = create_sdk_mcp_server(
 
 # --- Session lifecycle ---
 
-async def start_session(name: str, cwd: str, system_prompt: str | None = None, resume: str | None = None, mcp_servers: dict | None = None) -> AgentSession:
-    """Start a new named Claude session. Returns the AgentSession."""
-    session = AgentSession(
-        name=name,
-        cwd=cwd,
-        system_prompt=system_prompt,
-    )
-    options = ClaudeAgentOptions(
-        model="opus",
-        effort="high",
-        thinking={"type": "adaptive"},
-        betas=["context-1m-2025-08-07"],
-        setting_sources=["user", "project", "local"],
-        permission_mode="default",
-        can_use_tool=make_cwd_permission_callback(cwd),
-        cwd=cwd,
-        system_prompt=system_prompt,
-        include_partial_messages=True,
-        stderr=make_stderr_callback(session),
-        resume=resume,
-        sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
-        mcp_servers=mcp_servers or {},
-    )
-    session.client = ClaudeSDKClient(options=options)
-    await session.client.__aenter__()
-    session.mcp_servers = mcp_servers  # preserve for reset_session
-    agents[name] = session
-    log.info("Claude session '%s' started (cwd=%s, mcp=%s)", name, cwd, bool(mcp_servers))
-    return session
-
 
 def _get_subprocess_pid(client: ClaudeSDKClient) -> int | None:
     """Extract the PID of the underlying CLI subprocess from a ClaudeSDKClient.
@@ -754,15 +725,27 @@ async def end_session(name: str) -> None:
 
 
 async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
-    """Reset a named session. Preserves its system prompt, channel mapping, and MCP servers."""
+    """Reset a named session. Preserves its system prompt, channel mapping, and MCP servers.
+
+    Creates a sleeping session (no client) — the agent will wake on next message.
+    """
     session = agents.get(name)
     old_cwd = session.cwd if session else DEFAULT_CWD
     old_prompt = session.system_prompt if session else SYSTEM_PROMPT
     old_channel_id = session.discord_channel_id if session else None
     old_mcp = getattr(session, "mcp_servers", None)
     await end_session(name)
-    new_session = await start_session(name, cwd or old_cwd, old_prompt, mcp_servers=old_mcp)
-    new_session.discord_channel_id = old_channel_id
+    new_session = AgentSession(
+        name=name,
+        cwd=cwd or old_cwd,
+        system_prompt=old_prompt,
+        client=None,
+        session_id=None,
+        discord_channel_id=old_channel_id,
+        mcp_servers=old_mcp,
+    )
+    agents[name] = new_session
+    log.info("Session '%s' reset (sleeping, cwd=%s)", name, new_session.cwd)
     return new_session
 
 
@@ -1362,22 +1345,30 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
     except (TimeoutError, Exception):
         log.warning("Interrupt failed for agent '%s', killing and resuming session", session.name)
 
-    # Step 2: Kill and resume from last known session_id
+    # Step 2: Kill and create sleeping session — will wake on next message
     old_session_id = session.session_id
     old_name = session.name
     old_cwd = session.cwd
     old_prompt = session.system_prompt
     old_channel_id = session.discord_channel_id
+    old_mcp = session.mcp_servers
     await end_session(old_name)
 
+    new_session = AgentSession(
+        name=old_name,
+        cwd=old_cwd,
+        system_prompt=old_prompt,
+        client=None,
+        session_id=old_session_id,
+        discord_channel_id=old_channel_id,
+        mcp_servers=old_mcp,
+    )
+    agents[old_name] = new_session
+
     if old_session_id:
-        new_session = await start_session(old_name, old_cwd, old_prompt, resume=old_session_id)
-        new_session.discord_channel_id = old_channel_id
-        await send_system(channel, f"Agent **{old_name}** timed out and was recovered. Context preserved.")
+        await send_system(channel, f"Agent **{old_name}** timed out and was recovered (sleeping). Context preserved.")
     else:
-        new_session = await start_session(old_name, old_cwd, old_prompt)
-        new_session.discord_channel_id = old_channel_id
-        await send_system(channel, f"Agent **{old_name}** timed out and was reset. Context lost.")
+        await send_system(channel, f"Agent **{old_name}** timed out and was reset (sleeping). Context lost.")
 
 
 # --- Agent spawning ---
@@ -1410,11 +1401,19 @@ async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | No
     else:
         await send_system(channel, f"Spawning agent **{name}** in `{cwd}`...")
 
-    session = await start_session(name, cwd, system_prompt=None, resume=resume, mcp_servers={"utils": _utils_mcp_server})
-    if resume:
-        session.session_id = resume
-    session.discord_channel_id = channel.id
+    # Create agent as sleeping — _run_initial_prompt will wake it if needed
+    session = AgentSession(
+        name=name,
+        cwd=cwd,
+        system_prompt=None,
+        client=None,
+        session_id=resume,
+        discord_channel_id=channel.id,
+        mcp_servers={"utils": _utils_mcp_server},
+    )
+    agents[name] = session
     channel_to_agent[channel.id] = name
+    log.info("Agent '%s' registered (sleeping, cwd=%s, resume=%s)", name, cwd, resume)
 
     # Set initial topic with cwd (session_id will be added when agent sleeps)
     desired_topic = _format_channel_topic(cwd, resume)
@@ -1423,8 +1422,7 @@ async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | No
         await channel.edit(topic=desired_topic)
 
     if not initial_prompt:
-        await send_system(channel, f"Agent **{name}** is ready.")
-        await sleep_agent(session)
+        await send_system(channel, f"Agent **{name}** is ready (sleeping).")
         return
 
     asyncio.create_task(_run_initial_prompt(session, initial_prompt, channel))
@@ -2184,18 +2182,16 @@ async def on_ready():
         return
     _on_ready_fired = True
 
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        try:
-            await start_session(MASTER_AGENT_NAME, DEFAULT_CWD, system_prompt=SYSTEM_PROMPT, mcp_servers={"axi": _axi_mcp_server})
-            break
-        except Exception:
-            log.exception("start_session failed (attempt %d/%d)", attempt, max_retries)
-            if attempt < max_retries:
-                await asyncio.sleep(5 * attempt)
-            else:
-                log.critical("All %d session startup attempts failed — exiting", max_retries)
-                os._exit(1)
+    # Register master agent as sleeping — it will wake on first message
+    master_session = AgentSession(
+        name=MASTER_AGENT_NAME,
+        cwd=DEFAULT_CWD,
+        system_prompt=SYSTEM_PROMPT,
+        client=None,
+        mcp_servers={"axi": _axi_mcp_server},
+    )
+    agents[MASTER_AGENT_NAME] = master_session
+    log.info("Master agent registered (sleeping, will wake on first message)")
 
     # Set up guild infrastructure (categories + master channel)
     try:
