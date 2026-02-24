@@ -29,6 +29,7 @@ from claude_agent_sdk.types import (
 )
 from croniter import croniter
 from shutdown import ShutdownCoordinator, kill_supervisor
+from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
 
 load_dotenv()
 
@@ -1222,7 +1223,10 @@ async def reconstruct_agents_from_channels() -> int:
                 cwd=cwd,
                 session_id=session_id,
                 discord_channel_id=ch.id,
-                mcp_servers={"utils": _utils_mcp_server},
+                mcp_servers={
+                    "utils": _utils_mcp_server,
+                    "schedule": make_schedule_mcp_server(agent_name, SCHEDULES_PATH),
+                },
             )
             agents[agent_name] = session
             channel_to_agent[ch.id] = agent_name
@@ -1776,7 +1780,10 @@ async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | No
         client=None,
         session_id=resume,
         discord_channel_id=channel.id,
-        mcp_servers={"utils": _utils_mcp_server},
+        mcp_servers={
+            "utils": _utils_mcp_server,
+            "schedule": make_schedule_mcp_server(name, SCHEDULES_PATH),
+        },
     )
     agents[name] = session
     channel_to_agent[channel.id] = name
@@ -2099,7 +2106,7 @@ async def check_schedules():
     now_utc = datetime.now(timezone.utc)
     now_local = datetime.now(SCHEDULE_TIMEZONE)
     entries = load_schedules()
-    entries_modified = False
+    fired_one_off_keys: set[str] = set()  # schedule_key values for fired one-offs
 
     log.debug("Scheduler tick: %d entries, %d agents awake", len(entries), _count_awake_agents())
 
@@ -2121,13 +2128,14 @@ async def check_schedules():
 
                 last_occurrence = croniter(cron_expr, now_local).get_prev(datetime)
 
-                if name not in schedule_last_fired:
-                    schedule_last_fired[name] = last_occurrence
+                skey = schedule_key(entry)
+                if skey not in schedule_last_fired:
+                    schedule_last_fired[skey] = last_occurrence
 
-                if last_occurrence > schedule_last_fired[name]:
-                    schedule_last_fired[name] = last_occurrence
+                if last_occurrence > schedule_last_fired[skey]:
+                    schedule_last_fired[skey] = last_occurrence
 
-                    if check_skip(name):
+                    if check_skip(skey):
                         log.info("Skipping recurring event (one-off skip): %s", name)
                         continue
 
@@ -2167,16 +2175,21 @@ async def check_schedules():
                         await reclaim_agent_name(agent_name)
                         await spawn_agent(agent_name, agent_cwd, entry["prompt"])
 
-                    # Remove from schedules and add to history
-                    entries.remove(entry)
-                    entries_modified = True
+                    # Track for removal (actual save happens below under lock)
+                    fired_one_off_keys.add(schedule_key(entry))
                     append_history(entry, now_utc)
 
         except Exception:
             log.exception("Error processing scheduled event %s", name)
 
-    if entries_modified:
-        save_schedules(entries)
+    if fired_one_off_keys:
+        # Re-read under lock and remove only the fired entries.
+        # This avoids overwriting schedules added by MCP tools between
+        # our initial load and this save.
+        async with schedules_lock:
+            current = load_schedules()
+            current = [e for e in current if schedule_key(e) not in fired_one_off_keys]
+            save_schedules(current)
 
     # --- Idle agent detection (Active-category agents only) ---
     idle_agents = []
@@ -2567,7 +2580,10 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
         client=None,
         cwd=cwd,
         discord_channel_id=channel.id,
-        mcp_servers={"utils": _utils_mcp_server},
+        mcp_servers={
+            "utils": _utils_mcp_server,
+            "schedule": make_schedule_mcp_server(agent_name, SCHEDULES_PATH),
+        },
     )
     agents[agent_name] = session
     channel_to_agent[channel.id] = agent_name
