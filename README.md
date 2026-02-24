@@ -66,11 +66,23 @@ git clone <repo-url> && cd personal-assistant
 cp .env.template .env
 # Edit .env with your Discord bot token and user IDs
 
-# 3. Run (creates USER_PROFILE.md, schedules.json, schedule_history.json on first start)
-./run.sh
+# 3. Run directly (creates USER_PROFILE.md, schedules.json, schedule_history.json on first start)
+uv run python supervisor.py
+
+# -- OR --
+
+# 3. Install as a systemd user service (recommended for production)
+cp axi-bot.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable axi-bot.service
+systemctl --user start axi-bot.service
+
+# Check status / logs
+systemctl --user status axi-bot.service
+journalctl --user -u axi-bot.service -f
 ```
 
-Axi will DM you "Axi restarted." when it comes online.
+Axi will message the `#axi-master` channel when it comes online.
 
 ---
 
