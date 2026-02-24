@@ -1495,7 +1495,11 @@ async def _receive_response_safe(session: AgentSession):
         try:
             parsed = parse_message(data)
         except MessageParseError:
-            log.debug("Skipping unknown SDK message type: %s", data.get("type"))
+            msg_type = data.get("type")
+            if msg_type == "rate_limit_event":
+                log.info("Rate limit event: %s", data)
+            else:
+                log.debug("Skipping unknown SDK message type: %s", msg_type)
             continue
         yield parsed
         if isinstance(parsed, ResultMessage):
