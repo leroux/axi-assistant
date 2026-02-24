@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import time
 import signal
 import asyncio
 import threading
@@ -1548,6 +1547,21 @@ async def _process_message_queue(session: AgentSession) -> None:
 # --- Graceful shutdown ---
 
 
+def _kill_supervisor() -> None:
+    """Kill the parent process (supervisor) so systemd restarts the whole service."""
+    ppid = os.getppid()
+    log.info("Sending SIGTERM to supervisor (pid=%d)", ppid)
+    try:
+        os.kill(ppid, signal.SIGTERM)
+    except OSError:
+        log.warning("Failed to kill supervisor (pid=%d)", ppid)
+    # Give the supervisor a moment to die from SIGTERM before we exit.
+    # If it's already dead, this just delays briefly.  If it somehow
+    # survived, os._exit(42) falls back to the old restart-only behavior.
+    time.sleep(1)
+    os._exit(42)
+
+
 async def _sleep_all_agents() -> None:
     """Sleep all awake agents before shutdown."""
     for name, session in list(agents.items()):
@@ -1578,7 +1592,7 @@ async def _graceful_shutdown(source: str, skip_agent: str | None = None) -> None
         log.info("No agents busy — exiting immediately")
         await _sleep_all_agents()
         await bot.close()
-        os._exit(42)
+        _kill_supervisor()
 
     # Notify each busy agent's channel
     for name, session in busy.items():
@@ -1600,7 +1614,7 @@ async def _graceful_shutdown(source: str, skip_agent: str | None = None) -> None
             log.info("All agents finished after %ds — exiting", elapsed)
             await _sleep_all_agents()
             await bot.close()
-            os._exit(42)
+            _kill_supervisor()
 
         # Send status update every 30s
         if elapsed - last_status_msg >= 30:
@@ -1615,7 +1629,7 @@ async def _graceful_shutdown(source: str, skip_agent: str | None = None) -> None
     log.warning("Hard timeout reached (%ds) — force exiting. Still busy: %s", HARD_TIMEOUT, still_busy)
     await _sleep_all_agents()
     await bot.close()
-    os._exit(42)
+    _kill_supervisor()
 
 
 # --- Message handler ---
@@ -2167,7 +2181,7 @@ async def restart_cmd(interaction, force: bool = False):
         log.info("Force restart requested via /restart command")
         await _sleep_all_agents()
         await bot.close()
-        os._exit(42)
+        _kill_supervisor()
 
     await interaction.response.send_message("*System:* Initiating graceful restart...")
     log.info("Restart requested via /restart command")
