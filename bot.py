@@ -1039,7 +1039,7 @@ async def wake_agent(session: AgentSession) -> None:
         options = ClaudeAgentOptions(
             model="opus",
             effort="high",
-            thinking={"type": "adaptive"},
+            thinking={"type": "enabled", "budget_tokens": 128000},
             betas=["context-1m-2025-08-07"],
             setting_sources=["user", "project", "local"],
             permission_mode="default",
@@ -1065,7 +1065,7 @@ async def wake_agent(session: AgentSession) -> None:
             options = ClaudeAgentOptions(
                 model="opus",
                 effort="high",
-                thinking={"type": "adaptive"},
+                thinking={"type": "enabled", "budget_tokens": 128000},
                 betas=["context-1m-2025-08-07"],
                 setting_sources=["user", "project", "local"],
                 permission_mode="default",
