@@ -1955,6 +1955,8 @@ def _init_shutdown_coordinator() -> None:
 async def on_message(message):
     if message.author.id == bot.user.id:
         return
+    if not message.content:
+        return  # Ignore system events (pins, boosts, etc.) with no text content
     if message.author.bot and message.author.id not in ALLOWED_USER_IDS:
         return
 
