@@ -1958,11 +1958,20 @@ async def list_agents(interaction):
 
 @bot.tree.command(name="kill-agent", description="Terminate an agent session.")
 @app_commands.autocomplete(agent_name=killable_agent_autocomplete)
-async def kill_agent(interaction, agent_name: str):
+async def kill_agent(interaction, agent_name: str | None = None):
     log.info("Slash command /kill-agent %s from %s", agent_name, interaction.user)
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
+
+    # Infer agent from channel if not specified
+    if agent_name is None:
+        agent_name = channel_to_agent.get(interaction.channel_id)
+        if agent_name is None:
+            await interaction.response.send_message(
+                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
+            )
+            return
 
     if agent_name == MASTER_AGENT_NAME:
         await interaction.response.send_message(
