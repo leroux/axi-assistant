@@ -1422,11 +1422,17 @@ async def _receive_response_safe(session: AgentSession):
     Continues past ResultMessages if there are injected queries pending."""
     from claude_agent_sdk._internal.message_parser import parse_message
 
+    # Message types emitted by the Claude Code subprocess that the SDK doesn't
+    # parse into typed objects.  These are safe to ignore silently.
+    _KNOWN_IGNORABLE_TYPES = {"rate_limit_event"}
+
     async for data in session.client._query.receive_messages():
         try:
             parsed = parse_message(data)
         except MessageParseError:
-            log.debug("Skipping unknown SDK message type: %s", data.get("type"))
+            msg_type = data.get("type")
+            if msg_type not in _KNOWN_IGNORABLE_TYPES:
+                log.debug("Skipping unknown SDK message type: %s", msg_type)
             continue
         yield parsed
         if isinstance(parsed, ResultMessage):
