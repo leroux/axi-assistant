@@ -89,6 +89,7 @@ class AgentSession:
     idle_reminder_count: int = 0
     session_id: str | None = None
     discord_channel_id: int | None = None
+    message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
 agents: dict[str, AgentSession] = {}
@@ -978,6 +979,47 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextC
         log.exception("Error running initial prompt for agent '%s'", session.name)
         await send_system(channel, f"Agent **{session.name}** encountered an error during initial task.")
 
+    await _process_message_queue(session)
+
+
+async def _process_message_queue(session: AgentSession) -> None:
+    """Process any queued messages for an agent after the current query finishes."""
+    while not session.message_queue.empty():
+        content, channel = session.message_queue.get_nowait()
+        if session.client is None:
+            await send_system(channel, f"Agent **{session.name}** session ended — dropping queued message.")
+            # Clear remaining queue
+            while not session.message_queue.empty():
+                _, ch = session.message_queue.get_nowait()
+                await send_system(ch, f"Agent **{session.name}** session ended — dropping queued message.")
+            return
+
+        remaining = session.message_queue.qsize()
+        if remaining > 0:
+            await send_system(channel, f"Processing queued message ({remaining} more in queue)…")
+
+        async with session.query_lock:
+            session.last_activity = datetime.now(timezone.utc)
+            session.last_idle_notified = None
+            session.idle_reminder_count = 0
+            drain_stderr(session)
+            drain_sdk_buffer(session)
+            try:
+                async with asyncio.timeout(QUERY_TIMEOUT):
+                    await session.client.query(_as_stream(content))
+                    await stream_response_to_channel(session, channel)
+            except TimeoutError:
+                await _handle_query_timeout(session, channel)
+            except Exception:
+                log.exception("Error querying agent '%s' (queued message)", session.name)
+                await send_system(
+                    channel,
+                    f"Error processing queued message for **{session.name}**.",
+                )
+
+        await process_kill_signal()
+        await process_spawn_signal()
+
 
 # --- Spawn signal processing ---
 
@@ -1110,6 +1152,8 @@ async def on_message(message):
     if message.author.id not in ALLOWED_USER_IDS:
         return
 
+    log.info("Message from %s in #%s: %s", message.author, message.channel.name, message.content[:200])
+
     # Look up which agent owns this channel
     agent_name = channel_to_agent.get(message.channel.id)
     if agent_name is None:
@@ -1131,9 +1175,11 @@ async def on_message(message):
         return
 
     if session.query_lock.locked():
+        await session.message_queue.put((message.content, message.channel))
+        position = session.message_queue.qsize()
         await send_system(
             message.channel,
-            f"Agent **{agent_name}** is busy processing. Please wait.",
+            f"Agent **{agent_name}** is busy — message queued (position {position}).",
         )
         return
 
@@ -1160,6 +1206,9 @@ async def on_message(message):
     # Process kill/spawn signals immediately after query completes
     await process_kill_signal()
     await process_spawn_signal()
+
+    # Process any messages that were queued while the agent was busy
+    await _process_message_queue(session)
 
     await bot.process_commands(message)
 
@@ -1332,6 +1381,7 @@ async def agent_autocomplete(interaction, current: str) -> list[app_commands.Cho
 
 @bot.tree.command(name="list-agents", description="List all active agent sessions.")
 async def list_agents(interaction):
+    log.info("Slash command /list-agents from %s", interaction.user)
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
@@ -1358,6 +1408,7 @@ async def list_agents(interaction):
 @bot.tree.command(name="kill-agent", description="Terminate an agent session.")
 @app_commands.autocomplete(agent_name=killable_agent_autocomplete)
 async def kill_agent(interaction, agent_name: str):
+    log.info("Slash command /kill-agent %s from %s", agent_name, interaction.user)
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
@@ -1406,6 +1457,7 @@ async def kill_agent(interaction, agent_name: str):
 @bot.tree.command(name="reset-context", description="Reset an agent's context. Infers agent from current channel, or specify by name.")
 @app_commands.autocomplete(agent_name=agent_autocomplete)
 async def reset_context(interaction, agent_name: str | None = None, working_dir: str | None = None):
+    log.info("Slash command /reset-context agent=%s cwd=%s from %s", agent_name, working_dir, interaction.user)
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
