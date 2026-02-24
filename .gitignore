@@ -31,9 +31,10 @@ server_log.jsonl
 projects/
 personal/
 
-# Runtime signals
+# Runtime signals and state
 .restart_requested
-.spawn_agent
 .rollback_performed
 .crash_analysis
+.crash_log_snapshot
+.active_sessions
 .bot_output.log

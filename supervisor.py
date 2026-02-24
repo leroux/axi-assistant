@@ -146,6 +146,11 @@ def main():
             print("Clean exit, stopping.")
             sys.exit(0)
 
+        # Killed by signal (e.g. SIGTERM) — treat as intentional stop, not a crash
+        if code < 0 or code == 128 + 15:  # negative = signal on Popen, 143 = SIGTERM
+            print(f"Killed by signal (exit code {code}), stopping.")
+            sys.exit(0)
+
         elapsed = int(time.time() - start_time)
         print(f"Bot exited with code {code} after {elapsed}s.")
 
