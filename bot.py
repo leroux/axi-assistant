@@ -501,6 +501,12 @@ async def axi_spawn_agent(args):
             await spawn_agent(agent_name, agent_cwd, agent_prompt, resume=agent_resume)
         except Exception:
             log.exception("Error in background spawn of agent '%s'", agent_name)
+            try:
+                channel = await get_agent_channel(agent_name)
+                if channel:
+                    await send_system(channel, f"Failed to spawn agent **{agent_name}**. Check logs for details.")
+            except Exception:
+                pass
 
     log.info("Spawning agent '%s' via MCP tool (cwd=%s, resume=%s)", agent_name, agent_cwd, agent_resume)
     asyncio.create_task(_do_spawn())
