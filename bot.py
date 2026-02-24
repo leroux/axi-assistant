@@ -310,13 +310,15 @@ async def _set_session_id(session: AgentSession, msg: ResultMessage) -> None:
     sid = getattr(msg, "session_id", None)
     if sid and sid != session.session_id:
         session.session_id = sid
-        if session.discord_channel_id:
+        # Only persist session_id to channel topic for non-master agents
+        # (master gets a new session every restart so the topic would always churn)
+        if session.name != MASTER_AGENT_NAME and session.discord_channel_id:
             ch = bot.get_channel(session.discord_channel_id)
             if ch:
-                try:
-                    await ch.edit(topic=_format_channel_topic(session.cwd, sid))
-                except discord.HTTPException:
-                    pass
+                desired_topic = _format_channel_topic(session.cwd, sid)
+                if ch.topic != desired_topic:
+                    log.info("Updating topic on #%s: %r -> %r", ch.name, ch.topic, desired_topic)
+                    await ch.edit(topic=desired_topic)
     else:
         session.session_id = sid
 
@@ -1415,10 +1417,10 @@ async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | No
     channel_to_agent[channel.id] = name
 
     # Set initial topic with cwd (session_id will be added when agent sleeps)
-    try:
-        await channel.edit(topic=_format_channel_topic(cwd, resume))
-    except discord.HTTPException:
-        pass
+    desired_topic = _format_channel_topic(cwd, resume)
+    if channel.topic != desired_topic:
+        log.info("Updating topic on #%s: %r -> %r", channel.name, channel.topic, desired_topic)
+        await channel.edit(topic=desired_topic)
 
     if not initial_prompt:
         await send_system(channel, f"Agent **{name}** is ready.")
@@ -2205,11 +2207,11 @@ async def on_ready():
         channel_to_agent[master_channel.id] = MASTER_AGENT_NAME
         log.info("Guild infrastructure ready (guild=%s, master_channel=#%s)", DISCORD_GUILD_ID, master_channel.name)
 
-        # Set channel topic for master
-        try:
-            await master_channel.edit(topic=_format_channel_topic(DEFAULT_CWD))
-        except discord.HTTPException:
-            pass  # Not critical
+        # Set channel topic for master (only if changed)
+        desired_topic = "Axi master control channel"
+        if master_channel.topic != desired_topic:
+            log.info("Updating topic on #%s: %r -> %r", master_channel.name, master_channel.topic, desired_topic)
+            await master_channel.edit(topic=desired_topic)
 
     except Exception:
         log.exception("Failed to set up guild infrastructure — guild channels won't work")
