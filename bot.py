@@ -28,6 +28,7 @@ from claude_agent_sdk.types import (
     PermissionResultDeny,
 )
 from croniter import croniter
+from shutdown import ShutdownCoordinator, kill_supervisor
 
 load_dotenv()
 
@@ -149,8 +150,10 @@ class AgentSession:
 agents: dict[str, AgentSession] = {}
 _wake_lock = asyncio.Lock()  # Serializes wake_agent calls to prevent TOCTOU races on concurrency limit
 
-# Graceful shutdown flag
-_shutdown_requested = False
+# Shutdown coordinator — initialized with a placeholder notify_fn because
+# send_system/get_agent_channel aren't defined yet at import time.
+# The real notify_fn is wired up in _init_shutdown_coordinator() called from on_ready.
+shutdown_coordinator: ShutdownCoordinator | None = None
 
 # Global rate limit state (all agents share the same API account)
 _rate_limited_until: datetime | None = None
@@ -699,7 +702,9 @@ _utils_mcp_server = create_sdk_mcp_server(
 )
 async def axi_restart(args):
     log.info("Restart requested via MCP tool")
-    asyncio.create_task(_graceful_shutdown("MCP tool", skip_agent=MASTER_AGENT_NAME))
+    if shutdown_coordinator is None:
+        return {"content": [{"type": "text", "text": "Bot is not fully initialized yet."}]}
+    asyncio.create_task(shutdown_coordinator.graceful_shutdown("MCP tool", skip_agent=MASTER_AGENT_NAME))
     return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
 
 
@@ -1870,7 +1875,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextC
 async def _process_message_queue(session: AgentSession) -> None:
     """Process any queued messages for an agent after the current query finishes."""
     while not session.message_queue.empty():
-        if _shutdown_requested:
+        if shutdown_coordinator and shutdown_coordinator.requested:
             log.info("Shutdown requested — not processing further queued messages for '%s'", session.name)
             break
         if _is_rate_limited():
@@ -1920,92 +1925,28 @@ async def _process_message_queue(session: AgentSession) -> None:
 
 
 
-# --- Graceful shutdown ---
+# --- Graceful shutdown (delegated to shutdown.py) ---
 
 
-def _kill_supervisor() -> None:
-    """Kill the parent process (supervisor) so systemd restarts the whole service."""
-    ppid = os.getppid()
-    log.info("Sending SIGTERM to supervisor (pid=%d)", ppid)
-    try:
-        os.kill(ppid, signal.SIGTERM)
-    except OSError:
-        log.warning("Failed to kill supervisor (pid=%d)", ppid)
-    # Give the supervisor a moment to die from SIGTERM before we exit.
-    # If it's already dead, this just delays briefly.  If it somehow
-    # survived, os._exit(42) falls back to the old restart-only behavior.
-    time.sleep(1)
-    os._exit(42)
+def _init_shutdown_coordinator() -> None:
+    """Wire up the ShutdownCoordinator with real bot callbacks.
 
-
-async def _sleep_all_agents() -> None:
-    """Sleep all awake agents before shutdown."""
-    for name, session in list(agents.items()):
-        if session.client is not None:
-            try:
-                await sleep_agent(session)
-            except Exception:
-                log.exception("Error sleeping agent '%s' during shutdown", name)
-
-
-async def _graceful_shutdown(source: str, skip_agent: str | None = None) -> None:
-    """Wait for all busy agents to finish, then exit with code 42.
-
-    *skip_agent* is excluded from the busy-wait (used when an agent triggers
-    its own restart to avoid deadlocking on itself).
+    Called once from on_ready after all helpers are defined.
     """
-    global _shutdown_requested
-    if _shutdown_requested:
-        log.info("Graceful shutdown already in progress (ignoring duplicate from %s)", source)
-        return
-    _shutdown_requested = True
-    log.info("Graceful shutdown initiated from %s", source)
+    global shutdown_coordinator
 
-    # Find busy agents (exclude the agent that triggered the shutdown)
-    busy = {name: s for name, s in agents.items() if s.query_lock.locked() and name != skip_agent}
-
-    if not busy:
-        log.info("No agents busy — exiting immediately")
-        await _sleep_all_agents()
-        await bot.close()
-        _kill_supervisor()
-
-    # Notify each busy agent's channel
-    for name, session in busy.items():
-        channel = await get_agent_channel(name)
+    async def _notify_agent_channel(agent_name: str, message: str) -> None:
+        channel = await get_agent_channel(agent_name)
         if channel:
-            await send_system(channel, f"Restart pending — waiting for **{name}** to finish current task...")
+            await send_system(channel, message)
 
-    # Wait loop: check every 5s, message every 30s, hard timeout at 10 min
-    HARD_TIMEOUT = QUERY_TIMEOUT  # 10 minutes
-    elapsed = 0
-    last_status_msg = 0
-
-    while elapsed < HARD_TIMEOUT:
-        await asyncio.sleep(5)
-        elapsed += 5
-
-        still_busy = {name: s for name, s in agents.items() if s.query_lock.locked() and name != skip_agent}
-        if not still_busy:
-            log.info("All agents finished after %ds — exiting", elapsed)
-            await _sleep_all_agents()
-            await bot.close()
-            _kill_supervisor()
-
-        # Send status update every 30s
-        if elapsed - last_status_msg >= 30:
-            last_status_msg = elapsed
-            for name in still_busy:
-                channel = await get_agent_channel(name)
-                if channel:
-                    await send_system(channel, f"Still waiting for **{name}** to finish... ({elapsed}s)")
-
-    # Hard timeout
-    still_busy = [name for name, s in agents.items() if s.query_lock.locked() and name != skip_agent]
-    log.warning("Hard timeout reached (%ds) — force exiting. Still busy: %s", HARD_TIMEOUT, still_busy)
-    await _sleep_all_agents()
-    await bot.close()
-    _kill_supervisor()
+    shutdown_coordinator = ShutdownCoordinator(
+        agents=agents,
+        sleep_fn=sleep_agent,
+        close_bot_fn=bot.close,
+        kill_fn=kill_supervisor,
+        notify_fn=_notify_agent_channel,
+    )
 
 
 # --- Message handler ---
@@ -2039,7 +1980,7 @@ async def on_message(message):
 
     log.info("Message from %s in #%s: %s", message.author, message.channel.name, message.content[:200])
 
-    if _shutdown_requested:
+    if shutdown_coordinator and shutdown_coordinator.requested:
         await send_system(message.channel, "Bot is restarting — not accepting new messages.")
         return
 
@@ -2147,7 +2088,7 @@ async def on_message(message):
 @tasks.loop(seconds=10)
 async def check_schedules():
     # If shutdown is in progress, skip all scheduled work
-    if _shutdown_requested:
+    if shutdown_coordinator and shutdown_coordinator.requested:
         return
 
     prune_history()
@@ -2579,17 +2520,19 @@ async def restart_cmd(interaction, force: bool = False):
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
+    if shutdown_coordinator is None:
+        await interaction.response.send_message("Bot is not fully initialized yet.", ephemeral=True)
+        return
 
     if force:
         await interaction.response.send_message("*System:* Force restarting...")
         log.info("Force restart requested via /restart command")
-        await _sleep_all_agents()
-        await bot.close()
-        _kill_supervisor()
+        await shutdown_coordinator.force_shutdown("/restart force")
+        return
 
     await interaction.response.send_message("*System:* Initiating graceful restart...")
     log.info("Restart requested via /restart command")
-    await _graceful_shutdown("slash command")
+    await shutdown_coordinator.graceful_shutdown("/restart command")
 
 
 # --- Channel creation listener ---
@@ -2692,6 +2635,9 @@ async def on_ready():
         await reconstruct_agents_from_channels()
     except Exception:
         log.exception("Failed to reconstruct agents from channels")
+
+    # Initialize shutdown coordinator now that all helpers are available
+    _init_shutdown_coordinator()
 
     await bot.tree.sync()
     log.info("Slash commands synced")
