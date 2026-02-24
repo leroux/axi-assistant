@@ -1,10 +1,12 @@
 import os
 import re
 import json
+import time
 import signal
 import asyncio
 import threading
 import logging
+from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -29,8 +31,31 @@ from croniter import croniter
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# --- Logging setup ---
 log = logging.getLogger(__name__)
+log.setLevel(logging.DEBUG)
+
+# Console handler: INFO level (preserves original behavior)
+_console_handler = logging.StreamHandler()
+_console_handler.setLevel(logging.INFO)
+_console_fmt = logging.Formatter("%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s")
+_console_fmt.converter = time.gmtime
+_console_handler.setFormatter(_console_fmt)
+log.addHandler(_console_handler)
+
+# File handler: DEBUG level, rotating 10MB x 3 backups
+_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(_log_dir, exist_ok=True)
+_file_handler = RotatingFileHandler(
+    os.path.join(_log_dir, "orchestrator.log"),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=3,
+)
+_file_handler.setLevel(logging.DEBUG)
+_file_fmt = logging.Formatter("%(asctime)s %(levelname)-8s [%(funcName)s:%(lineno)d] %(message)s")
+_file_fmt.converter = time.gmtime
+_file_handler.setFormatter(_file_fmt)
+log.addHandler(_file_handler)
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 ALLOWED_USER_IDS = {int(uid.strip()) for uid in os.environ["ALLOWED_USER_IDS"].split(",")}
@@ -93,6 +118,33 @@ class AgentSession:
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     mcp_servers: dict | None = None
     injected_count: int = 0  # queries injected mid-stream via query()
+    _log: logging.Logger | None = None
+
+    def __post_init__(self):
+        """Set up per-agent logger writing to <assistant_dir>/logs/<name>.log."""
+        os.makedirs(_log_dir, exist_ok=True)
+        logger = logging.getLogger(f"agent.{self.name}")
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        if not logger.handlers:  # Avoid duplicate handlers on re-creation
+            fh = RotatingFileHandler(
+                os.path.join(_log_dir, f"{self.name}.log"),
+                maxBytes=5 * 1024 * 1024,
+                backupCount=2,
+            )
+            fh.setLevel(logging.DEBUG)
+            _agent_fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s")
+            _agent_fmt.converter = time.gmtime
+            fh.setFormatter(_agent_fmt)
+            logger.addHandler(fh)
+        self._log = logger
+
+    def close_log(self):
+        """Remove all handlers from the per-agent logger."""
+        if self._log:
+            for handler in self._log.handlers[:]:
+                handler.close()
+                self._log.removeHandler(handler)
 
 
 agents: dict[str, AgentSession] = {}
@@ -847,6 +899,7 @@ async def end_session(name: str) -> None:
     if session.client is not None:
         await _disconnect_client(session.client, name)
         session.client = None
+    session.close_log()
     agents.pop(name, None)
     log.info("Claude session '%s' ended", name)
 
@@ -900,6 +953,8 @@ async def _evict_idle_agent(exclude: str | None = None) -> bool:
     if not candidates:
         return False
 
+    log.debug("Eviction candidates: %s", [(n, f"{s:.0f}s") for s, n, _ in candidates])
+
     # Evict the longest-idle agent
     candidates.sort(reverse=True, key=lambda x: x[0])
     idle_secs, evict_name, evict_session = candidates[0]
@@ -919,6 +974,7 @@ async def _ensure_awake_slot(requesting_agent: str) -> bool:
     Returns True if a slot is available, False if all slots are busy.
     """
     while _count_awake_agents() >= MAX_AWAKE_AGENTS:
+        log.debug("Awake slots full (%d/%d), attempting eviction for '%s'", _count_awake_agents(), MAX_AWAKE_AGENTS, requesting_agent)
         evicted = await _evict_idle_agent(exclude=requesting_agent)
         if not evicted:
             log.warning("Cannot free awake slot for '%s' — all %d slots busy", requesting_agent, MAX_AWAKE_AGENTS)
@@ -940,6 +996,8 @@ async def sleep_agent(session: AgentSession) -> None:
         return
 
     log.info("Sleeping agent '%s'", session.name)
+    if session._log:
+        session._log.info("SESSION_SLEEP")
     await _disconnect_client(session.client, session.name)
     session.client = None
     log.info("Agent '%s' is now sleeping", session.name)
@@ -961,6 +1019,8 @@ async def wake_agent(session: AgentSession) -> None:
         if session.client is not None:
             return  # Re-check after acquiring lock
 
+        log.debug("Wake lock acquired for '%s', awake_count=%d/%d", session.name, _count_awake_agents(), MAX_AWAKE_AGENTS)
+
         # Enforce concurrency limit before waking
         slot_available = await _ensure_awake_slot(session.name)
         if not slot_available:
@@ -969,8 +1029,12 @@ async def wake_agent(session: AgentSession) -> None:
                 f"Message will be queued and processed when a slot opens."
             )
 
+        log.debug("Awake slot secured for '%s'", session.name)
+
         log.info("Waking agent '%s' (session_id=%s)", session.name, session.session_id)
         resume_id = session.session_id
+
+        log.debug("Creating ClaudeSDKClient for '%s' (resume=%s)", session.name, resume_id)
 
         options = ClaudeAgentOptions(
             model="opus",
@@ -993,6 +1057,8 @@ async def wake_agent(session: AgentSession) -> None:
             session.client = ClaudeSDKClient(options=options)
             await session.client.__aenter__()
             log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
+            if session._log:
+                session._log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
         except Exception:
             log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
             # Retry without resume
@@ -1016,6 +1082,8 @@ async def wake_agent(session: AgentSession) -> None:
             await session.client.__aenter__()
             session.session_id = None
             log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
+            if session._log:
+                session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
 
 
 def get_master_session() -> AgentSession | None:
@@ -1360,6 +1428,7 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel) ->
         _rate_limited_until = new_limit
 
     log.warning("Rate limited — waiting %ds (until %s)", wait_seconds, _rate_limited_until.isoformat())
+    log.debug("Rate limit set: duration=%ds, already_limited=%s, agent='%s'", wait_seconds, already_limited, session.name)
 
     # Only notify user if this is a new rate limit (avoid spam during queue processing)
     if not already_limited:
@@ -1440,6 +1509,8 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
     """Stream Claude's response from a specific agent session to a Discord channel.
     Each agent always streams to its own channel — no visibility filtering needed."""
 
+    log.debug("Streaming response for '%s'", session.name)
+
     text_buffer = ""
     hit_rate_limit = False
 
@@ -1448,7 +1519,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
             return
         await send_long(channel, text.lstrip())
 
-    async with channel.typing():
+    async with channel.typing() as _typing_ctx:
         async for msg in _receive_response_safe(session):
             # Drain and send any stderr messages first
             for stderr_msg in drain_stderr(session):
@@ -1473,6 +1544,8 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                         if hasattr(block, "text"):
                             error_text += " " + block.text
                     log.warning("Agent '%s' hit %s error: %s", session.name, msg.error, error_text[:200])
+                    if _typing_ctx and _typing_ctx.task:
+                        _typing_ctx.task.cancel()
                     await _handle_rate_limit(error_text, session, channel)
                     text_buffer = ""
                     hit_rate_limit = True
@@ -1483,13 +1556,30 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                         if hasattr(block, "text"):
                             error_text += " " + block.text
                     log.warning("Agent '%s' hit API error (%s): %s", session.name, msg.error, error_text[:200])
+                    if _typing_ctx and _typing_ctx.task:
+                        _typing_ctx.task.cancel()
                     await flush_text(text_buffer)
                     text_buffer = ""
                 else:
                     await flush_text(text_buffer)
                     text_buffer = ""
+                    # Stop the typing indicator — response text has been sent.
+                    # The background typing task fires every 5s; if left running
+                    # it re-sends a typing event AFTER our message, making the
+                    # indicator reappear and persist until ResultMessage arrives.
+                    if _typing_ctx and _typing_ctx.task:
+                        _typing_ctx.task.cancel()
+                    # Log assistant response content to per-agent log
+                    if session._log:
+                        for block in (msg.content or []):
+                            if hasattr(block, "text"):
+                                session._log.info("ASSISTANT: %s", block.text[:2000])
+                            elif hasattr(block, "type") and block.type == "tool_use":
+                                session._log.info("TOOL_USE: %s(%s)", block.name, json.dumps(block.input)[:500] if hasattr(block, "input") else "")
 
             elif isinstance(msg, ResultMessage):
+                if _typing_ctx and _typing_ctx.task:
+                    _typing_ctx.task.cancel()
                 await _set_session_id(session, msg)
                 if not hit_rate_limit:
                     await flush_text(text_buffer)
@@ -1518,6 +1608,8 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
 
     # Flush remaining text buffer
     await flush_text(text_buffer)
+
+    log.debug("Stream complete for '%s'", session.name)
 
     # Notify that the bot is done responding
     if show_awaiting_input:
@@ -1676,6 +1768,9 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextC
             session.last_activity = datetime.now(timezone.utc)
             drain_stderr(session)
             drain_sdk_buffer(session)
+            if session._log:
+                session._log.info("PROMPT: %s", prompt[:2000])
+            log.debug("Running initial prompt for '%s': %s", session.name, prompt[:200])
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(prompt))
@@ -1684,6 +1779,8 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextC
             except TimeoutError:
                 timed_out = True
                 await _handle_query_timeout(session, channel)
+
+        log.debug("Initial prompt completed for '%s'", session.name)
 
         if not timed_out:
             await send_system(channel, f"Agent **{session.name}** finished initial task.")
@@ -1714,6 +1811,9 @@ async def _process_message_queue(session: AgentSession) -> None:
         content, channel = session.message_queue.get_nowait()
 
         remaining = session.message_queue.qsize()
+        log.debug("Processing queued message for '%s' (%d remaining)", session.name, remaining)
+        if session._log:
+            session._log.info("QUEUED_MSG: %s", content[:2000])
         if remaining > 0:
             await send_system(channel, f"Processing queued message ({remaining} more in queue)…")
 
@@ -1892,10 +1992,13 @@ async def on_message(message):
         await send_system(message.channel, "This agent has been killed. Use `/spawn` to create a new one.")
         return
 
+    log.debug("Routing message to agent '%s' (locked=%s, client=%s)", agent_name, session.query_lock.locked(), session.client is not None)
+
     # Queue messages while rate limited (don't waste API calls)
     if _is_rate_limited() and not session.query_lock.locked():
         await session.message_queue.put((message.content, message.channel))
         position = session.message_queue.qsize()
+        log.debug("Rate-limited, queuing for '%s' (queue_size=%d)", agent_name, position)
         remaining = _format_time_remaining(_rate_limit_remaining_seconds())
         await send_system(
             message.channel,
@@ -1908,6 +2011,7 @@ async def on_message(message):
         if session.client is not None:
             # Inject directly into running conversation
             session.injected_count += 1
+            log.debug("Injecting message into running query for '%s' (injected_count=%d)", agent_name, session.injected_count)
             await session.client.query(_as_stream(message.content))
             await send_system(
                 message.channel,
@@ -1917,6 +2021,7 @@ async def on_message(message):
             # Edge case: locked but no client (shouldn't happen, but be safe)
             await session.message_queue.put((message.content, message.channel))
             position = session.message_queue.qsize()
+            log.debug("Agent '%s' locked but no client, queuing (queue_size=%d)", agent_name, position)
             await send_system(
                 message.channel,
                 f"Agent **{agent_name}** is busy — message queued (position {position}).",
@@ -1926,6 +2031,7 @@ async def on_message(message):
     async with session.query_lock:
         # Wake agent if sleeping
         if session.client is None:
+            log.debug("Waking agent '%s' for user message", agent_name)
             try:
                 await wake_agent(session)
             except ConcurrencyLimitError:
@@ -1952,6 +2058,9 @@ async def on_message(message):
         session.idle_reminder_count = 0
         drain_stderr(session)
         drain_sdk_buffer(session)
+        if session._log:
+            session._log.info("USER: %s", message.content)
+        log.debug("Starting query for '%s'", agent_name)
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
                 await session.client.query(_as_stream(message.content))
@@ -1965,6 +2074,8 @@ async def on_message(message):
                 f"Error communicating with agent **{agent_name}**. The session may have crashed. "
                 f"Try `/kill-agent {agent_name}` and respawn.",
             )
+
+    log.debug("Query completed for '%s'", agent_name)
 
     # Process any messages that were queued while the agent was busy
     await _process_message_queue(session)
@@ -1987,6 +2098,8 @@ async def check_schedules():
     now_local = datetime.now(SCHEDULE_TIMEZONE)
     entries = load_schedules()
     entries_modified = False
+
+    log.debug("Scheduler tick: %d entries, %d agents awake", len(entries), _count_awake_agents())
 
     # Get master channel for system-level notifications
     master_ch = await get_master_channel()
@@ -2693,6 +2806,10 @@ def _handle_task_exception(loop, context):
     """Global handler for unhandled exceptions in asyncio tasks."""
     exception = context.get("exception")
     if exception:
+        # Suppress expected ProcessError from SIGTERM'd subprocesses (our workaround kills them)
+        if type(exception).__name__ == "ProcessError" and "-15" in str(exception):
+            log.debug("Suppressed expected ProcessError from SIGTERM'd subprocess")
+            return
         log.error("Unhandled exception in async task: %s", context.get("message", ""), exc_info=exception)
     else:
         log.error("Unhandled async error: %s", context.get("message", ""))

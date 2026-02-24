@@ -41,3 +41,4 @@ nova_instructions.md
 .crash_log_snapshot
 .active_sessions
 .bot_output.log
+logs/
