@@ -1,5 +1,85 @@
 # Axi Assistant — Complete Architecture & Design Report
 
+## System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  Discord Server                                                                 │
+│                                                                                 │
+│  ┌─────────────── Active ───────────────┐  ┌──────────── Killed ─────────┐     │
+│  │ #axi-master  #agent-1  #agent-2  ... │  │ #old-task  #finished    ... │     │
+│  └───────┬──────────┬──────────┬────────┘  └─────────────────────────────┘     │
+│          │          │          │                                                 │
+│      User messages (on_message)                                                 │
+└──────────┬──────────┬──────────┬────────────────────────────────────────────────┘
+           │          │          │
+           ▼          ▼          ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  bot.py  (single asyncio process)                                               │
+│                                                                                 │
+│  ┌────────────────────────────────┐    ┌────────────────────────────────────┐   │
+│  │  Discord Gateway (discord.py)  │    │  Scheduler (10s loop)              │   │
+│  │  • on_message → route to agent │    │  • Reads schedules.json each tick  │   │
+│  │  • on_guild_channel_create     │    │  • Cron / one-off event firing     │   │
+│  │  • Slash commands              │    │  • Idle detection & reminders      │   │
+│  │    /kill, /stop, /restart,     │    │  • Auto-sleep (pressure-based)     │   │
+│  │    /compact, /clear, /list,    │    │  • Stranded message safety net     │   │
+│  │    /reset-context              │    │                                    │   │
+│  └──────────────┬─────────────────┘    └────────────────┬───────────────────┘   │
+│                 │ user messages                          │ scheduled prompts     │
+│                 │                                        │ (spawn/route agent)   │
+│                 ▼                                        ▼                       │
+│  ┌──────────────────────────────────────────────────────────────────────────┐   │
+│  │  Agent Orchestrator                                                      │   │
+│  │                                                                          │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   MAX_AGENTS = 20   │   │
+│  │  │ axi-master  │  │  agent-1    │  │  agent-2    │   MAX_AWAKE  = 5    │   │
+│  │  │ [sleeping/  │  │ [sleeping/  │  │ [sleeping/  │                     │   │
+│  │  │  awake/busy]│  │  awake/busy]│  │  awake/busy]│   Concurrency:      │   │
+│  │  │             │  │             │  │             │   • query_lock/agent │   │
+│  │  │ MCP: axi,   │  │ MCP: utils  │  │ MCP: utils  │   • _wake_lock      │   │
+│  │  │   discord?  │  │             │  │             │   • message_queue    │   │
+│  │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                     │   │
+│  └─────────┼────────────────┼────────────────┼────────────────────────────┘   │
+│            │                │                │                                 │
+│  ┌─────────┴────────────────┴────────────────┴──────────────────────────────┐  │
+│  │  Claude Agent SDK  (per-agent ClaudeSDKClient subprocess)                │  │
+│  │  • Streaming responses → text_buffer → Discord messages                  │  │
+│  │  • Tool use (Bash, Edit, Read, etc.) sandboxed per-agent cwd             │  │
+│  │  • Session resume via session_id                                         │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                │
+│  ┌─────────────────────┐ ┌───────────────────┐ ┌──────────────────────────┐   │
+│  │  Rate Limit Manager │ │  Logging           │ │  Permission Layer        │   │
+│  │  • Global state     │ │  • orchestrator.log│ │  • OS sandbox (bash)     │   │
+│  │  • Auto-retry queue │ │  • <agent>.log each│ │  • can_use_tool (writes) │   │
+│  │  • Shared API acct  │ │  • Rotating files  │ │  • cwd + EXTRA_ALLOWED   │   │
+│  └─────────────────────┘ └───────────────────┘ └──────────────────────────┘   │
+└────────────────────────────────────────────────────────────────────────────────┘
+              │
+              │  exit codes: 42=restart, 0=stop, crash=rollback
+              ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  supervisor.py                                                                  │
+│  • Crash classification (startup <60s vs runtime)                               │
+│  • Auto-rollback: git stash + git reset --hard                                  │
+│  • Marker files: .rollback_performed, .crash_analysis                           │
+│  • Output tee: .bot_output.log                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+              │
+              │  systemd restart on non-zero exit
+              ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  systemd (axi-bot.service)                                                      │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+Data files (all on disk, no database):
+┌──────────────────┬─────────────────────┬──────────────────┬─────────────────────┐
+│ schedules.json   │ schedule_skips.json │ USER_PROFILE.md  │ .env                │
+│ schedule_history │ logs/*.log          │ .rollback_marker │ .crash_analysis     │
+└──────────────────┴─────────────────────┴──────────────────┴─────────────────────┘
+```
+
 ## 1. What This Is
 
 Axi is a **self-hosted, self-modifying personal assistant** that lives inside a Discord server. It wraps Claude Code (via Anthropic's Agent SDK) in a multi-agent orchestration layer, giving you persistent AI agent sessions that each get their own Discord channel. You talk to Axi by typing in Discord; Axi talks back by streaming Claude's output into the channel in real time.
