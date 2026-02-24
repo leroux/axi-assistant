@@ -8,4 +8,5 @@ dependencies = [
     "python-dotenv",
     "croniter",
     "httpx",
+    "tzdata>=2025.3",
 ]
