@@ -37,6 +37,7 @@ DEFAULT_CWD = os.environ.get("DEFAULT_CWD", os.getcwd())
 AXI_USER_DATA = os.environ.get("AXI_USER_DATA", os.path.expanduser("~/axi-user-data"))
 SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
+DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
 
 # --- Discord bot setup ---
 
@@ -85,6 +86,7 @@ class AgentSession:
     session_id: str | None = None
     discord_channel_id: int | None = None
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    mcp_servers: dict | None = None
     injected_count: int = 0  # queries injected mid-stream via query()
 
 
@@ -336,7 +338,7 @@ Example one-off: {"name": "reminder", "prompt": "Say hello in 10 languages", "at
 Example recurring: {"name": "daily-standup", "prompt": "Ask me what I'm working on today", "schedule": "0 9 * * *"}. \
 Example agent schedule: {"name": "weekly-cleanup", "prompt": "Clean up unused imports", "schedule": "0 9 * * 1", "cwd": "/home/pride/coding-projects/my-app", "agent": true}. \
 Example shared session: multiple events with "session": "my-agent" will all route to the same persistent agent session. \
-To restart yourself, use the /restart slash command. \
+To restart yourself, use the axi_restart MCP tool. \
 Only restart when the user explicitly asks you to — do not restart after every self-edit.
 
 ## Schedule Skips (One-Off Cancellations)
@@ -550,10 +552,80 @@ async def axi_kill_agent(args):
     return {"content": [{"type": "text", "text": f"Agent '{agent_name}' killed (no session ID available)."}]}
 
 
+@tool(
+    "get_date_and_time",
+    "Get the current date and time with logical day/week calculations. "
+    "Accounts for the user's configured day boundary (the hour when a new 'day' starts). "
+    "Always call this first to orient yourself before working with plans.",
+    {"type": "object", "properties": {}, "required": []},
+)
+async def get_date_and_time(args):
+    import arrow
+
+    tz = os.environ.get("SCHEDULE_TIMEZONE", "UTC")
+    boundary = DAY_BOUNDARY_HOUR
+
+    now = arrow.now(tz)
+
+    # Logical date: if before boundary hour, it's still "yesterday"
+    if now.hour < boundary:
+        logical = now.shift(days=-1)
+    else:
+        logical = now
+
+    # Logical week start (Sunday)
+    # arrow weekday(): Monday=0 ... Sunday=6
+    days_since_sunday = (logical.weekday() + 1) % 7
+    week_start = logical.shift(days=-days_since_sunday).floor("day")
+    week_end = week_start.shift(days=6)
+
+    # Format day boundary display
+    if boundary == 0:
+        boundary_display = "12:00 AM (midnight)"
+    elif boundary < 12:
+        boundary_display = f"{boundary}:00 AM"
+    elif boundary == 12:
+        boundary_display = "12:00 PM (noon)"
+    else:
+        boundary_display = f"{boundary - 12}:00 PM"
+
+    result = {
+        "now": now.isoformat(),
+        "now_display": now.format("dddd, MMM D, YYYY h:mm A"),
+        "logical_date": logical.format("YYYY-MM-DD"),
+        "logical_date_display": logical.format("dddd, MMM D, YYYY"),
+        "logical_day_of_week": logical.format("dddd"),
+        "logical_week_start": week_start.format("YYYY-MM-DD"),
+        "logical_week_display": f"Week of {week_start.format('MMM D')} \u2013 {week_end.format('MMM D, YYYY')}",
+        "timezone": tz,
+        "day_boundary": boundary_display,
+    }
+
+    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+
+_utils_mcp_server = create_sdk_mcp_server(
+    name="utils",
+    version="1.0.0",
+    tools=[get_date_and_time],
+)
+
+@tool(
+    "axi_restart",
+    "Restart the Axi bot. Waits for busy agents to finish first (graceful). "
+    "Only use when the user explicitly asks you to restart.",
+    {"type": "object", "properties": {}, "required": []},
+)
+async def axi_restart(args):
+    log.info("Restart requested via MCP tool")
+    asyncio.create_task(_graceful_shutdown("MCP tool"))
+    return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
+
+
 _axi_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent],
+    tools=[axi_spawn_agent, axi_kill_agent, axi_restart],
 )
 
 
@@ -671,6 +743,7 @@ async def wake_agent(session: AgentSession) -> None:
         stderr=make_stderr_callback(session),
         resume=resume_id,
         sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
+        mcp_servers=session.mcp_servers or {},
     )
 
     try:
@@ -694,6 +767,7 @@ async def wake_agent(session: AgentSession) -> None:
             stderr=make_stderr_callback(session),
             resume=None,
             sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
+            mcp_servers=session.mcp_servers or {},
         )
         session.client = ClaudeSDKClient(options=options)
         await session.client.__aenter__()
@@ -823,6 +897,7 @@ async def reconstruct_agents_from_channels() -> int:
                 cwd=cwd,
                 session_id=session_id,
                 discord_channel_id=ch.id,
+                mcp_servers={"utils": _utils_mcp_server},
             )
             agents[agent_name] = session
             channel_to_agent[ch.id] = agent_name
@@ -1097,7 +1172,7 @@ async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | No
     else:
         await send_system(channel, f"Spawning agent **{name}** in `{cwd}`...")
 
-    session = await start_session(name, cwd, system_prompt=None, resume=resume)
+    session = await start_session(name, cwd, system_prompt=None, resume=resume, mcp_servers={"utils": _utils_mcp_server})
     if resume:
         session.session_id = resume
     session.discord_channel_id = channel.id

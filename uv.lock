@@ -136,6 +136,19 @@ wheels = [
 ]
 
 [[package]]
+name = "arrow"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+    { name = "tzdata" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b9/33/032cdc44182491aa708d06a68b62434140d8c50820a087fac7af37703357/arrow-1.4.0.tar.gz", hash = "sha256:ed0cc050e98001b8779e84d461b0098c4ac597e88704a655582b21d116e526d7", size = 152931, upload-time = "2025-10-18T17:46:46.761Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ed/c9/d7977eaacb9df673210491da99e6a247e93df98c715fc43fd136ce1d3d33/arrow-1.4.0-py3-none-any.whl", hash = "sha256:749f0769958ebdc79c173ff0b0670d59051a535fa26e8eba02953dc19eb43205", size = 68797, upload-time = "2025-10-18T17:46:45.663Z" },
+]
+
+[[package]]
 name = "attrs"
 version = "25.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -682,6 +695,7 @@ name = "personal-assistant"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "arrow" },
     { name = "claude-agent-sdk" },
     { name = "croniter" },
     { name = "discord-py" },
@@ -692,6 +706,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "arrow" },
     { name = "claude-agent-sdk" },
     { name = "croniter" },
     { name = "discord-py" },

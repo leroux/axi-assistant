@@ -9,4 +9,5 @@ dependencies = [
     "croniter",
     "httpx",
     "tzdata>=2025.3",
+    "arrow",
 ]
