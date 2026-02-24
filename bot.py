@@ -107,6 +107,7 @@ target_guild: discord.Guild | None = None
 active_category: CategoryChannel | None = None
 killed_category: CategoryChannel | None = None
 channel_to_agent: dict[int, str] = {}  # channel_id -> agent_name
+_bot_creating_channels: set[str] = set()  # channel names currently being created by the bot
 
 
 def make_stderr_callback(session: AgentSession):
@@ -986,7 +987,11 @@ async def ensure_agent_channel(agent_name: str) -> TextChannel:
                 return ch
 
     # Create new channel in Active category
-    channel = await target_guild.create_text_channel(normalized, category=active_category)
+    _bot_creating_channels.add(normalized)
+    try:
+        channel = await target_guild.create_text_channel(normalized, category=active_category)
+    finally:
+        _bot_creating_channels.discard(normalized)
     channel_to_agent[channel.id] = agent_name
     log.info("Created channel #%s in Active category", normalized)
     return channel
@@ -2167,6 +2172,51 @@ async def restart_cmd(interaction, force: bool = False):
     await interaction.response.send_message("*System:* Initiating graceful restart...")
     log.info("Restart requested via /restart command")
     await _graceful_shutdown("slash command")
+
+
+# --- Channel creation listener ---
+
+@bot.event
+async def on_guild_channel_create(channel: discord.abc.GuildChannel):
+    """Auto-register agent when a user manually creates a channel in the Active category."""
+    if not isinstance(channel, discord.TextChannel):
+        return
+    if not active_category or channel.category_id != active_category.id:
+        return
+    if channel.name in _bot_creating_channels:
+        return  # Bot created this channel, spawn_agent will handle registration
+    if channel.name == _normalize_channel_name(MASTER_AGENT_NAME):
+        return
+
+    agent_name = channel.name
+    if agent_name in agents:
+        return  # Already registered (e.g. reconstruct or race)
+
+    if len(agents) >= MAX_AGENTS:
+        await send_system(channel, f"Cannot auto-register — max agents ({MAX_AGENTS}) reached.")
+        return
+
+    cwd = os.path.join(AXI_USER_DATA, "agents", agent_name)
+    os.makedirs(cwd, exist_ok=True)
+
+    session = AgentSession(
+        name=agent_name,
+        client=None,
+        cwd=cwd,
+        discord_channel_id=channel.id,
+        mcp_servers={"utils": _utils_mcp_server},
+    )
+    agents[agent_name] = session
+    channel_to_agent[channel.id] = agent_name
+
+    desired_topic = _format_channel_topic(cwd)
+    try:
+        await channel.edit(topic=desired_topic)
+    except discord.HTTPException as e:
+        log.warning("Failed to set topic on #%s: %s", agent_name, e)
+
+    await send_system(channel, f"Agent **{agent_name}** auto-registered from channel creation.\n`cwd: {cwd}`\nSend a message to wake it up.")
+    log.info("Auto-registered agent '%s' from manual channel creation (cwd=%s)", agent_name, cwd)
 
 
 # --- Startup ---
