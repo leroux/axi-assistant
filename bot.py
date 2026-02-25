@@ -169,6 +169,7 @@ class AgentSession:
     session_id: str | None = None
     discord_channel_id: int | None = None
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    stopped_messages: list = field(default_factory=list)  # Messages saved by /stop for /resume
     mcp_servers: dict | None = None
     _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
     _bridge_busy: bool = False   # True when reconnected to a mid-task CLI (bridge idle=False)
@@ -3339,22 +3340,72 @@ async def stop_agent(interaction, agent_name: str | None = None):
         # interrupt cancels current query
         await session.client.interrupt()
 
-        # Drain queued messages so they don't get processed after the interrupt
+        # Drain queued messages so they don't get processed after the interrupt.
+        # Save them on the session so /resume can re-queue them.
         cleared = 0
+        session.stopped_messages.clear()
         while not session.message_queue.empty():
-            _, ch, dropped_msg = session.message_queue.get_nowait()
+            item = session.message_queue.get_nowait()
+            content, ch, dropped_msg = item
             await _remove_reaction(dropped_msg, "📨")
+            session.stopped_messages.append(item)
             cleared += 1
 
         if cleared:
             await interaction.response.send_message(
-                f"*System:* Interrupt signal sent to **{agent_name}** and cleared {cleared} queued message{'s' if cleared != 1 else ''}."
+                f"*System:* Interrupt signal sent to **{agent_name}** and cleared {cleared} queued message{'s' if cleared != 1 else ''}. "
+                f"Use `/resume` to re-queue them."
             )
         else:
             await interaction.response.send_message(f"*System:* Interrupt signal sent to **{agent_name}**.")
     except Exception as e:
         log.exception("Failed to interrupt agent '%s'", agent_name)
         await interaction.response.send_message(f"Failed to interrupt **{agent_name}**: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="resume", description="Re-queue messages that were cleared by /stop.")
+@app_commands.autocomplete(agent_name=agent_autocomplete)
+async def resume_agent(interaction, agent_name: str | None = None):
+    log.info("Slash command /resume agent=%s from %s", agent_name, interaction.user)
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    # Infer agent from channel if not specified
+    if agent_name is None:
+        agent_name = channel_to_agent.get(interaction.channel_id)
+        if agent_name is None:
+            await interaction.response.send_message(
+                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
+            )
+            return
+
+    session = agents.get(agent_name)
+    if session is None:
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+        return
+
+    saved = session.stopped_messages
+    if not saved:
+        await interaction.response.send_message(
+            f"Agent **{agent_name}** has no stopped messages to resume.", ephemeral=True
+        )
+        return
+
+    count = len(saved)
+    for item in saved:
+        content, ch, orig_msg = item
+        await session.message_queue.put(item)
+        await _add_reaction(orig_msg, "📨")
+    session.stopped_messages = []
+
+    await interaction.response.send_message(
+        f"*System:* Re-queued {count} message{'s' if count != 1 else ''} for **{agent_name}**."
+    )
+
+    # If the agent isn't busy, kick off queue processing
+    if not session.query_lock.locked():
+        await _process_message_queue(session)
 
 
 @bot.tree.command(name="reset-context", description="Reset an agent's context. Infers agent from current channel, or specify by name.")
