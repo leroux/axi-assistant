@@ -169,7 +169,6 @@ class AgentSession:
     session_id: str | None = None
     discord_channel_id: int | None = None
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    stopped_messages: list = field(default_factory=list)  # Messages saved by /stop for /resume
     mcp_servers: dict | None = None
     _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
     _bridge_busy: bool = False   # True when reconnected to a mid-task CLI (bridge idle=False)
@@ -3340,21 +3339,16 @@ async def stop_agent(interaction, agent_name: str | None = None):
         # interrupt cancels current query
         await session.client.interrupt()
 
-        # Drain queued messages so they don't get processed after the interrupt.
-        # Save them on the session so /resume can re-queue them.
+        # Drain queued messages so nothing gets processed after the interrupt
         cleared = 0
-        session.stopped_messages.clear()
         while not session.message_queue.empty():
-            item = session.message_queue.get_nowait()
-            content, ch, dropped_msg = item
+            _, ch, dropped_msg = session.message_queue.get_nowait()
             await _remove_reaction(dropped_msg, "📨")
-            session.stopped_messages.append(item)
             cleared += 1
 
         if cleared:
             await interaction.response.send_message(
-                f"*System:* Interrupt signal sent to **{agent_name}** and cleared {cleared} queued message{'s' if cleared != 1 else ''}. "
-                f"Use `/resume` to re-queue them."
+                f"*System:* Interrupt signal sent to **{agent_name}** and cleared {cleared} queued message{'s' if cleared != 1 else ''}."
             )
         else:
             await interaction.response.send_message(f"*System:* Interrupt signal sent to **{agent_name}**.")
@@ -3363,10 +3357,10 @@ async def stop_agent(interaction, agent_name: str | None = None):
         await interaction.response.send_message(f"Failed to interrupt **{agent_name}**: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="resume", description="Re-queue messages that were cleared by /stop.")
+@bot.tree.command(name="skip", description="Interrupt the current query but keep processing queued messages.")
 @app_commands.autocomplete(agent_name=agent_autocomplete)
-async def resume_agent(interaction, agent_name: str | None = None):
-    log.info("Slash command /resume agent=%s from %s", agent_name, interaction.user)
+async def skip_agent(interaction, agent_name: str | None = None):
+    log.info("Slash command /skip agent=%s from %s", agent_name, interaction.user)
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
@@ -3385,27 +3379,25 @@ async def resume_agent(interaction, agent_name: str | None = None):
         await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
         return
 
-    saved = session.stopped_messages
-    if not saved:
-        await interaction.response.send_message(
-            f"Agent **{agent_name}** has no stopped messages to resume.", ephemeral=True
-        )
+    if session.client is None or not session.query_lock.locked():
+        await interaction.response.send_message(f"Agent **{agent_name}** is not busy.", ephemeral=True)
         return
 
-    count = len(saved)
-    for item in saved:
-        content, ch, orig_msg = item
-        await session.message_queue.put(item)
-        await _add_reaction(orig_msg, "📨")
-    session.stopped_messages = []
-
-    await interaction.response.send_message(
-        f"*System:* Re-queued {count} message{'s' if count != 1 else ''} for **{agent_name}**."
-    )
-
-    # If the agent isn't busy, kick off queue processing
-    if not session.query_lock.locked():
-        await _process_message_queue(session)
+    queued = session.message_queue.qsize()
+    try:
+        # Interrupt current query only — queued messages will continue processing
+        await session.client.interrupt()
+        if queued:
+            await interaction.response.send_message(
+                f"*System:* Skipped current query for **{agent_name}**. {queued} queued message{'s' if queued != 1 else ''} will continue processing."
+            )
+        else:
+            await interaction.response.send_message(
+                f"*System:* Skipped current query for **{agent_name}**. No queued messages."
+            )
+    except Exception as e:
+        log.exception("Failed to interrupt agent '%s'", agent_name)
+        await interaction.response.send_message(f"Failed to skip **{agent_name}**: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="reset-context", description="Reset an agent's context. Infers agent from current channel, or specify by name.")
