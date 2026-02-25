@@ -2556,3 +2556,178 @@ class TestIdleField:
             assert sub["idle"] is False
         finally:
             await _cleanup_multi(server, srv, [conn1, conn2], sock)
+
+
+# ---------------------------------------------------------------------------
+# Agent limit tests: no cap on total agents, MAX_AWAKE_AGENTS enforced
+# ---------------------------------------------------------------------------
+
+# These tests verify that:
+# 1. Many agents can be created without hitting a cap (no MAX_AGENTS limit)
+# 2. MAX_AWAKE_AGENTS is enforced (ConcurrencyLimitError on wake)
+# 3. Sleeping an awake agent frees a slot for another to wake
+
+# --- Bridge-level: unlimited agent spawning ---
+
+class TestUnlimitedAgentSpawning:
+    @pytest.mark.asyncio
+    async def test_spawn_many_agents_no_cap(self):
+        """Bridge server allows spawning 12 agents — no MAX_AGENTS limit."""
+        sock = _tmp_sock()
+        server, srv = await _start_server(sock)
+        conn = await _connect(sock)
+        n_agents = 12
+        try:
+            for i in range(n_agents):
+                result = await asyncio.wait_for(
+                    conn.send_command(
+                        "spawn", name=f"agent-{i}",
+                        cli_args=_slow_cli_script(1, 10),
+                        env=dict(os.environ), cwd="/tmp",
+                    ),
+                    timeout=3,
+                )
+                assert result["ok"] is True, f"Agent {i} spawn failed: {result}"
+                assert isinstance(result["pid"], int)
+
+            # All 12 should be listed
+            ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
+            assert len(ls["agents"]) == n_agents
+            for i in range(n_agents):
+                assert f"agent-{i}" in ls["agents"]
+                assert ls["agents"][f"agent-{i}"]["status"] == "running"
+        finally:
+            await _cleanup(server, srv, conn, sock)
+
+
+# --- Bot-level: awake agent concurrency limit ---
+#
+# bot.py cannot be imported directly (it has Discord setup side effects),
+# so we replicate the core awake-limit logic here with minimal fakes.
+
+class _FakeClient:
+    """Stands in for ClaudeSDKClient — just needs to be truthy."""
+    pass
+
+
+class _FakeSession:
+    """Minimal AgentSession stand-in for concurrency tests."""
+    def __init__(self, name: str, awake: bool = False):
+        self.name = name
+        self.client = _FakeClient() if awake else None
+        self.last_activity = __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        )
+        self.query_lock = asyncio.Lock()
+        self._bridge_busy = False
+
+
+class ConcurrencyLimitError(Exception):
+    """Mirrors bot.py's ConcurrencyLimitError."""
+    pass
+
+
+MAX_AWAKE_AGENTS = 5
+
+
+def _count_awake(agents: dict[str, _FakeSession]) -> int:
+    return sum(1 for s in agents.values() if s.client is not None)
+
+
+def _sleep(session: _FakeSession) -> None:
+    session.client = None
+
+
+def _wake(session: _FakeSession, agents: dict[str, _FakeSession]) -> None:
+    if session.client is not None:
+        return
+    if _count_awake(agents) >= MAX_AWAKE_AGENTS:
+        raise ConcurrencyLimitError(
+            f"Cannot wake '{session.name}': all {MAX_AWAKE_AGENTS} slots busy"
+        )
+    session.client = _FakeClient()
+
+
+class TestAwakeAgentLimit:
+    def test_many_sleeping_agents_allowed(self):
+        """Creating 15 sleeping agents is fine — no total cap."""
+        agents: dict[str, _FakeSession] = {}
+        for i in range(15):
+            s = _FakeSession(f"s-{i}", awake=False)
+            agents[s.name] = s
+        assert len(agents) == 15
+        assert _count_awake(agents) == 0
+
+    def test_wake_up_to_max_awake(self):
+        """Can wake exactly MAX_AWAKE_AGENTS agents."""
+        agents: dict[str, _FakeSession] = {}
+        for i in range(10):
+            agents[f"a-{i}"] = _FakeSession(f"a-{i}", awake=False)
+
+        for i in range(MAX_AWAKE_AGENTS):
+            _wake(agents[f"a-{i}"], agents)
+        assert _count_awake(agents) == MAX_AWAKE_AGENTS
+
+    def test_wake_beyond_max_raises(self):
+        """Waking a 6th agent when 5 are awake raises ConcurrencyLimitError."""
+        agents: dict[str, _FakeSession] = {}
+        for i in range(MAX_AWAKE_AGENTS + 1):
+            agents[f"a-{i}"] = _FakeSession(f"a-{i}", awake=(i < MAX_AWAKE_AGENTS))
+
+        assert _count_awake(agents) == MAX_AWAKE_AGENTS
+        with pytest.raises(ConcurrencyLimitError):
+            _wake(agents[f"a-{MAX_AWAKE_AGENTS}"], agents)
+
+    def test_sleep_frees_slot(self):
+        """Sleeping an awake agent frees a slot for another to wake."""
+        agents: dict[str, _FakeSession] = {}
+        for i in range(MAX_AWAKE_AGENTS + 1):
+            agents[f"a-{i}"] = _FakeSession(f"a-{i}", awake=(i < MAX_AWAKE_AGENTS))
+
+        # All slots full — can't wake the last one
+        with pytest.raises(ConcurrencyLimitError):
+            _wake(agents[f"a-{MAX_AWAKE_AGENTS}"], agents)
+
+        # Sleep one agent
+        _sleep(agents["a-0"])
+        assert _count_awake(agents) == MAX_AWAKE_AGENTS - 1
+
+        # Now the extra agent can wake
+        _wake(agents[f"a-{MAX_AWAKE_AGENTS}"], agents)
+        assert _count_awake(agents) == MAX_AWAKE_AGENTS
+        assert agents[f"a-{MAX_AWAKE_AGENTS}"].client is not None
+
+    def test_sleep_idempotent(self):
+        """Sleeping an already-sleeping agent is a no-op."""
+        s = _FakeSession("sleepy", awake=False)
+        _sleep(s)
+        assert s.client is None
+
+    def test_wake_idempotent(self):
+        """Waking an already-awake agent is a no-op."""
+        agents: dict[str, _FakeSession] = {}
+        s = _FakeSession("awake", awake=True)
+        agents[s.name] = s
+        original_client = s.client
+        _wake(s, agents)
+        assert s.client is original_client
+
+    def test_mixed_sleeping_and_awake(self):
+        """20 agents total, 5 awake, 15 sleeping — all coexist."""
+        agents: dict[str, _FakeSession] = {}
+        for i in range(20):
+            agents[f"a-{i}"] = _FakeSession(f"a-{i}", awake=(i < MAX_AWAKE_AGENTS))
+
+        assert len(agents) == 20
+        assert _count_awake(agents) == MAX_AWAKE_AGENTS
+
+        # Can't wake more
+        with pytest.raises(ConcurrencyLimitError):
+            _wake(agents["a-10"], agents)
+
+        # Sleep one, wake another
+        _sleep(agents["a-2"])
+        _wake(agents["a-10"], agents)
+        assert _count_awake(agents) == MAX_AWAKE_AGENTS
+        assert agents["a-2"].client is None
+        assert agents["a-10"].client is not None

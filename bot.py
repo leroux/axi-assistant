@@ -102,7 +102,6 @@ _bot_start_time: datetime | None = None
 # --- Agent session management ---
 
 MASTER_AGENT_NAME = "axi-master"
-MAX_AGENTS = 20
 MAX_AWAKE_AGENTS = 5  # max concurrent awake agents (each ~280MB); set based on available RAM
 IDLE_REMINDER_THRESHOLDS = [timedelta(minutes=30), timedelta(hours=3), timedelta(hours=48)]
 QUERY_TIMEOUT = 43200  # 12 hours
@@ -674,8 +673,6 @@ async def axi_spawn_agent(args):
         return {"content": [{"type": "text", "text": f"Error: cannot spawn agent with reserved name '{MASTER_AGENT_NAME}'."}], "is_error": True}
     if agent_name in agents and not agent_resume:
         return {"content": [{"type": "text", "text": f"Error: agent '{agent_name}' already exists. Kill it first or use 'resume' to replace it."}], "is_error": True}
-    if len(agents) >= MAX_AGENTS:
-        return {"content": [{"type": "text", "text": f"Error: maximum number of agents ({MAX_AGENTS}) reached. Kill an agent first."}], "is_error": True}
 
     async def _do_spawn():
         try:
@@ -2730,10 +2727,6 @@ async def check_schedules():
                         # Session already exists — send prompt to it
                         log.info("Routing event '%s' to existing session '%s'", name, agent_name)
                         await send_prompt_to_agent(agent_name, entry["prompt"])
-                    elif len(agents) >= MAX_AGENTS:
-                        log.warning("Max agents reached, skipping event %s", name)
-                        if master_ch:
-                            await send_system(master_ch, f"Scheduled event **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
                     else:
                         await reclaim_agent_name(agent_name)
                         await spawn_agent(agent_name, agent_cwd, entry["prompt"])
@@ -2755,10 +2748,6 @@ async def check_schedules():
                     if agent_name in agents:
                         log.info("Routing event '%s' to existing session '%s'", name, agent_name)
                         await send_prompt_to_agent(agent_name, entry["prompt"])
-                    elif len(agents) >= MAX_AGENTS:
-                        log.warning("Max agents reached, skipping event %s", name)
-                        if master_ch:
-                            await send_system(master_ch, f"Scheduled event **{name}** skipped — max agents ({MAX_AGENTS}) reached.")
                     else:
                         await reclaim_agent_name(agent_name)
                         await spawn_agent(agent_name, agent_cwd, entry["prompt"])
@@ -3486,10 +3475,6 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     if agent_name in agents:
         return  # Already registered (e.g. reconstruct or race)
 
-    if len(agents) >= MAX_AGENTS:
-        await send_system(channel, f"Cannot auto-register — max agents ({MAX_AGENTS}) reached.")
-        return
-
     cwd = os.path.join(AXI_USER_DATA, "agents", agent_name)
     os.makedirs(cwd, exist_ok=True)
 
@@ -3799,13 +3784,7 @@ async def on_ready():
         )
 
         await reclaim_agent_name("crash-handler")
-
-        if len(agents) < MAX_AGENTS:
-            await spawn_agent("crash-handler", BOT_DIR, crash_prompt)
-        else:
-            log.warning("Max agents reached, cannot spawn crash handler")
-            if master_ch:
-                await send_system(master_ch, "Could not spawn crash analysis agent — max agents reached.")
+        await spawn_agent("crash-handler", BOT_DIR, crash_prompt)
 
     elif crash_info:
         crash_log = crash_info.get("crash_log", "(no crash log available)")
@@ -3835,13 +3814,7 @@ async def on_ready():
         )
 
         await reclaim_agent_name("crash-handler")
-
-        if len(agents) < MAX_AGENTS:
-            await spawn_agent("crash-handler", BOT_DIR, crash_prompt)
-        else:
-            log.warning("Max agents reached, cannot spawn crash handler")
-            if master_ch:
-                await send_system(master_ch, "Could not spawn crash analysis agent — max agents reached.")
+        await spawn_agent("crash-handler", BOT_DIR, crash_prompt)
 
 
 def _handle_task_exception(loop, context):

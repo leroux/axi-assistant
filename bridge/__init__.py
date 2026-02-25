@@ -20,6 +20,14 @@ Architecture:
 from bridge.protocol import (
     CmdMsg, StdinMsg, ResultMsg, StdoutMsg, StderrMsg, ExitMsg,
 )
+
+# String constants for test compatibility
+TYPE_CMD = "cmd"
+TYPE_STDIN = "stdin"
+TYPE_RESULT = "result"
+TYPE_STDOUT = "stdout"
+TYPE_STDERR = "stderr"
+TYPE_EXIT = "exit"
 from bridge.server import BridgeServer, CliProcess
 from bridge.client import BridgeConnection, BridgeTransport
 from bridge.helpers import connect_to_bridge, ensure_bridge, start_bridge, build_cli_spawn_args
