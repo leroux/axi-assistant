@@ -11,21 +11,9 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 
-class _DictAccessModel(BaseModel):
-    """Base model that supports both attribute and dict-style access."""
-    def __getitem__(self, key: str) -> Any:
-        return getattr(self, key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
-
-    def __contains__(self, key: str) -> bool:
-        return hasattr(self, key) and getattr(self, key) is not None
-
-
 # -- Bot.py → Bridge ----------------------------------------------------------
 
-class CmdMsg(_DictAccessModel):
+class CmdMsg(BaseModel):
     type: Literal["cmd"] = "cmd"
     cmd: str
     name: str = ""
@@ -33,7 +21,7 @@ class CmdMsg(_DictAccessModel):
     env: dict[str, str] = {}
     cwd: str | None = None
 
-class StdinMsg(_DictAccessModel):
+class StdinMsg(BaseModel):
     type: Literal["stdin"] = "stdin"
     name: str
     data: dict[str, Any]  # opaque Claude SDK message
@@ -41,7 +29,7 @@ class StdinMsg(_DictAccessModel):
 
 # -- Bridge → Bot.py ----------------------------------------------------------
 
-class ResultMsg(_DictAccessModel):
+class ResultMsg(BaseModel):
     type: Literal["result"] = "result"
     ok: bool
     name: str = ""
@@ -59,17 +47,17 @@ class ResultMsg(_DictAccessModel):
     # status
     uptime_seconds: int | None = None
 
-class StdoutMsg(_DictAccessModel):
+class StdoutMsg(BaseModel):
     type: Literal["stdout"] = "stdout"
     name: str
     data: dict[str, Any]  # opaque Claude SDK message
 
-class StderrMsg(_DictAccessModel):
+class StderrMsg(BaseModel):
     type: Literal["stderr"] = "stderr"
     name: str
     text: str
 
-class ExitMsg(_DictAccessModel):
+class ExitMsg(BaseModel):
     type: Literal["exit"] = "exit"
     name: str
     code: int | None = None
