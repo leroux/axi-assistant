@@ -262,8 +262,9 @@ async def _add_reaction(message: discord.Message | None, emoji: str) -> None:
         return
     try:
         await message.add_reaction(emoji)
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-        pass  # Message deleted, no permission, or Discord hiccup
+        log.info("Reaction +%s on message %s", emoji, message.id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+        log.warning("Reaction +%s failed on message %s: %s", emoji, message.id, exc)
 
 
 async def _remove_reaction(message: discord.Message | None, emoji: str) -> None:
@@ -272,8 +273,9 @@ async def _remove_reaction(message: discord.Message | None, emoji: str) -> None:
         return
     try:
         await message.remove_reaction(emoji, bot.user)
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-        pass
+        log.info("Reaction -%s on message %s", emoji, message.id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+        log.warning("Reaction -%s failed on message %s: %s", emoji, message.id, exc)
 
 
 # --- Image attachment support ---
