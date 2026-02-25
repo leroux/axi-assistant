@@ -111,6 +111,45 @@ KILLED_CATEGORY_NAME = "Killed"
 
 
 @dataclass
+class ActivityState:
+    """Real-time activity tracking for an agent during a query."""
+    phase: str = "idle"           # "thinking", "writing", "tool_use", "waiting", "starting", "idle"
+    tool_name: str | None = None  # Current tool being called (e.g. "Bash", "Read")
+    tool_input_preview: str = ""  # First ~200 chars of tool input JSON
+    turn_count: int = 0           # Number of API turns in current query
+    query_started: datetime | None = None  # When the current query began
+    last_event: datetime | None = None     # When the last stream event arrived
+    text_chars: int = 0           # Characters of text generated in current turn
+
+
+TOOL_DISPLAY_NAMES = {
+    "Bash": "running bash command",
+    "Read": "reading file",
+    "Write": "writing file",
+    "Edit": "editing file",
+    "MultiEdit": "editing file",
+    "Glob": "searching for files",
+    "Grep": "searching code",
+    "WebSearch": "searching the web",
+    "WebFetch": "fetching web page",
+    "Task": "running subagent",
+    "NotebookEdit": "editing notebook",
+    "TodoWrite": "updating tasks",
+}
+
+
+def _tool_display(name: str) -> str:
+    """Human-readable description of a tool call."""
+    if name in TOOL_DISPLAY_NAMES:
+        return TOOL_DISPLAY_NAMES[name]
+    if name.startswith("mcp__"):
+        parts = name.split("__", 2)
+        if len(parts) == 3:
+            return f"{parts[1]}: {parts[2]}"
+    return f"using {name}"
+
+
+@dataclass
 class AgentSession:
     name: str
     client: ClaudeSDKClient | None = None
@@ -127,6 +166,7 @@ class AgentSession:
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     mcp_servers: dict | None = None
     _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
+    activity: ActivityState = field(default_factory=ActivityState)
     _log: logging.Logger | None = None
 
     def __post_init__(self):
@@ -1653,6 +1693,86 @@ async def _receive_response_safe(session: AgentSession):
             return
 
 
+def _update_activity(session: AgentSession, event: dict) -> None:
+    """Update the agent's activity state from a raw Anthropic stream event."""
+    activity = session.activity
+    activity.last_event = datetime.now(timezone.utc)
+    event_type = event.get("type", "")
+
+    if event_type == "content_block_start":
+        block = event.get("content_block", {})
+        block_type = block.get("type", "")
+
+        if block_type == "tool_use":
+            activity.phase = "tool_use"
+            activity.tool_name = block.get("name")
+            activity.tool_input_preview = ""
+        elif block_type == "thinking":
+            activity.phase = "thinking"
+            activity.tool_name = None
+            activity.tool_input_preview = ""
+        elif block_type == "text":
+            activity.phase = "writing"
+            activity.tool_name = None
+            activity.tool_input_preview = ""
+            activity.text_chars = 0
+
+    elif event_type == "content_block_delta":
+        delta = event.get("delta", {})
+        delta_type = delta.get("type", "")
+
+        if delta_type == "thinking_delta":
+            activity.phase = "thinking"
+        elif delta_type == "text_delta":
+            activity.phase = "writing"
+            activity.text_chars += len(delta.get("text", ""))
+        elif delta_type == "input_json_delta":
+            # Accumulate tool input preview (capped at 200 chars)
+            if len(activity.tool_input_preview) < 200:
+                activity.tool_input_preview += delta.get("partial_json", "")
+                activity.tool_input_preview = activity.tool_input_preview[:200]
+
+    elif event_type == "content_block_stop":
+        if activity.phase == "tool_use":
+            activity.phase = "waiting"  # Tool submitted, waiting for execution/result
+
+    elif event_type == "message_start":
+        activity.turn_count += 1
+
+    elif event_type == "message_delta":
+        stop_reason = event.get("delta", {}).get("stop_reason")
+        if stop_reason == "end_turn":
+            activity.phase = "idle"
+            activity.tool_name = None
+        elif stop_reason == "tool_use":
+            activity.phase = "waiting"  # Tools will execute, then new turn starts
+
+
+def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
+    """Try to extract a useful preview from partial tool input JSON."""
+    try:
+        data = json.loads(raw_json)
+        if tool_name == "Bash":
+            return data.get("command", "")[:100]
+        elif tool_name in ("Read", "Write", "Edit"):
+            return data.get("file_path", "")[:100]
+        elif tool_name == "Grep":
+            return f'grep "{data.get("pattern", "")}" {data.get("path", ".")}'[:100]
+        elif tool_name == "Glob":
+            return f'{data.get("pattern", "")}'[:100]
+    except (json.JSONDecodeError, TypeError):
+        # Partial JSON — try simple extraction
+        if tool_name == "Bash":
+            match = re.search(r'"command"\s*:\s*"([^"]*)', raw_json)
+            if match:
+                return match.group(1)[:100]
+        elif tool_name in ("Read", "Write", "Edit"):
+            match = re.search(r'"file_path"\s*:\s*"([^"]*)', raw_json)
+            if match:
+                return match.group(1)[:100]
+    return None
+
+
 async def stream_response_to_channel(session: AgentSession, channel, show_awaiting_input: bool = True) -> None:
     """Stream Claude's response from a specific agent session to a Discord channel.
 
@@ -1701,6 +1821,9 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
             if isinstance(msg, StreamEvent):
                 event = msg.event
                 event_type = event.get("type", "")
+
+                # Update activity state for /status command
+                _update_activity(session, event)
 
                 # Log all stream events to agent log
                 if session._log:
@@ -1981,6 +2104,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             if session._log:
                 session._log.info("PROMPT: %s", _content_summary(prompt))
             log.debug("Running initial prompt for '%s': %s", session.name, _content_summary(prompt))
+            session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(prompt))
@@ -1989,6 +2113,8 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             except TimeoutError:
                 timed_out = True
                 await _handle_query_timeout(session, channel)
+            finally:
+                session.activity = ActivityState(phase="idle")
 
         log.debug("Initial prompt completed for '%s'", session.name)
 
@@ -2046,6 +2172,7 @@ async def _process_message_queue(session: AgentSession) -> None:
             session.idle_reminder_count = 0
             drain_stderr(session)
             drain_sdk_buffer(session)
+            session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(content))
@@ -2058,6 +2185,8 @@ async def _process_message_queue(session: AgentSession) -> None:
                     channel,
                     f"Error processing queued message for **{session.name}**.",
                 )
+            finally:
+                session.activity = ActivityState(phase="idle")
 
 
 
@@ -2360,6 +2489,7 @@ async def on_message(message):
         if session._log:
             session._log.info("USER: %s", _content_summary(content))
         log.debug("Starting query for '%s'", agent_name)
+        session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
                 await session.client.query(_as_stream(content))
@@ -2373,6 +2503,8 @@ async def on_message(message):
                 f"Error communicating with agent **{agent_name}**. The session may have crashed. "
                 f"Try `/kill-agent {agent_name}` and respawn.",
             )
+        finally:
+            session.activity = ActivityState(phase="idle")
 
     log.debug("Query completed for '%s'", agent_name)
 
@@ -2629,6 +2761,156 @@ async def list_agents(interaction):
     await interaction.response.send_message(header + "\n".join(lines))
 
 
+@bot.tree.command(name="status", description="Show what an agent is currently doing.")
+@app_commands.autocomplete(agent_name=agent_autocomplete)
+async def agent_status(interaction, agent_name: str | None = None):
+    log.info("Slash command /status agent=%s from %s", agent_name, interaction.user)
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    # If no agent specified, try to infer from channel
+    if agent_name is None:
+        agent_name = channel_to_agent.get(interaction.channel_id)
+
+    # If still None, show all agents summary
+    if agent_name is None:
+        await _show_all_agents_status(interaction)
+        return
+
+    session = agents.get(agent_name)
+    if session is None:
+        await interaction.response.send_message(
+            f"Agent **{agent_name}** not found.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        _format_agent_status(agent_name, session), ephemeral=True
+    )
+
+
+def _format_agent_status(name: str, session: AgentSession) -> str:
+    """Format a detailed status message for a single agent."""
+    now = datetime.now(timezone.utc)
+    lines = [f"**{name}**"]
+
+    # Basic state
+    if session.client is None:
+        lines.append("State: sleeping")
+        idle = int((now - session.last_activity).total_seconds())
+        lines.append(f"Last active: {_format_time_remaining(idle)} ago")
+    elif not session.query_lock.locked():
+        lines.append("State: awake, idle")
+        idle = int((now - session.last_activity).total_seconds())
+        lines.append(f"Idle for: {_format_time_remaining(idle)}")
+    else:
+        # Agent is busy — show detailed activity
+        activity = session.activity
+
+        if activity.phase == "thinking":
+            lines.append("State: **thinking** (extended thinking)")
+        elif activity.phase == "writing":
+            lines.append(f"State: **writing response** ({activity.text_chars} chars so far)")
+        elif activity.phase == "tool_use" and activity.tool_name:
+            display = _tool_display(activity.tool_name)
+            lines.append(f"State: **{display}**")
+            # Show tool input preview for interesting tools
+            if activity.tool_name == "Bash" and activity.tool_input_preview:
+                preview = _extract_tool_preview(activity.tool_name, activity.tool_input_preview)
+                if preview:
+                    lines.append(f"```\n{preview}\n```")
+            elif activity.tool_name in ("Read", "Write", "Edit", "Grep", "Glob") and activity.tool_input_preview:
+                preview = _extract_tool_preview(activity.tool_name, activity.tool_input_preview)
+                if preview:
+                    lines.append(f"`{preview}`")
+        elif activity.phase == "waiting":
+            lines.append("State: **processing tool results...**")
+        elif activity.phase == "starting":
+            lines.append("State: **starting query...**")
+        else:
+            lines.append(f"State: **busy** ({activity.phase})")
+
+        # Query duration
+        if activity.query_started:
+            elapsed = int((now - activity.query_started).total_seconds())
+            lines.append(f"Query running for: {_format_time_remaining(elapsed)}")
+
+        # Turn count
+        if activity.turn_count > 0:
+            lines.append(f"API turns: {activity.turn_count}")
+
+        # Staleness check
+        if activity.last_event:
+            since_last = int((now - activity.last_event).total_seconds())
+            if since_last > 30:
+                lines.append(f"No stream events for {_format_time_remaining(since_last)} (may be running a long tool)")
+
+    # Queue
+    queue_size = session.message_queue.qsize()
+    if queue_size > 0:
+        lines.append(f"Queued messages: {queue_size}")
+
+    # Rate limit
+    if _is_rate_limited():
+        remaining = _format_time_remaining(_rate_limit_remaining_seconds())
+        lines.append(f"Rate limited: ~{remaining} remaining")
+
+    # Session info
+    if session.session_id:
+        lines.append(f"Session: `{session.session_id[:8]}...`")
+    lines.append(f"cwd: `{session.cwd}`")
+
+    return "\n".join(lines)
+
+
+async def _show_all_agents_status(interaction):
+    """Show a summary of all agents when /status is used without an agent name."""
+    if not agents:
+        await interaction.response.send_message("No active agents.", ephemeral=True)
+        return
+
+    now = datetime.now(timezone.utc)
+    lines = []
+    for name, session in agents.items():
+        if session.client is None:
+            idle = int((now - session.last_activity).total_seconds())
+            status = f"sleeping ({_format_time_remaining(idle)})"
+        elif not session.query_lock.locked():
+            idle = int((now - session.last_activity).total_seconds())
+            status = f"idle ({_format_time_remaining(idle)})"
+        else:
+            activity = session.activity
+            if activity.phase == "thinking":
+                status = "thinking..."
+            elif activity.phase == "writing":
+                status = "writing response..."
+            elif activity.phase == "tool_use" and activity.tool_name:
+                status = _tool_display(activity.tool_name)
+            elif activity.phase == "waiting":
+                status = "processing tool results..."
+            else:
+                status = "busy"
+
+            if activity.query_started:
+                elapsed = int((now - activity.query_started).total_seconds())
+                status += f" ({_format_time_remaining(elapsed)})"
+
+        queue = session.message_queue.qsize()
+        queue_str = f" | {queue} queued" if queue > 0 else ""
+        lines.append(f"- **{name}**: {status}{queue_str}")
+
+    awake = _count_awake_agents()
+    header = f"**Agent Status** ({awake}/{MAX_AWAKE_AGENTS} awake)"
+    if _is_rate_limited():
+        remaining = _format_time_remaining(_rate_limit_remaining_seconds())
+        header += f" | rate limited (~{remaining})"
+
+    await interaction.response.send_message(
+        f"*System:* {header}\n" + "\n".join(lines), ephemeral=True
+    )
+
+
 @bot.tree.command(name="kill-agent", description="Terminate an agent session.")
 @app_commands.autocomplete(agent_name=killable_agent_autocomplete)
 async def kill_agent(interaction, agent_name: str | None = None):
@@ -2792,6 +3074,7 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
         drain_stderr(session)
         drain_sdk_buffer(session)
 
+        session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
                 await session.client.query(_as_stream(command))
@@ -2803,6 +3086,8 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
         except Exception as e:
             log.exception("Failed to %s agent '%s'", label.lower(), agent_name)
             await interaction.followup.send(f"Failed to {label.lower()} **{agent_name}**: {e}")
+        finally:
+            session.activity = ActivityState(phase="idle")
 
 
 @bot.tree.command(name="compact", description="Compact an agent's conversation context. Infers agent from current channel.")
