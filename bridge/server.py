@@ -62,6 +62,7 @@ class BridgeServer:
 
         self._server = await asyncio.start_unix_server(
             self._handle_client, path=self._socket_path,
+            limit=10 * 1024 * 1024,  # 10 MB — match CLI subprocess limit
         )
         log.info("Bridge listening on %s", self._socket_path)
 

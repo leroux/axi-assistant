@@ -156,6 +156,8 @@ class BridgeTransport:
 
     async def write(self, data: str) -> None:
         """Write data to the CLI's stdin via the bridge."""
+        if not self._conn.is_alive:
+            raise ConnectionError("Bridge connection is dead")
         msg = json.loads(data)
 
         # Intercept initialize for reconnecting agents — fake success
@@ -183,10 +185,12 @@ class BridgeTransport:
         """Async generator yielding parsed JSON dicts from CLI stdout."""
         if not self._queue:
             return
+        if not self._conn.is_alive:
+            raise ConnectionError("Bridge connection is dead")
         while True:
             msg = await self._queue.get()
             if msg is None:
-                return  # Sentinel — connection lost
+                raise ConnectionError("Bridge connection lost during read")
             if isinstance(msg, StdoutMsg):
                 yield msg.data
             elif isinstance(msg, StderrMsg):

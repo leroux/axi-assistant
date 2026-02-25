@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 async def connect_to_bridge(socket_path: str) -> BridgeConnection | None:
     """Try to connect to an existing bridge. Returns None if bridge isn't running."""
     try:
-        reader, writer = await asyncio.open_unix_connection(socket_path)
+        reader, writer = await asyncio.open_unix_connection(socket_path, limit=10 * 1024 * 1024)
         conn = BridgeConnection(reader, writer)
         log.info("Connected to bridge at %s", socket_path)
         return conn
