@@ -2983,12 +2983,16 @@ async def claude_usage_command(interaction: discord.Interaction):
         reset_time_str = local_reset.strftime("%-I:%M %p")
 
         if q.status == "rejected":
-            status_str = "\U0001f6ab Rate limited"
+            if q.utilization is not None:
+                pct = int(q.utilization * 100)
+                status_str = f"\U0001f6ab Rate limited ({pct}% used)"
+            else:
+                status_str = "\U0001f6ab Rate limited"
         elif q.status == "allowed_warning" and q.utilization is not None:
             pct = int(q.utilization * 100)
             status_str = f"\u26a0\ufe0f {pct}% used"
         else:
-            status_str = "\u2705 OK"
+            status_str = "\u2705 OK (< 80%)"
 
         age_s = int((now - q.updated_at).total_seconds())
         age_str = _format_time_remaining(age_s) if age_s > 0 else "just now"
