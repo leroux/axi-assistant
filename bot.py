@@ -74,6 +74,8 @@ SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
 ENABLE_CRASH_HANDLER = os.environ.get("ENABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
+README_CHANNEL_ID = int(os.environ["README_CHANNEL_ID"]) if os.environ.get("README_CHANNEL_ID") else None
+README_CONTENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "readme_content.md")
 
 # --- Discord bot setup ---
 
@@ -3345,6 +3347,72 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     log.info("Auto-registered agent '%s' from manual channel creation (cwd=%s)", agent_name, cwd)
 
 
+# --- Readme channel sync ---
+
+async def sync_readme_channel() -> None:
+    """Sync the readme channel: load content from file, lock permissions, update message."""
+    if README_CHANNEL_ID is None:
+        log.info("README_CHANNEL_ID not set — skipping readme sync")
+        return
+
+    # Load content from file
+    try:
+        readme_text = open(README_CONTENT_PATH).read().strip()
+    except FileNotFoundError:
+        log.warning("readme_content.md not found at %s — skipping readme sync", README_CONTENT_PATH)
+        return
+
+    if not readme_text:
+        log.warning("readme_content.md is empty — skipping readme sync")
+        return
+
+    channel = bot.get_channel(README_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(README_CHANNEL_ID)
+        except discord.NotFound:
+            log.warning("Readme channel %s not found — skipping", README_CHANNEL_ID)
+            return
+
+    guild = channel.guild
+
+    # Lock permissions: deny Send Messages for @everyone, allow for bot
+    try:
+        overwrites = channel.overwrites.copy()
+        overwrites[guild.default_role] = discord.PermissionOverwrite(
+            send_messages=False,
+            view_channel=True,
+            read_message_history=True,
+        )
+        overwrites[guild.me] = discord.PermissionOverwrite(
+            send_messages=True,
+            manage_messages=True,
+            view_channel=True,
+            read_message_history=True,
+        )
+        await channel.edit(overwrites=overwrites)
+        log.info("Readme channel permissions synced")
+    except Exception:
+        log.exception("Failed to set readme channel permissions")
+
+    # Find existing bot message (should be the only one from us)
+    existing_msg = None
+    async for msg in channel.history(limit=50):
+        if msg.author == bot.user:
+            existing_msg = msg
+            break
+
+    # Sync content
+    if existing_msg is None:
+        await channel.send(readme_text)
+        log.info("Sent readme message to #%s", channel.name)
+    elif existing_msg.content != readme_text:
+        await existing_msg.edit(content=readme_text)
+        log.info("Updated readme message in #%s", channel.name)
+    else:
+        log.info("Readme message in #%s already up to date", channel.name)
+
+
 # --- Startup ---
 
 _on_ready_fired = False
@@ -3397,6 +3465,12 @@ async def on_ready():
 
     except Exception:
         log.exception("Failed to set up guild infrastructure — guild channels won't work")
+
+    # Sync readme channel
+    try:
+        await sync_readme_channel()
+    except Exception:
+        log.exception("Failed to sync readme channel")
 
     # Reconstruct sleeping agents from existing channels
     try:
