@@ -98,6 +98,7 @@ SKIPS_PATH = os.path.join(BOT_DIR, "schedule_skips.json")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
+MASTER_SESSION_PATH = os.path.join(BOT_DIR, ".master_session_id")
 schedule_last_fired: dict[str, datetime] = {}
 _bot_start_time: datetime | None = None
 
@@ -565,9 +566,15 @@ async def _set_session_id(session: AgentSession, msg: ResultMessage) -> None:
     sid = getattr(msg, "session_id", None)
     if sid and sid != session.session_id:
         session.session_id = sid
-        # Only persist session_id to channel topic for non-master agents
-        # (master gets a new session every restart so the topic would always churn)
-        if session.name != MASTER_AGENT_NAME and session.discord_channel_id:
+        if session.name == MASTER_AGENT_NAME:
+            # Persist master session_id to file so it survives restarts
+            try:
+                with open(MASTER_SESSION_PATH, "w") as f:
+                    f.write(sid)
+                log.info("Saved master session_id to %s", MASTER_SESSION_PATH)
+            except OSError:
+                log.warning("Failed to save master session_id", exc_info=True)
+        elif session.discord_channel_id:
             ch = bot.get_channel(session.discord_channel_id)
             if ch:
                 desired_topic = _format_channel_topic(session.cwd, sid)
@@ -665,7 +672,8 @@ async def _post_system_prompt_to_channel(
         _io.BytesIO(prompt_text.encode("utf-8")),
         filename="system-prompt.md",
     )
-    await channel.send(f"*System:* 📋 {label} ({line_count} lines)", file=file)
+    sid_suffix = f" — session `{session_id[:8]}…`" if session_id else ""
+    await channel.send(f"*System:* 📋 {label} ({line_count} lines){sid_suffix}", file=file)
 
 
 # --- MCP tools for master agent ---
@@ -1420,6 +1428,9 @@ async def wake_agent(session: AgentSession) -> None:
                         client = await _wake_agent_via_bridge(session, options)
                         session.client = client
                         session.session_id = None
+                        if session.name == MASTER_AGENT_NAME:
+                            try: os.remove(MASTER_SESSION_PATH)
+                            except OSError: pass
                         log.warning("Agent '%s' woke fresh via bridge (previous context lost)", session.name)
                         if session._log:
                             session._log.info("SESSION_WAKE via bridge (resumed=False, fresh after resume failure)")
@@ -1446,6 +1457,9 @@ async def wake_agent(session: AgentSession) -> None:
                 await client.__aenter__()
                 session.client = client
                 session.session_id = None
+                if session.name == MASTER_AGENT_NAME:
+                    try: os.remove(MASTER_SESSION_PATH)
+                    except OSError: pass
                 log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
                 if session._log:
                     session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
@@ -1460,7 +1474,7 @@ async def wake_agent(session: AgentSession) -> None:
                         channel,
                         session.system_prompt,
                         is_resume=bool(resume_id),
-                        session_id=resume_id,
+                        session_id=session.session_id or resume_id,
                     )
                 except Exception:
                     log.warning("Failed to post system prompt to Discord for '%s'", session.name, exc_info=True)
@@ -4429,6 +4443,16 @@ async def on_ready():
     global _bot_start_time
     _bot_start_time = datetime.now(timezone.utc)
 
+    # Load master session_id from previous run (if any) for resume
+    master_resume_id = None
+    try:
+        if os.path.isfile(MASTER_SESSION_PATH):
+            master_resume_id = open(MASTER_SESSION_PATH).read().strip() or None
+            if master_resume_id:
+                log.info("Loaded master session_id from %s: %s", MASTER_SESSION_PATH, master_resume_id[:8])
+    except OSError:
+        log.warning("Failed to read master session_id", exc_info=True)
+
     # Register master agent as sleeping — it will wake on first message
     master_mcp = {"axi": _axi_mcp_server}
     if os.path.isdir(BOT_WORKTREES_DIR):
@@ -4439,9 +4463,10 @@ async def on_ready():
         system_prompt=MASTER_SYSTEM_PROMPT,
         client=None,
         mcp_servers=master_mcp,
+        session_id=master_resume_id,
     )
     agents[MASTER_AGENT_NAME] = master_session
-    log.info("Master agent registered (sleeping, will wake on first message)")
+    log.info("Master agent registered (sleeping, session_id=%s)", master_resume_id and master_resume_id[:8])
 
     # Set up guild infrastructure (categories + master channel)
     try:
