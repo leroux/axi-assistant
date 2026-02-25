@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Process supervisor for bot.py — replaces run.sh."""
+"""Process supervisor for bot.py — replaces run.sh.
+
+Signal semantics:
+  SIGTERM/SIGINT  — full stop: kill bot.py AND bridge, then exit.
+                    This is what systemctl stop/restart sends.
+  SIGHUP          — hot restart: kill only bot.py, leave bridge running.
+                    Supervisor relaunches bot.py which reconnects to the bridge.
+"""
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -15,9 +23,65 @@ CRASH_THRESHOLD = 60
 ROLLBACK_MARKER = ".rollback_performed"
 CRASH_ANALYSIS_MARKER = ".crash_analysis"
 LOG_FILE = ".bot_output.log"
+BRIDGE_SOCKET = ".bridge.sock"
 MAX_RUNTIME_CRASHES = 3
 
 DIR = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------------------
+# Signal handling
+#   SIGTERM/SIGINT → full stop (kill bridge too)
+#   SIGHUP         → hot restart (bridge stays)
+# ---------------------------------------------------------------------------
+
+_bot_proc: subprocess.Popen | None = None
+_stopping = False      # full stop requested (SIGTERM/SIGINT)
+_hot_restart = False   # hot restart requested (SIGHUP)
+
+
+def _stop_handler(signum, _frame):
+    """SIGTERM/SIGINT: forward to bot.py, flag for full stop."""
+    global _stopping
+    _stopping = True
+    if _bot_proc and _bot_proc.poll() is None:
+        _bot_proc.send_signal(signum)
+
+
+def _hup_handler(signum, _frame):
+    """SIGHUP: forward SIGTERM to bot.py to trigger hot restart."""
+    global _hot_restart
+    _hot_restart = True
+    if _bot_proc and _bot_proc.poll() is None:
+        _bot_proc.send_signal(signal.SIGTERM)
+
+
+def _kill_bridge():
+    """Find and kill the bridge process via its socket path in the cgroup."""
+    sock_path = DIR / BRIDGE_SOCKET
+    # Find bridge PID by looking for the process with our socket path in cmdline
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"bridge.*{sock_path}"],
+            capture_output=True, text=True,
+        )
+        pids = result.stdout.strip().split()
+        for pid_str in pids:
+            pid = int(pid_str)
+            if pid == os.getpid():
+                continue
+            print(f"Killing bridge process (pid={pid})")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    except Exception as e:
+        print(f"Warning: failed to find/kill bridge: {e}")
+    # Clean up stale socket
+    if sock_path.exists():
+        try:
+            sock_path.unlink()
+        except OSError:
+            pass
 
 
 def ensure_default_files():
@@ -58,6 +122,7 @@ def is_git_repo() -> bool:
 
 def run_bot() -> int:
     """Launch bot.py, tee output to LOG_FILE, return exit code."""
+    global _bot_proc
     log_path = DIR / LOG_FILE
     proc = subprocess.Popen(
         ["uv", "run", "python", "bot.py"],
@@ -65,6 +130,7 @@ def run_bot() -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+    _bot_proc = proc
 
     def stream(pipe, log_file):
         for line in iter(pipe.readline, b""):
@@ -79,6 +145,7 @@ def run_bot() -> int:
         proc.wait()
         t.join(timeout=5)
 
+    _bot_proc = None
     return proc.returncode
 
 
@@ -127,6 +194,11 @@ def main():
     os.chdir(DIR)
     ensure_default_files()
 
+    signal.signal(signal.SIGTERM, _stop_handler)
+    signal.signal(signal.SIGINT, _stop_handler)
+    signal.signal(signal.SIGHUP, _hup_handler)
+
+    global _hot_restart
     rollback_attempted = False
     runtime_crash_count = 0
 
@@ -135,6 +207,20 @@ def main():
         pre_launch_commit = get_head()
 
         code = run_bot()
+
+        # SIGTERM/SIGINT — full stop: kill bridge and exit
+        if _stopping:
+            print(f"Received stop signal, bot exited with code {code}. Killing bridge and stopping.")
+            _kill_bridge()
+            sys.exit(0)
+
+        # SIGHUP — hot restart: just relaunch bot.py, bridge stays
+        if _hot_restart:
+            print(f"Received SIGHUP, bot exited with code {code}. Hot-restarting (bridge stays alive)...")
+            _hot_restart = False
+            rollback_attempted = False
+            runtime_crash_count = 0
+            continue
 
         if code == RESTART_EXIT_CODE:
             print("Restart requested, relaunching...")

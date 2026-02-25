@@ -166,6 +166,7 @@ class AgentSession:
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     mcp_servers: dict | None = None
     _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
+    _bridge_busy: bool = False   # True when reconnected to a mid-task CLI (bridge idle=False)
     activity: ActivityState = field(default_factory=ActivityState)
     _log: logging.Logger | None = None
 
@@ -1074,6 +1075,8 @@ async def _evict_idle_agent(exclude: str | None = None) -> bool:
             continue  # already sleeping
         if s.query_lock.locked():
             continue  # busy
+        if s._bridge_busy:
+            continue  # reconnected to running CLI
         idle_duration = (datetime.now(timezone.utc) - s.last_activity).total_seconds()
         candidates.append((idle_duration, name, s))
 
@@ -1125,6 +1128,7 @@ async def sleep_agent(session: AgentSession) -> None:
     log.info("Sleeping agent '%s'", session.name)
     if session._log:
         session._log.info("SESSION_SLEEP")
+    session._bridge_busy = False
     await _disconnect_client(session.client, session.name)
     session.client = None
     log.info("Agent '%s' is now sleeping", session.name)
@@ -1135,7 +1139,8 @@ def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> 
     return ClaudeAgentOptions(
         model="opus",
         effort="high",
-        thinking={"type": "enabled", "budget_tokens": 128000},
+        # thinking={"type": "enabled", "budget_tokens": 128000},
+        thinking={"type": "adaptive"},
         betas=["context-1m-2025-08-07"],
         setting_sources=["user", "project", "local"],
         permission_mode="default",
@@ -1166,8 +1171,8 @@ async def _wake_agent_via_bridge(session: AgentSession, options: ClaudeAgentOpti
     cli_args, env, cwd = build_cli_spawn_args(options)
     spawn_result = await transport.spawn(cli_args, env, cwd)
 
-    if spawn_result.get("already_running"):
-        log.info("CLI for '%s' already running in bridge (pid=%s)", session.name, spawn_result.get("pid"))
+    if spawn_result.already_running:
+        log.info("CLI for '%s' already running in bridge (pid=%s)", session.name, spawn_result.pid)
 
     # Subscribe to start receiving output
     await transport.subscribe()
@@ -1499,8 +1504,11 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
 
 async def send_long(channel, text: str) -> None:
     """Send a potentially long message, splitting as needed."""
-    for chunk in split_message(text.strip()):
+    chunks = split_message(text.strip())
+    log.debug("send_long: channel=%s chunks=%d text=%r", getattr(channel, 'name', '?'), len(chunks), text.strip()[:80])
+    for i, chunk in enumerate(chunks):
         if chunk:
+            log.debug("send_long: sending chunk %d/%d len=%d", i+1, len(chunks), len(chunk))
             try:
                 await channel.send(chunk)
             except discord.NotFound:
@@ -1798,9 +1806,15 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
     hit_rate_limit = False
     typing_stopped = False
 
-    async def flush_text(text: str) -> None:
+    _flush_count = 0
+
+    async def flush_text(text: str, reason: str = "?") -> None:
+        nonlocal _flush_count
         if not text.strip():
             return
+        _flush_count += 1
+        log.info("FLUSH[%s] #%d reason=%s len=%d text=%r",
+                 session.name, _flush_count, reason, len(text.strip()), text.strip()[:120])
         await send_long(channel, text.lstrip())
 
     def stop_typing() -> None:
@@ -1809,8 +1823,14 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
             _typing_ctx.task.cancel()
             typing_stopped = True
 
+    _msg_seq = 0
+
     async with channel.typing() as _typing_ctx:
         async for msg in _receive_response_safe(session):
+            _msg_seq += 1
+            if session._log:
+                session._log.debug("MSG_SEQ[%d] type=%s buf_len=%d", _msg_seq, type(msg).__name__, len(text_buffer))
+
             # Drain and send any stderr messages first
             for stderr_msg in drain_stderr(session):
                 stderr_text = stderr_msg.strip()
@@ -1863,7 +1883,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 elif event_type == "message_delta":
                     stop_reason = event.get("delta", {}).get("stop_reason")
                     if stop_reason == "end_turn":
-                        await flush_text(text_buffer)
+                        await flush_text(text_buffer, "end_turn")
                         text_buffer = ""
                         stop_typing()
 
@@ -1885,13 +1905,13 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                             error_text += " " + block.text
                     log.warning("Agent '%s' hit API error (%s): %s", session.name, msg.error, error_text[:200])
                     stop_typing()
-                    await flush_text(text_buffer)
+                    await flush_text(text_buffer, "assistant_error")
                     text_buffer = ""
                 else:
                     # Normal response — flush any remaining text and stop typing.
                     # Usually end_turn already stopped typing, but this is a safety net
                     # for responses that end with tool_use (no end_turn event).
-                    await flush_text(text_buffer)
+                    await flush_text(text_buffer, "assistant_msg")
                     text_buffer = ""
                     stop_typing()
 
@@ -1908,7 +1928,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 stop_typing()
                 await _set_session_id(session, msg)
                 if not hit_rate_limit:
-                    await flush_text(text_buffer)
+                    await flush_text(text_buffer, "result_msg")
                 text_buffer = ""
                 if session._log:
                     session._log.info("RESULT: cost=$%s turns=%d duration=%dms session=%s",
@@ -1926,7 +1946,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                     split_at = 1800
                 to_send = text_buffer[:split_at]
                 text_buffer = text_buffer[split_at:].lstrip("\n")
-                await flush_text(to_send)
+                await flush_text(to_send, "mid_turn_split")
 
     # Flush any remaining stderr
     for stderr_msg in drain_stderr(session):
@@ -1938,7 +1958,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
     if hit_rate_limit:
         return
 
-    await flush_text(text_buffer)
+    await flush_text(text_buffer, "post_loop")
 
     log.debug("Stream complete for '%s'", session.name)
 
@@ -2215,7 +2235,7 @@ async def _connect_bridge() -> None:
     # List running agents in the bridge
     try:
         result = await bridge_conn.send_command("list")
-        bridge_agents = result.get("agents", {})
+        bridge_agents = result.agents or {}
         log.info("Bridge reports %d agent(s): %s", len(bridge_agents), list(bridge_agents.keys()))
     except Exception:
         log.exception("Failed to list bridge agents")
@@ -2253,11 +2273,13 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
     This runs as a background task. It:
     1. Acquires the query_lock (blocks new queries)
     2. Creates BridgeTransport in reconnecting mode (fakes initialize)
-    3. Subscribes to the bridge (triggers buffer replay)
+    3. Subscribes to the bridge (triggers buffer replay + idle status)
     4. Creates a ClaudeSDKClient on top of the transport
-    5. If there's buffered output, streams it to the Discord channel
-    6. Clears the _reconnecting flag
-    7. Processes any queued messages
+    5. If the CLI is running and NOT idle (mid-task), drains buffered output
+       and sets _bridge_busy to prevent auto-sleep
+    6. If the CLI is running and idle, just leaves it awake — no drain needed
+    7. Clears the _reconnecting flag
+    8. Processes any queued messages
     """
     try:
         async with session.query_lock:
@@ -2274,13 +2296,14 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
             )
             await transport.connect()
 
-            # Subscribe to get buffered output
+            # Subscribe to get buffered output + idle status
             sub_result = await transport.subscribe()
-            replayed = sub_result.get("replayed", 0)
-            cli_status = sub_result.get("status", "unknown")
+            replayed = sub_result.replayed or 0
+            cli_status = sub_result.status or "unknown"
+            cli_idle = sub_result.idle if sub_result.idle is not None else True
             log.info(
-                "Subscribed to '%s' (replayed=%d, cli_status=%s)",
-                session.name, replayed, cli_status,
+                "Subscribed to '%s' (replayed=%d, status=%s, idle=%s)",
+                session.name, replayed, cli_status, cli_idle,
             )
 
             # Build minimal options for reconnecting (no model/thinking needed — CLI already running)
@@ -2297,9 +2320,12 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
             client = ClaudeSDKClient(options=options, transport=transport)
             await client.__aenter__()
             session.client = client
+            session.last_activity = datetime.now(timezone.utc)
 
             if session._log:
-                session._log.info("SESSION_RECONNECT via bridge (replayed=%d)", replayed)
+                session._log.info(
+                    "SESSION_RECONNECT via bridge (replayed=%d, idle=%s)", replayed, cli_idle,
+                )
 
             # If the CLI already exited while we were down, note it
             if cli_status == "exited":
@@ -2311,14 +2337,14 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
             # Clear reconnecting flag — agent is now live
             session._reconnecting = False
 
-            # If the CLI is still running and had buffered output, drain it
-            # The agent may be mid-response: stream_response_to_channel will
-            # consume output until ResultMessage. Use a generous timeout
-            # in case the buffer has incomplete data (no ResultMessage yet).
-            if replayed > 0 and cli_status == "running":
+            if cli_status == "running" and not cli_idle:
+                # Agent is mid-task (bridge saw stdin more recently than stdout).
+                # Prevent auto-sleep from killing the running CLI process.
+                session._bridge_busy = True
                 channel = await get_agent_channel(session.name)
-                if channel:
-                    await send_system(channel, "*(reconnected after restart)*")
+                if replayed > 0 and channel:
+                    # There's buffered output to drain — stream it to Discord
+                    await send_system(channel, "*(reconnected after restart — resuming output)*")
                     try:
                         async with asyncio.timeout(QUERY_TIMEOUT):
                             await stream_response_to_channel(session, channel)
@@ -2326,6 +2352,20 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
                         log.warning("Drain timeout for '%s' — continuing", session.name)
                     except Exception:
                         log.exception("Error draining buffered output for '%s'", session.name)
+                    session._bridge_busy = False
+                    session.last_activity = datetime.now(timezone.utc)
+                elif channel:
+                    await send_system(channel, "*(reconnected after restart — task still running)*")
+                log.info(
+                    "Agent '%s' reconnected mid-task (idle=False, replayed=%d, bridge_busy=%s)",
+                    session.name, replayed, session._bridge_busy,
+                )
+            elif cli_status == "running":
+                # Agent is idle (between turns) — no drain needed, no special protection
+                channel = await get_agent_channel(session.name)
+                if channel:
+                    await send_system(channel, "*(reconnected after restart)*")
+                log.info("Agent '%s' reconnected idle (between turns)", session.name)
 
             log.info("Reconnect complete for '%s'", session.name)
 
@@ -2484,6 +2524,7 @@ async def on_message(message):
         session.last_activity = datetime.now(timezone.utc)
         session.last_idle_notified = None
         session.idle_reminder_count = 0
+        session._bridge_busy = False
         drain_stderr(session)
         drain_sdk_buffer(session)
         if session._log:
@@ -2685,6 +2726,8 @@ async def check_schedules():
             continue  # Already sleeping
         if session.query_lock.locked():
             continue  # Busy
+        if session._bridge_busy:
+            continue  # Reconnected to running CLI — task still in progress
         idle_duration = now_utc - session.last_activity
         if idle_duration > idle_threshold:
             log.info("Auto-sleeping idle agent '%s' (idle %.0fs, pressure=%s)",
@@ -2800,6 +2843,8 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
         lines.append("State: sleeping")
         idle = int((now - session.last_activity).total_seconds())
         lines.append(f"Last active: {_format_time_remaining(idle)} ago")
+    elif session._bridge_busy:
+        lines.append("State: **busy** (running in bridge)")
     elif not session.query_lock.locked():
         lines.append("State: awake, idle")
         idle = int((now - session.last_activity).total_seconds())
@@ -2876,6 +2921,8 @@ async def _show_all_agents_status(interaction):
         if session.client is None:
             idle = int((now - session.last_activity).total_seconds())
             status = f"sleeping ({_format_time_remaining(idle)})"
+        elif session._bridge_busy:
+            status = "busy (running in bridge)"
         elif not session.query_lock.locked():
             idle = int((now - session.last_activity).total_seconds())
             status = f"idle ({_format_time_remaining(idle)})"
@@ -3416,7 +3463,25 @@ def _handle_task_exception(loop, context):
         log.error("Unhandled async error: %s", context.get("message", ""))
 
 
+def _acquire_lock():
+    """Acquire an exclusive file lock to prevent duplicate bot instances."""
+    import fcntl
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
+    # Open (or create) the lock file — keep the fd open for the process lifetime
+    lock_fd = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("ERROR: Another bot.py instance is already running (could not acquire .bot.lock). Exiting.")
+        raise SystemExit(1)
+    # Write our PID for debugging
+    lock_fd.write(str(os.getpid()))
+    lock_fd.flush()
+    return lock_fd  # caller must keep a reference so the fd stays open
+
+
 if __name__ == "__main__":
+    _lock_fd = _acquire_lock()
     try:
         # log_handler=None prevents discord.py from overriding our logging config
         bot.run(DISCORD_TOKEN, log_handler=None)
