@@ -215,6 +215,28 @@ shutdown_coordinator: ShutdownCoordinator | None = None
 _rate_limited_until: datetime | None = None
 _rate_limit_retry_task: asyncio.Task | None = None
 
+@dataclass
+class SessionUsage:
+    agent_name: str
+    queries: int = 0
+    total_cost_usd: float = 0.0
+    total_turns: int = 0
+    total_duration_ms: int = 0
+    first_query: datetime | None = None
+    last_query: datetime | None = None
+
+_session_usage: dict[str, SessionUsage] = {}  # keyed by session_id
+
+@dataclass
+class RateLimitQuota:
+    status: str              # "allowed", "allowed_warning", "rejected"
+    resets_at: datetime      # from resetsAt unix timestamp
+    rate_limit_type: str     # "five_hour"
+    utilization: float | None = None  # 0.0-1.0, only present on warnings
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+_rate_limit_quota: RateLimitQuota | None = None
+
 # Guild infrastructure (populated in on_ready)
 target_guild: discord.Guild | None = None
 active_category: CategoryChannel | None = None
@@ -1621,6 +1643,35 @@ def _rate_limit_remaining_seconds() -> int:
     return max(0, int(remaining))
 
 
+def _record_session_usage(agent_name: str, msg: ResultMessage) -> None:
+    sid = msg.session_id
+    if not sid:
+        return
+    now = datetime.now(timezone.utc)
+    if sid not in _session_usage:
+        _session_usage[sid] = SessionUsage(agent_name=agent_name, first_query=now)
+    entry = _session_usage[sid]
+    entry.queries += 1
+    entry.total_cost_usd += msg.total_cost_usd or 0.0
+    entry.total_turns += msg.num_turns or 0
+    entry.total_duration_ms += msg.duration_ms or 0
+    entry.last_query = now
+
+
+def _update_rate_limit_quota(data: dict) -> None:
+    global _rate_limit_quota
+    info = data.get("rate_limit_info", {})
+    resets_at_unix = info.get("resetsAt")
+    if resets_at_unix is None:
+        return
+    _rate_limit_quota = RateLimitQuota(
+        status=info.get("status", "unknown"),
+        resets_at=datetime.fromtimestamp(resets_at_unix, tz=timezone.utc),
+        rate_limit_type=info.get("rateLimitType", "unknown"),
+        utilization=info.get("utilization"),
+    )
+
+
 async def _handle_rate_limit(error_text: str, session: AgentSession, channel) -> None:
     """Handle a rate limit error: set global state, notify user, schedule retry."""
     global _rate_limited_until, _rate_limit_retry_task
@@ -1709,6 +1760,7 @@ async def _receive_response_safe(session: AgentSession):
                 log.info("Rate limit event for '%s': %s", session.name, data)
                 if session._log:
                     session._log.info("RATE_LIMIT_EVENT: %s", json.dumps(data)[:500])
+                _update_rate_limit_quota(data)
             else:
                 log.warning("Unknown SDK message type from '%s': type=%s data=%s",
                             session.name, msg_type, json.dumps(data)[:500])
@@ -1952,6 +2004,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 if session._log:
                     session._log.info("RESULT: cost=$%s turns=%d duration=%dms session=%s",
                                       msg.total_cost_usd, msg.num_turns, msg.duration_ms, msg.session_id)
+                _record_session_usage(session.name, msg)
 
             elif isinstance(msg, SystemMessage):
                 if session._log:
@@ -2879,6 +2932,78 @@ async def ping_command(interaction: discord.Interaction):
     elif bridge_conn is None or not bridge_conn.is_alive:
         parts.append("Bridge: not connected")
     await interaction.response.send_message(" | ".join(parts))
+
+
+@bot.tree.command(name="claude-usage", description="Show Claude API usage for current sessions and rate limit status.")
+async def claude_usage_command(interaction: discord.Interaction):
+    log.info("Slash command /claude-usage from %s", interaction.user)
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    lines = ["**Claude Usage — Current Sessions**", ""]
+
+    total_cost = 0.0
+    total_queries = 0
+
+    if _session_usage:
+        # Group by agent name, show each session
+        for sid, usage in sorted(_session_usage.items(), key=lambda x: x[1].last_query or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+            total_cost += usage.total_cost_usd
+            total_queries += usage.queries
+
+            duration_s = usage.total_duration_ms // 1000
+            duration_str = _format_time_remaining(duration_s) if duration_s > 0 else "0s"
+
+            active_str = ""
+            if usage.first_query:
+                age_s = int((datetime.now(timezone.utc) - usage.first_query).total_seconds())
+                active_str = f" | Active since {_format_time_remaining(age_s)} ago"
+
+            lines.append(f"**{usage.agent_name}** (`{sid[:8]}`)")
+            lines.append(f"  Cost: **${usage.total_cost_usd:.2f}** | Queries: {usage.queries} | Turns: {usage.total_turns}")
+            lines.append(f"  API time: {duration_str}{active_str}")
+            lines.append("")
+
+        lines.append(f"**Total: ${total_cost:.2f}** across {total_queries} queries")
+    else:
+        lines.append("No usage recorded yet.")
+
+    lines.append("")
+
+    # Rate limit section
+    if _rate_limit_quota:
+        q = _rate_limit_quota
+        now = datetime.now(timezone.utc)
+        remaining_s = max(0, int((q.resets_at - now).total_seconds()))
+        resets_str = _format_time_remaining(remaining_s) if remaining_s > 0 else "now"
+
+        # Format reset time in schedule timezone
+        local_reset = q.resets_at.astimezone(SCHEDULE_TIMEZONE)
+        reset_time_str = local_reset.strftime("%-I:%M %p")
+
+        if q.status == "rejected":
+            status_str = "\U0001f6ab Rate limited"
+        elif q.status == "allowed_warning" and q.utilization is not None:
+            pct = int(q.utilization * 100)
+            status_str = f"\u26a0\ufe0f {pct}% used"
+        else:
+            status_str = "\u2705 OK"
+
+        age_s = int((now - q.updated_at).total_seconds())
+        age_str = _format_time_remaining(age_s) if age_s > 0 else "just now"
+
+        lines.append(f"**Rate Limit** ({q.rate_limit_type.replace('_', ' ')})")
+        lines.append(f"  Status: {status_str}")
+        lines.append(f"  Resets at: {reset_time_str} (in {resets_str})")
+        lines.append(f"  Last checked: {age_str} ago")
+    elif _rate_limited_until:
+        remaining = _format_time_remaining(_rate_limit_remaining_seconds())
+        lines.append(f"**Rate Limit**: \U0001f6ab Rate limited (~{remaining} remaining)")
+    else:
+        lines.append("**Rate Limit**: No data yet (updates on next API call)")
+
+    await interaction.response.send_message("\n".join(lines))
 
 
 @bot.tree.command(name="list-agents", description="List all active agent sessions.")
