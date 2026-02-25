@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from dataclasses import dataclass, field
 
 from .protocol import (
@@ -53,6 +54,7 @@ class BridgeServer:
         self._client_lock = asyncio.Lock()   # protects _client_writer
         self._server: asyncio.Server | None = None
         self._shutdown_event = asyncio.Event()
+        self._start_time = time.monotonic()
 
     async def start(self):
         """Start listening on the Unix socket."""
@@ -150,6 +152,8 @@ class BridgeServer:
             await self._cmd_subscribe(name)
         elif cmd == "list":
             await self._cmd_list()
+        elif cmd == "status":
+            await self._cmd_status()
         else:
             await self._send_result(ResultMsg(ok=False, error=f"unknown command: {cmd}"))
 
@@ -239,6 +243,10 @@ class BridgeServer:
                 "idle": cp.idle,
             }
         await self._send_result(ResultMsg(ok=True, agents=agents))
+
+    async def _cmd_status(self):
+        uptime = time.monotonic() - self._start_time
+        await self._send_result(ResultMsg(ok=True, uptime_seconds=int(uptime)))
 
     # -- stdin forwarding --
 

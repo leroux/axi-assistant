@@ -96,7 +96,7 @@ ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
 schedule_last_fired: dict[str, datetime] = {}
-_bot_start_time = datetime.now(timezone.utc)
+_bot_start_time: datetime | None = None
 
 # --- Agent session management ---
 
@@ -2821,12 +2821,36 @@ async def ping_command(interaction: discord.Interaction):
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
-    uptime = datetime.now(timezone.utc) - _bot_start_time
-    hours, remainder = divmod(int(uptime.total_seconds()), 3600)
-    minutes, seconds = divmod(remainder, 60)
-    await interaction.response.send_message(
-        f"Pong! Latency: {round(bot.latency * 1000)}ms | Uptime: {hours}h {minutes}m {seconds}s"
-    )
+
+    def _fmt_uptime(total_seconds: int) -> str:
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours}h {minutes}m {seconds}s"
+
+    # Bot uptime
+    if _bot_start_time is not None:
+        bot_uptime = datetime.now(timezone.utc) - _bot_start_time
+        bot_str = _fmt_uptime(int(bot_uptime.total_seconds()))
+    else:
+        bot_str = "initializing"
+
+    # Bridge uptime (if connected)
+    bridge_str = None
+    if bridge_conn is not None and bridge_conn.is_alive:
+        try:
+            result = await bridge_conn.send_command("status")
+            if result.ok and result.uptime_seconds is not None:
+                bridge_str = _fmt_uptime(result.uptime_seconds)
+        except Exception:
+            bridge_str = "error"
+
+    latency = round(bot.latency * 1000)
+    parts = [f"Pong! Latency: {latency}ms", f"Bot uptime: {bot_str}"]
+    if bridge_str is not None:
+        parts.append(f"Bridge uptime: {bridge_str}")
+    elif bridge_conn is None or not bridge_conn.is_alive:
+        parts.append("Bridge: not connected")
+    await interaction.response.send_message(" | ".join(parts))
 
 
 @bot.tree.command(name="list-agents", description="List all active agent sessions.")
@@ -3359,6 +3383,9 @@ async def on_ready():
         log.info("on_ready fired again (gateway reconnect) — skipping startup logic")
         return
     _on_ready_fired = True
+
+    global _bot_start_time
+    _bot_start_time = datetime.now(timezone.utc)
 
     # Register master agent as sleeping — it will wake on first message
     master_mcp = {"axi": _axi_mcp_server}

@@ -44,6 +44,8 @@ class ResultMsg(BaseModel):
     idle: bool | None = None
     # list
     agents: dict[str, Any] | None = None
+    # status
+    uptime_seconds: int | None = None
 
 class StdoutMsg(BaseModel):
     type: Literal["stdout"] = "stdout"
