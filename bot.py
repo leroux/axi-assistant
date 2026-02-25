@@ -107,6 +107,8 @@ MAX_AWAKE_AGENTS = 5  # max concurrent awake agents (each ~280MB); set based on 
 IDLE_REMINDER_THRESHOLDS = [timedelta(minutes=30), timedelta(hours=3), timedelta(hours=48)]
 QUERY_TIMEOUT = 43200  # 12 hours
 INTERRUPT_TIMEOUT = 15  # seconds to wait after interrupt
+API_ERROR_MAX_RETRIES = 3
+API_ERROR_BASE_DELAY = 5  # seconds, doubles each retry
 
 ACTIVE_CATEGORY_NAME = "Active"
 KILLED_CATEGORY_NAME = "Killed"
@@ -1850,7 +1852,7 @@ def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
     return None
 
 
-async def stream_response_to_channel(session: AgentSession, channel) -> None:
+async def stream_response_to_channel(session: AgentSession, channel) -> str | None:
     """Stream Claude's response from a specific agent session to a Discord channel.
 
     Message flow:
@@ -1873,6 +1875,7 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
 
     text_buffer = ""
     hit_rate_limit = False
+    hit_transient_error: str | None = None
     typing_stopped = False
 
     _flush_count = 0
@@ -1976,6 +1979,7 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
                     stop_typing()
                     await flush_text(text_buffer, "assistant_error")
                     text_buffer = ""
+                    hit_transient_error = msg.error
                 else:
                     # Normal response — flush any remaining text and stop typing.
                     # Usually end_turn already stopped typing, but this is a safety net
@@ -2039,7 +2043,10 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
                 await channel.send(part)
 
     if hit_rate_limit:
-        return
+        return None
+
+    if hit_transient_error:
+        return hit_transient_error
 
     await flush_text(text_buffer, "post_loop")
 
@@ -2047,6 +2054,48 @@ async def stream_response_to_channel(session: AgentSession, channel) -> None:
 
     if SHOW_AWAITING_INPUT:
         await send_system(channel, "Bot has finished responding and is awaiting input.")
+
+    return None
+
+
+async def _stream_with_retry(session: AgentSession, channel) -> bool:
+    """Stream response with retry on transient API errors.
+
+    Returns True on success, False if all retries exhausted.
+    """
+    error = await stream_response_to_channel(session, channel)
+    if error is None:
+        return True
+
+    for attempt in range(2, API_ERROR_MAX_RETRIES + 1):
+        delay = API_ERROR_BASE_DELAY * (2 ** (attempt - 2))
+        log.warning(
+            "Agent '%s' transient error '%s', retrying in %ds (attempt %d/%d)",
+            session.name, error, delay, attempt, API_ERROR_MAX_RETRIES,
+        )
+        await channel.send(
+            f"\u26a0\ufe0f API error, retrying in {delay}s... (attempt {attempt}/{API_ERROR_MAX_RETRIES})"
+        )
+        await asyncio.sleep(delay)
+
+        try:
+            await session.client.query(_as_stream("Continue from where you left off."))
+        except Exception:
+            log.exception("Agent '%s' retry query failed", session.name)
+            continue
+
+        error = await stream_response_to_channel(session, channel)
+        if error is None:
+            return True
+
+    log.error(
+        "Agent '%s' transient error persisted after %d retries",
+        session.name, API_ERROR_MAX_RETRIES,
+    )
+    await channel.send(
+        f"\u274c API error persisted after {API_ERROR_MAX_RETRIES} retries. Try again later."
+    )
+    return False
 
 
 async def _handle_query_timeout(session: AgentSession, channel) -> None:
@@ -2219,7 +2268,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(prompt))
-                    await stream_response_to_channel(session, channel)
+                    await _stream_with_retry(session, channel)
                     session.last_activity = datetime.now(timezone.utc)
             except TimeoutError:
                 timed_out = True
@@ -2293,7 +2342,7 @@ async def _process_message_queue(session: AgentSession) -> None:
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(content))
-                    await stream_response_to_channel(session, channel)
+                    await _stream_with_retry(session, channel)
                 await _add_reaction(orig_message, "✅")
             except TimeoutError:
                 await _add_reaction(orig_message, "⏳")
@@ -2645,7 +2694,7 @@ async def on_message(message):
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
                 await session.client.query(_as_stream(content))
-                await stream_response_to_channel(session, message.channel)
+                await _stream_with_retry(session, message.channel)
         except TimeoutError:
             await _add_reaction(message, "⏳")
             await _handle_query_timeout(session, message.channel)
@@ -3369,7 +3418,7 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
             async with asyncio.timeout(QUERY_TIMEOUT):
                 await session.client.query(_as_stream(command))
                 channel = bot.get_channel(session.discord_channel_id) or interaction.channel
-                await stream_response_to_channel(session, channel)
+                await _stream_with_retry(session, channel)
             await interaction.followup.send(f"*System:* {label} for **{agent_name}**.")
         except TimeoutError:
             await interaction.followup.send(f"*System:* {label} timed out for **{agent_name}**.")
