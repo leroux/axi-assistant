@@ -39,6 +39,11 @@ from bridge import (
 from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
 from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
 
+import sys as _sys
+_sys.path.insert(0, os.path.expanduser("~/coding-projects/flowcoder"))
+from src.embedding import FlowCoderSession
+from src.services.storage_service import CommandNotFoundError as _FCCommandNotFound
+
 load_dotenv()
 
 # --- Logging setup ---
@@ -101,6 +106,21 @@ BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
 MASTER_SESSION_PATH = os.path.join(BOT_DIR, ".master_session_id")
 schedule_last_fired: dict[str, datetime] = {}
 _bot_start_time: datetime | None = None
+
+# Directories agents are allowed to use as cwd (configurable via .env)
+_allowed_cwds_env = os.environ.get("ALLOWED_CWDS", "")
+ALLOWED_CWDS: list[str] = [
+    os.path.realpath(os.path.expanduser(p))
+    for p in (_allowed_cwds_env.split(":") if _allowed_cwds_env else [])
+] + [os.path.realpath(AXI_USER_DATA), os.path.realpath(BOT_DIR), os.path.realpath(BOT_WORKTREES_DIR)]
+
+# Extra directories that admin agents (rooted in BOT_DIR) can spawn into and write to
+_admin_cwds_env = os.environ.get("ADMIN_ALLOWED_CWDS", "")
+ADMIN_ALLOWED_CWDS: list[str] = [
+    os.path.realpath(os.path.expanduser(p))
+    for p in (_admin_cwds_env.split(":") if _admin_cwds_env else [])
+]
+ALLOWED_CWDS += ADMIN_ALLOWED_CWDS
 
 # --- Agent session management ---
 
@@ -180,6 +200,8 @@ class AgentSession:
     flowcoder_command: str = ""
     flowcoder_args: str = ""
     _log: logging.Logger | None = None
+    flowcoder: "FlowCoderSession | None" = None
+    _fc_channel: Any = None  # Discord channel set during FlowCoder command execution
 
     def __post_init__(self):
         """Set up per-agent logger writing to <assistant_dir>/logs/<name>.log."""
@@ -429,12 +451,13 @@ def make_cwd_permission_callback(allowed_cwd: str):
     worktrees = os.path.realpath(BOT_WORKTREES_DIR)
     bot_dir = os.path.realpath(BOT_DIR)
 
-    # Agents rooted in bot code or worktree dirs also get worktree write access
+    # Agents rooted in bot code or worktree dirs also get worktree + admin write access
     is_code_agent = (allowed == bot_dir or allowed.startswith(bot_dir + os.sep) or
                      allowed == worktrees or allowed.startswith(worktrees + os.sep))
     bases = [allowed, user_data]
     if is_code_agent:
         bases.append(worktrees)
+        bases.extend(ADMIN_ALLOWED_CWDS)
 
     async def _check_permission(
         tool_name: str, tool_input: dict, ctx: ToolPermissionContext,
@@ -586,7 +609,7 @@ async def _set_session_id(session: AgentSession, msg: ResultMessage) -> None:
 
 
 # --- System prompt construction from layered .md files ---
-# SOUL.md: shared personality for ALL agents
+# SOUL.md: full personality for master + admin agents (agents in BOT_DIR or worktrees)
 # dev_context.md: axi-assistant development context (architecture, safety, test workflow)
 # Content uses %(var)s interpolation — literal % must be escaped as %% in prompt files.
 
@@ -605,6 +628,28 @@ _PROMPT_VARS = {"axi_user_data": AXI_USER_DATA, "bot_dir": BOT_DIR}
 _SOUL = _load_prompt_file(os.path.join(BOT_DIR, "SOUL.md"), _PROMPT_VARS)
 _DEV_CONTEXT = _load_prompt_file(os.path.join(BOT_DIR, "dev_context.md"), _PROMPT_VARS)
 
+# Mini system prompt for non-admin spawned agents (keeps context small)
+_AGENT_CONTEXT_PROMPT = """\
+You are an agent session in the Axi system — a Discord-based personal assistant for a single user. \
+You communicate through a dedicated Discord text channel. The user reads your messages there. \
+Keep responses concise and well-formatted for Discord (markdown, code blocks).
+
+Key context:
+- The user's profile and preferences are in USER_PROFILE.md at %(bot_dir)s/USER_PROFILE.md
+- You are one of several agent sessions. The master agent (Axi) coordinates via #axi-master.
+- Your working directory is set by whoever spawned you. Files you create/edit stay in that directory.
+- The user's timezone is US/Pacific.
+
+Sandbox policy:
+- You are authorized to use `dangerouslyDisableSandbox: true` for git operations and for curl/HTTP requests to `localhost:9100` (MinFlow task management API).
+- Do NOT disable the sandbox for anything else.
+
+Communication rules:
+- Never guess or fabricate answers. If you lack context, say so and look it up.
+- Do NOT use AskUserQuestion, TodoWrite, EnterPlanMode, ExitPlanMode, Skill, or EnterWorktree tools — they are invisible in Discord.
+- Ask questions as normal text messages. List options in your message if the user needs to choose.\
+""" % _PROMPT_VARS
+
 
 def _is_axi_dev_cwd(cwd: str) -> bool:
     """Check if a working directory is within the axi-assistant codebase."""
@@ -613,7 +658,7 @@ def _is_axi_dev_cwd(cwd: str) -> bool:
     )
 
 
-# Master agent: soul + dev context (master is always an axi dev agent too)
+# Master agent: soul + dev context (master is always an admin agent)
 MASTER_SYSTEM_PROMPT: dict = {
     "type": "preset",
     "preset": "claude_code",
@@ -624,11 +669,11 @@ MASTER_SYSTEM_PROMPT: dict = {
 def _make_spawned_agent_system_prompt(cwd: str) -> dict:
     """Build system prompt for a spawned agent based on its working directory."""
     if _is_axi_dev_cwd(cwd):
-        # Axi dev agent — soul + dev context
+        # Admin agent — full soul + dev context
         append = _SOUL + "\n\n" + _DEV_CONTEXT
     else:
-        # General claw — soul only
-        append = _SOUL
+        # Non-admin agent — mini context prompt
+        append = _AGENT_CONTEXT_PROMPT
     return {
         "type": "preset",
         "preset": "claude_code",
@@ -856,34 +901,7 @@ async def get_date_and_time(args):
     return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
 
-_utils_mcp_server = create_sdk_mcp_server(
-    name="utils",
-    version="1.0.0",
-    tools=[get_date_and_time],
-)
-
-@tool(
-    "axi_restart",
-    "Restart the Axi bot. Waits for busy agents to finish first (graceful). "
-    "Only use when the user explicitly asks you to restart.",
-    {"type": "object", "properties": {}, "required": []},
-)
-async def axi_restart(args):
-    log.info("Restart requested via MCP tool")
-    if shutdown_coordinator is None:
-        return {"content": [{"type": "text", "text": "Bot is not fully initialized yet."}]}
-    asyncio.create_task(shutdown_coordinator.graceful_shutdown("MCP tool", skip_agent=MASTER_AGENT_NAME))
-    return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
-
-
-_axi_mcp_server = create_sdk_mcp_server(
-    name="axi",
-    version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent, axi_restart],
-)
-
-
-# --- Discord REST MCP tools (for cross-server messaging) ---
+# --- Discord REST API client (used by discord_send_file and discord MCP tools) ---
 
 import httpx
 
@@ -908,6 +926,83 @@ async def _discord_request(method: str, path: str, **kwargs) -> httpx.Response:
     resp.raise_for_status()
     return resp
 
+
+@tool(
+    "discord_send_file",
+    "Send a file as a Discord message attachment to your own channel or another channel. "
+    "If channel_id is omitted, the file is sent to your own agent channel.",
+    {
+        "type": "object",
+        "properties": {
+            "channel_id": {"type": "string", "description": "The Discord channel ID. Omit to send to your own channel."},
+            "file_path": {"type": "string", "description": "Absolute path to the file to upload"},
+            "content": {"type": "string", "description": "Optional text message to include with the file"},
+        },
+        "required": ["file_path"],
+    },
+)
+async def discord_send_file(args):
+    file_path = args["file_path"]
+    content = args.get("content", "")
+    channel_id = args.get("channel_id")
+    if not channel_id:
+        # Auto-resolve: find calling agent's channel
+        for ch_id, name in channel_to_agent.items():
+            session = agents.get(name)
+            if session and session.client is not None:
+                # Heuristic: the agent currently awake and calling this tool
+                channel_id = str(ch_id)
+                break
+    if not channel_id:
+        return {"content": [{"type": "text", "text": "Error: could not determine channel. Provide channel_id explicitly."}], "is_error": True}
+    if not os.path.isfile(file_path):
+        return {"content": [{"type": "text", "text": f"Error: file not found: {file_path}"}], "is_error": True}
+    filename = os.path.basename(file_path)
+    try:
+        with open(file_path, "rb") as f:
+            file_data = f.read()
+        data = {}
+        if content:
+            data["content"] = content
+        files = {"files[0]": (filename, file_data)}
+        resp = await _discord_request(
+            "POST", f"/channels/{channel_id}/messages",
+            data=data, files=files,
+        )
+        msg = resp.json()
+        return {"content": [{"type": "text", "text": f"File '{filename}' sent (msg id: {msg['id']})"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
+
+
+_utils_mcp_server = create_sdk_mcp_server(
+    name="utils",
+    version="1.0.0",
+    tools=[get_date_and_time, discord_send_file],
+)
+
+@tool(
+    "axi_restart",
+    "Restart the Axi bot. Waits for busy agents to finish first (graceful). "
+    "Only use when the user explicitly asks you to restart.",
+    {"type": "object", "properties": {}, "required": []},
+)
+async def axi_restart(args):
+    log.info("Restart requested via MCP tool")
+    if shutdown_coordinator is None:
+        return {"content": [{"type": "text", "text": "Bot is not fully initialized yet."}]}
+    asyncio.create_task(shutdown_coordinator.graceful_shutdown("MCP tool", skip_agent=MASTER_AGENT_NAME))
+    return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
+
+
+_axi_mcp_server = create_sdk_mcp_server(
+    name="axi",
+    version="1.0.0",
+    tools=[axi_spawn_agent, axi_kill_agent, axi_restart],
+)
+
+
+# --- Discord REST MCP tools (for cross-server messaging) ---
 
 @tool(
     "discord_send_file",
@@ -1318,6 +1413,7 @@ async def sleep_agent(session: AgentSession) -> None:
     session._bridge_busy = False
     await _disconnect_client(session.client, session.name)
     session.client = None
+    session.flowcoder = None
     log.info("Agent '%s' is now sleeping", session.name)
 
 
@@ -1478,6 +1574,42 @@ async def wake_agent(session: AgentSession) -> None:
                     )
                 except Exception:
                     log.warning("Failed to post system prompt to Discord for '%s'", session.name, exc_info=True)
+
+        # Create FlowCoderSession wrapping the SDK client
+        # Callbacks reference session._fc_channel which is set by _execute_flowcoder_command.
+        def _fc_on_prompt_stream(prompt_text: str, chunk_str: str) -> None:
+            """Buffer text from prompt streaming chunks for Discord."""
+            if not chunk_str or session._fc_channel is None:
+                return
+            # Extract text_delta content from StreamEvent string representation
+            if "content_block_delta" in chunk_str and "text_delta" in chunk_str:
+                import re
+                m = re.search(r"'text':\s*'((?:[^'\\]|\\.)*)'", chunk_str)
+                if not m:
+                    m = re.search(r'"text":\s*"((?:[^"\\]|\\.)*)"', chunk_str)
+                if m:
+                    text = m.group(1).encode().decode("unicode_escape", errors="replace")
+                    if not hasattr(session, "_fc_text_buf"):
+                        session._fc_text_buf = ""
+                    session._fc_text_buf += text
+
+        async def _fc_on_block_complete(block, result, context) -> None:
+            """Flush buffered prompt text to Discord after each block."""
+            ch = session._fc_channel
+            if ch is None:
+                return
+            buf = getattr(session, "_fc_text_buf", "")
+            if buf.strip():
+                await send_long(ch, buf.lstrip())
+            session._fc_text_buf = ""
+
+        session.flowcoder = FlowCoderSession.create(
+            client=session.client,
+            cwd=session.cwd,
+            commands_dir="/home/pride/coding-projects/flowcoder/commands",
+            on_prompt_stream=_fc_on_prompt_stream,
+            on_block_complete_async=_fc_on_block_complete,
+        )
 
 
 def get_master_session() -> AgentSession | None:
@@ -2062,7 +2194,7 @@ async def _execute_flowcoder_command(session: AgentSession, content: str, channe
     session._fc_text_buf = ""
     try:
         async with channel.typing():
-            context = await session.flowcoder.execute_command(content)
+            context = await session.flowcoder.execute_command(content) (Add record-updater, FlowCoder integration, admin agent model, discord_send_file)
         # Post execution summary
         status = context.status.value if hasattr(context.status, 'value') else str(context.status)
         summary = f"*FlowCoder:* Command `{content.split()[0]}` finished — **{status}**"
@@ -2400,6 +2532,65 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
         await send_system(channel, f"Agent **{old_name}** timed out and was recovered (sleeping). Context preserved.")
     else:
         await send_system(channel, f"Agent **{old_name}** timed out and was reset (sleeping). Context lost.")
+
+
+# --- Record updater ---
+
+
+def _build_record_updater_prompt(agent_name: str, agent_cwd: str) -> str:
+    """Build the prompt for a record-updater agent that processes a finished agent's output."""
+    return f"""\
+You are the record-updater. Agent **{agent_name}** just finished working in `{agent_cwd}`.
+
+Your job: figure out what that agent accomplished and update all project records accordingly.
+
+## Steps
+
+1. Look at what the agent produced. Check `{agent_cwd}` for new or recently modified files \
+(*.md, *.json, reports, audits, etc.). Use `ls -lt {agent_cwd}/ | head -20` and read any relevant new files.
+
+2. Read the current project records:
+   - TODOS.md (the user's to-do list)
+   - The relevant project file in projects/ (match by agent name or cwd)
+   - If unsure which project file, read them all and match.
+
+3. Update the project records to reflect what the agent did:
+   - If a to-do was completed, mark it done or remove it from TODOS.md
+   - Update the project's "What's Done" and "What's Next" sections
+   - Update the project's status tag if appropriate
+   - Add any new to-dos or open questions that emerged
+
+4. If the agent's work produced something the user should review, add a note to TODOS.md \
+(e.g. "Review architecture audit in ~/coding-projects/minflow-stableish/ARCHITECTURE_AUDIT.md").
+
+5. Sync changes to MinFlow. The MinFlow REST API is at http://localhost:9100/api. \
+For each structured change (to-do completed, new to-do, status change), make the corresponding \
+API call. Use `curl` with `dangerouslyDisableSandbox: true` for localhost requests.
+   - To find the right deck/card, GET /api/workspace first to see current state.
+   - To complete a card: PUT /api/decks/:id/cards/:cardId with {{"completed": true}}
+   - To add a card: POST /api/decks/:id/cards with {{"text": "..."}}
+   - If no matching deck exists for the project, skip MinFlow sync for that item.
+   - If MinFlow is not running (connection refused), skip sync silently and note it.
+
+Be concise. Update files, sync MinFlow, then stop. Do not message the user.\
+"""
+
+
+async def _maybe_spawn_record_updater(agent_name: str, agent_cwd: str) -> None:
+    """Spawn a short-lived record-updater agent after another agent finishes."""
+    if agent_name in RECORD_UPDATER_EXCLUDED:
+        return
+    if len(agents) >= MAX_AGENTS:
+        log.warning("Max agents reached — skipping record-updater for '%s'", agent_name)
+        return
+
+    log.info("Spawning record-updater for completed agent '%s'", agent_name)
+    await reclaim_agent_name("record-updater")
+    await spawn_agent(
+        "record-updater",
+        AXI_USER_DATA,
+        _build_record_updater_prompt(agent_name, agent_cwd),
+    )
 
 
 # --- Agent spawning ---
@@ -2769,11 +2960,8 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             drain_sdk_buffer(session)
 
             # Show the initial prompt in Discord so the user sees what was sent
-            if isinstance(prompt, str):
-                prompt_preview = prompt[:1900]
-            else:
-                prompt_preview = str(prompt)[:1900]
-            await channel.send(f"*System:* 📝 **Initial prompt:**\n{prompt_preview}")
+            prompt_text = prompt if isinstance(prompt, str) else str(prompt)
+            await send_long(channel, f"*System:* 📝 **Initial prompt:**\n{prompt_text}")
 
             if session._log:
                 session._log.info("PROMPT: %s", _content_summary(prompt))
@@ -2794,6 +2982,11 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
 
         if not timed_out:
             await send_system(channel, f"Agent **{session.name}** finished initial task.")
+            # Spawn record-updater to process this agent's output
+            try:
+                await _maybe_spawn_record_updater(session.name, session.cwd)
+            except Exception:
+                log.exception("Error spawning record-updater for '%s'", session.name)
 
     except Exception:
         log.exception("Error running initial prompt for agent '%s'", session.name)
@@ -4097,7 +4290,6 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
         session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
-                await session.client.query(_as_stream(command))
                 channel = bot.get_channel(session.discord_channel_id) or interaction.channel
                 await _stream_with_retry(session, channel)
             await interaction.followup.send(f"*System:* {label} for **{agent_name}**.")
