@@ -2264,9 +2264,10 @@ async def _process_message_queue(session: AgentSession) -> None:
         if session._log:
             session._log.info("QUEUED_MSG: %s", _content_summary(content))
         await _remove_reaction(orig_message, "📨")
-        await _add_reaction(orig_message, "👀")
-        if remaining > 0:
-            await send_system(channel, f"Processing queued message ({remaining} more in queue)…")
+        # Show inline preview of the queued message being processed
+        preview = _content_summary(content)
+        remaining_str = f" ({remaining} more in queue)" if remaining > 0 else ""
+        await send_system(channel, f"Processing queued message{remaining_str}:\n> {preview}")
 
         async with session.query_lock:
             # Wake agent if it was sleeping (e.g. after timeout recovery)
@@ -2275,7 +2276,6 @@ async def _process_message_queue(session: AgentSession) -> None:
                     await wake_agent(session)
                 except Exception:
                     log.exception("Failed to wake agent '%s' for queued message", session.name)
-                    await _remove_reaction(orig_message, "👀")
                     await _add_reaction(orig_message, "❌")
                     await send_system(channel, f"Failed to wake agent **{session.name}** — dropping queued message.")
                     # Clear remaining queue
@@ -2296,15 +2296,12 @@ async def _process_message_queue(session: AgentSession) -> None:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(content))
                     await stream_response_to_channel(session, channel)
-                await _remove_reaction(orig_message, "👀")
                 await _add_reaction(orig_message, "✅")
             except TimeoutError:
-                await _remove_reaction(orig_message, "👀")
                 await _add_reaction(orig_message, "⏳")
                 await _handle_query_timeout(session, channel)
             except Exception:
                 log.exception("Error querying agent '%s' (queued message)", session.name)
-                await _remove_reaction(orig_message, "👀")
                 await _add_reaction(orig_message, "❌")
                 await send_system(
                     channel,
@@ -2637,7 +2634,6 @@ async def on_message(message):
                 )
                 return
 
-        await _add_reaction(message, "👀")
         session.last_activity = datetime.now(timezone.utc)
         session.last_idle_notified = None
         session.idle_reminder_count = 0
@@ -2652,15 +2648,11 @@ async def on_message(message):
             async with asyncio.timeout(QUERY_TIMEOUT):
                 await session.client.query(_as_stream(content))
                 await stream_response_to_channel(session, message.channel)
-            await _remove_reaction(message, "👀")
-            await _add_reaction(message, "✅")
         except TimeoutError:
-            await _remove_reaction(message, "👀")
             await _add_reaction(message, "⏳")
             await _handle_query_timeout(session, message.channel)
         except Exception:
             log.exception("Error querying agent '%s'", agent_name)
-            await _remove_reaction(message, "👀")
             await _add_reaction(message, "❌")
             await send_system(
                 message.channel,
