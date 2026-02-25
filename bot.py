@@ -3217,7 +3217,7 @@ async def clear_context(interaction, agent_name: str | None = None):
     await _run_agent_sdk_command(interaction, agent_name, "/clear", "Context cleared")
 
 
-@bot.tree.command(name="restart", description="Restart the bot. Use force=True to skip waiting for agents.")
+@bot.tree.command(name="restart", description="Hot-reload bot.py (bridge stays alive, agents keep running).")
 @app_commands.describe(force="Skip waiting for busy agents and restart immediately")
 async def restart_cmd(interaction, force: bool = False):
     if interaction.user.id not in ALLOWED_USER_IDS:
@@ -3228,14 +3228,71 @@ async def restart_cmd(interaction, force: bool = False):
         return
 
     if force:
-        await interaction.response.send_message("*System:* Force restarting...")
+        await interaction.response.send_message("*System:* Force restarting (hot reload)...")
         log.info("Force restart requested via /restart command")
         await shutdown_coordinator.force_shutdown("/restart force")
         return
 
-    await interaction.response.send_message("*System:* Initiating graceful restart...")
+    await interaction.response.send_message("*System:* Initiating graceful restart (hot reload)...")
     log.info("Restart requested via /restart command")
     await shutdown_coordinator.graceful_shutdown("/restart command")
+
+
+@bot.tree.command(
+    name="restart-including-bridge",
+    description="Full restart — kills bridge + all agents. Sessions will disconnect.",
+)
+@app_commands.describe(force="Skip waiting for busy agents and restart immediately")
+async def restart_including_bridge_cmd(interaction, force: bool = False):
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+    if shutdown_coordinator is None:
+        await interaction.response.send_message("Bot is not fully initialized yet.", ephemeral=True)
+        return
+    # Guard against double-restart: the existing coordinator tracks _requested
+    # for the soft restart path. Check it so we don't start a second shutdown.
+    if shutdown_coordinator.requested:
+        await interaction.response.send_message(
+            "*System:* A restart is already in progress.", ephemeral=True,
+        )
+        return
+
+    # Build an on-demand coordinator that uses kill_supervisor (full restart)
+    # and bridge_mode=False so agents get properly slept before exit.
+    async def _notify_agent_channel(agent_name: str, message: str) -> None:
+        channel = await get_agent_channel(agent_name)
+        if channel:
+            await send_system(channel, message)
+
+    async def _send_goodbye() -> None:
+        master_ch = await get_master_channel()
+        if master_ch:
+            await master_ch.send("*System:* Full restart — bridge is going down. See you soon!")
+
+    full_coordinator = ShutdownCoordinator(
+        agents=agents,
+        sleep_fn=sleep_agent,
+        close_bot_fn=bot.close,
+        kill_fn=kill_supervisor,
+        notify_fn=_notify_agent_channel,
+        goodbye_fn=_send_goodbye,
+        bridge_mode=False,
+    )
+
+    if force:
+        await interaction.response.send_message(
+            "*System:* Force restarting (full — bridge will be killed, agents will disconnect)..."
+        )
+        log.info("Force full restart requested via /restart-including-bridge command")
+        await full_coordinator.force_shutdown("/restart-including-bridge force")
+        return
+
+    await interaction.response.send_message(
+        "*System:* Initiating graceful full restart (bridge will be killed, agents will disconnect)..."
+    )
+    log.info("Full restart requested via /restart-including-bridge command")
+    await full_coordinator.graceful_shutdown("/restart-including-bridge command")
 
 
 # --- Channel creation listener ---
