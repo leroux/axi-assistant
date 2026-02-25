@@ -5,7 +5,7 @@ Each test instance is a git worktree with its own .env, venv, and systemd servic
 Managed via systemd template units (axi-test@<name>.service).
 
 Usage:
-    axi-test up <name> [--branch BRANCH] [--guild GUILD]
+    axi-test up <name> [--branch BRANCH] [--guild GUILD] [--wait] [--wait-timeout SECS]
     axi-test down <name> [--keep]
     axi-test restart <name>
     axi-test list
@@ -100,8 +100,11 @@ def get_token_for_running_instance(name: str, config: dict) -> str | None:
     return env.get("DISCORD_TOKEN")
 
 
-def pick_guild(config: dict, explicit_guild: str | None) -> str:
-    """Pick a guild, checking for token conflicts with running instances."""
+def pick_guild(config: dict, explicit_guild: str | None) -> str | None:
+    """Pick a guild, checking for token conflicts with running instances.
+
+    Returns None if no guild slot is available (all tokens in use).
+    """
     if explicit_guild:
         if explicit_guild not in config["guilds"]:
             print(f"Error: Guild '{explicit_guild}' not found in config", file=sys.stderr)
@@ -123,13 +126,26 @@ def pick_guild(config: dict, explicit_guild: str | None) -> str:
         if token and token not in running_tokens:
             return guild_name
 
-    print("Error: All bot tokens are in use by running instances", file=sys.stderr)
-    print("Either stop an instance or add another bot to the config", file=sys.stderr)
-    sys.exit(1)
+    return None
+
+
+def has_token_conflict(config: dict, guild_name: str, instance_name: str) -> bool:
+    """Check if another running instance uses the same bot token."""
+    token = resolve_bot_token(config, guild_name)
+    running = get_running_instances()
+    for inst in running:
+        if inst == instance_name:
+            continue
+        inst_token = get_token_for_running_instance(inst, config)
+        if inst_token == token:
+            return True
+    return False
 
 
 def check_token_conflict(config: dict, guild_name: str, instance_name: str) -> None:
     """Error if another running instance uses the same bot token."""
+    if not has_token_conflict(config, guild_name, instance_name):
+        return
     token = resolve_bot_token(config, guild_name)
     running = get_running_instances()
     for inst in running:
@@ -162,6 +178,39 @@ def get_worktree_branch(worktree_path: str) -> str:
 
 # --- Subcommands ---
 
+def wait_for_slot(config, explicit_guild, instance_name, timeout, poll_interval=10):
+    """Poll until a guild slot is available, or raise SystemExit on timeout.
+
+    Returns the guild name once a slot is free.
+    """
+    deadline = time.monotonic() + timeout
+    total_guilds = len(config["guilds"])
+    if explicit_guild:
+        bot_name = config["guilds"][explicit_guild].get("bot", "?")
+        print(f"Bot '{bot_name}' (guild '{explicit_guild}') is in use. Waiting for it to free up (timeout: {timeout}s)...")
+    else:
+        print(f"All {total_guilds} bot token(s) are in use. Waiting for a slot (timeout: {timeout}s)...")
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"\nError: Timed out after {timeout}s waiting for a bot token slot", file=sys.stderr)
+            print("Either stop an instance or add another bot to the config", file=sys.stderr)
+            sys.exit(1)
+
+        sleep_time = min(poll_interval, remaining)
+        time.sleep(sleep_time)
+
+        guild_name = pick_guild(config, explicit_guild)
+        if guild_name is not None and not has_token_conflict(config, guild_name, instance_name):
+            print(f"Slot available! Using guild '{guild_name}'")
+            return guild_name
+
+        mins_left = int(remaining) // 60
+        secs_left = int(remaining) % 60
+        print(f"  Still waiting... ({mins_left}m {secs_left}s remaining)")
+
+
 def cmd_up(args):
     config = load_config()
     name = args.name
@@ -175,7 +224,26 @@ def cmd_up(args):
         sys.exit(1)
 
     guild_name = pick_guild(config, args.guild)
-    check_token_conflict(config, guild_name, name)
+
+    if guild_name is None:
+        if args.wait:
+            guild_name = wait_for_slot(
+                config, args.guild, name, timeout=args.wait_timeout,
+            )
+        else:
+            print("Error: All bot tokens are in use by running instances", file=sys.stderr)
+            print("Either stop an instance or add another bot to the config", file=sys.stderr)
+            print("Hint: Use --wait to poll until a slot is available", file=sys.stderr)
+            sys.exit(1)
+
+    # For explicit guild, the token might still be in use by another instance
+    if has_token_conflict(config, guild_name, name):
+        if args.wait:
+            guild_name = wait_for_slot(
+                config, args.guild, name, timeout=args.wait_timeout,
+            )
+        else:
+            check_token_conflict(config, guild_name, name)
 
     guild_info = config["guilds"][guild_name]
     guild_id = guild_info["guild_id"]
@@ -518,6 +586,10 @@ def main():
     p_up.add_argument("name", help="Instance name (used in paths and service name)")
     p_up.add_argument("--branch", help="Git branch or ref (default: HEAD)")
     p_up.add_argument("--guild", help="Guild name from config (default: auto-pick)")
+    p_up.add_argument("--wait", action="store_true",
+                       help="Wait for a bot token slot if all are in use")
+    p_up.add_argument("--wait-timeout", type=int, default=600,
+                       help="Max seconds to wait for a slot (default: 600)")
     p_up.set_defaults(func=cmd_up)
 
     # down
