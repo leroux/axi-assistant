@@ -96,7 +96,7 @@ ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
 schedule_last_fired: dict[str, datetime] = {}
-_bot_start_time = datetime.now(timezone.utc)
+_bot_start_time: datetime | None = None
 
 # --- Agent session management ---
 
@@ -2821,12 +2821,36 @@ async def ping_command(interaction: discord.Interaction):
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
-    uptime = datetime.now(timezone.utc) - _bot_start_time
-    hours, remainder = divmod(int(uptime.total_seconds()), 3600)
-    minutes, seconds = divmod(remainder, 60)
-    await interaction.response.send_message(
-        f"Pong! Latency: {round(bot.latency * 1000)}ms | Uptime: {hours}h {minutes}m {seconds}s"
-    )
+
+    def _fmt_uptime(total_seconds: int) -> str:
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours}h {minutes}m {seconds}s"
+
+    # Bot uptime
+    if _bot_start_time is not None:
+        bot_uptime = datetime.now(timezone.utc) - _bot_start_time
+        bot_str = _fmt_uptime(int(bot_uptime.total_seconds()))
+    else:
+        bot_str = "initializing"
+
+    # Bridge uptime (if connected)
+    bridge_str = None
+    if bridge_conn is not None and bridge_conn.is_alive:
+        try:
+            result = await bridge_conn.send_command("status")
+            if result.ok and result.uptime_seconds is not None:
+                bridge_str = _fmt_uptime(result.uptime_seconds)
+        except Exception:
+            bridge_str = "error"
+
+    latency = round(bot.latency * 1000)
+    parts = [f"Pong! Latency: {latency}ms", f"Bot uptime: {bot_str}"]
+    if bridge_str is not None:
+        parts.append(f"Bridge uptime: {bridge_str}")
+    elif bridge_conn is None or not bridge_conn.is_alive:
+        parts.append("Bridge: not connected")
+    await interaction.response.send_message(" | ".join(parts))
 
 
 @bot.tree.command(name="list-agents", description="List all active agent sessions.")
@@ -3217,7 +3241,7 @@ async def clear_context(interaction, agent_name: str | None = None):
     await _run_agent_sdk_command(interaction, agent_name, "/clear", "Context cleared")
 
 
-@bot.tree.command(name="restart", description="Restart the bot. Use force=True to skip waiting for agents.")
+@bot.tree.command(name="restart", description="Hot-reload bot.py (bridge stays alive, agents keep running).")
 @app_commands.describe(force="Skip waiting for busy agents and restart immediately")
 async def restart_cmd(interaction, force: bool = False):
     if interaction.user.id not in ALLOWED_USER_IDS:
@@ -3228,14 +3252,71 @@ async def restart_cmd(interaction, force: bool = False):
         return
 
     if force:
-        await interaction.response.send_message("*System:* Force restarting...")
+        await interaction.response.send_message("*System:* Force restarting (hot reload)...")
         log.info("Force restart requested via /restart command")
         await shutdown_coordinator.force_shutdown("/restart force")
         return
 
-    await interaction.response.send_message("*System:* Initiating graceful restart...")
+    await interaction.response.send_message("*System:* Initiating graceful restart (hot reload)...")
     log.info("Restart requested via /restart command")
     await shutdown_coordinator.graceful_shutdown("/restart command")
+
+
+@bot.tree.command(
+    name="restart-including-bridge",
+    description="Full restart — kills bridge + all agents. Sessions will disconnect.",
+)
+@app_commands.describe(force="Skip waiting for busy agents and restart immediately")
+async def restart_including_bridge_cmd(interaction, force: bool = False):
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+    if shutdown_coordinator is None:
+        await interaction.response.send_message("Bot is not fully initialized yet.", ephemeral=True)
+        return
+    # Guard against double-restart: the existing coordinator tracks _requested
+    # for the soft restart path. Check it so we don't start a second shutdown.
+    if shutdown_coordinator.requested:
+        await interaction.response.send_message(
+            "*System:* A restart is already in progress.", ephemeral=True,
+        )
+        return
+
+    # Build an on-demand coordinator that uses kill_supervisor (full restart)
+    # and bridge_mode=False so agents get properly slept before exit.
+    async def _notify_agent_channel(agent_name: str, message: str) -> None:
+        channel = await get_agent_channel(agent_name)
+        if channel:
+            await send_system(channel, message)
+
+    async def _send_goodbye() -> None:
+        master_ch = await get_master_channel()
+        if master_ch:
+            await master_ch.send("*System:* Full restart — bridge is going down. See you soon!")
+
+    full_coordinator = ShutdownCoordinator(
+        agents=agents,
+        sleep_fn=sleep_agent,
+        close_bot_fn=bot.close,
+        kill_fn=kill_supervisor,
+        notify_fn=_notify_agent_channel,
+        goodbye_fn=_send_goodbye,
+        bridge_mode=False,
+    )
+
+    if force:
+        await interaction.response.send_message(
+            "*System:* Force restarting (full — bridge will be killed, agents will disconnect)..."
+        )
+        log.info("Force full restart requested via /restart-including-bridge command")
+        await full_coordinator.force_shutdown("/restart-including-bridge force")
+        return
+
+    await interaction.response.send_message(
+        "*System:* Initiating graceful full restart (bridge will be killed, agents will disconnect)..."
+    )
+    log.info("Full restart requested via /restart-including-bridge command")
+    await full_coordinator.graceful_shutdown("/restart-including-bridge command")
 
 
 # --- Channel creation listener ---
@@ -3302,6 +3383,9 @@ async def on_ready():
         log.info("on_ready fired again (gateway reconnect) — skipping startup logic")
         return
     _on_ready_fired = True
+
+    global _bot_start_time
+    _bot_start_time = datetime.now(timezone.utc)
 
     # Register master agent as sleeping — it will wake on first message
     master_mcp = {"axi": _axi_mcp_server}
