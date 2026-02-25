@@ -28,7 +28,11 @@ from claude_agent_sdk.types import (
     PermissionResultDeny,
 )
 from croniter import croniter
-from shutdown import ShutdownCoordinator, kill_supervisor
+from shutdown import ShutdownCoordinator, kill_supervisor, exit_for_restart
+from bridge import (
+    BridgeConnection, BridgeTransport, ensure_bridge, build_cli_spawn_args,
+    connect_to_bridge,
+)
 from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
 
 load_dotenv()
@@ -88,6 +92,7 @@ HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
 SKIPS_PATH = os.path.join(BOT_DIR, "schedule_skips.json")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
+BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
 schedule_last_fired: dict[str, datetime] = {}
 
 # --- Agent session management ---
@@ -119,6 +124,7 @@ class AgentSession:
     discord_channel_id: int | None = None
     message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     mcp_servers: dict | None = None
+    _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
     _log: logging.Logger | None = None
 
     def __post_init__(self):
@@ -150,6 +156,9 @@ class AgentSession:
 
 agents: dict[str, AgentSession] = {}
 _wake_lock = asyncio.Lock()  # Serializes wake_agent calls to prevent TOCTOU races on concurrency limit
+
+# Bridge connection — initialized in on_ready(), used by wake_agent/sleep_agent
+bridge_conn: BridgeConnection | None = None
 
 # Shutdown coordinator — initialized with a placeholder notify_fn because
 # send_system/get_agent_channel aren't defined yet at import time.
@@ -881,8 +890,22 @@ def _ensure_process_dead(pid: int | None, label: str) -> None:
 async def _disconnect_client(client: ClaudeSDKClient, label: str) -> None:
     """Disconnect a ClaudeSDKClient and ensure its subprocess is terminated.
 
-    Handles the anyio cancel-scope leak in the SDK gracefully.
+    For bridge-backed clients, calls transport.close() which sends KILL to bridge.
+    For direct subprocess clients, handles the anyio cancel-scope leak gracefully.
     """
+    # Check if this client uses a BridgeTransport
+    transport = getattr(client, "_transport", None)
+    if isinstance(transport, BridgeTransport):
+        # Bridge transport: close() sends KILL to bridge, no local process to worry about
+        try:
+            await asyncio.wait_for(transport.close(), timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            log.warning("'%s' bridge transport close timed out", label)
+        except Exception:
+            log.exception("'%s' error closing bridge transport", label)
+        return
+
+    # Direct subprocess client — original logic
     pid = _get_subprocess_pid(client)
     try:
         await asyncio.wait_for(client.__aexit__(None, None, None), timeout=5.0)
@@ -1008,8 +1031,59 @@ async def sleep_agent(session: AgentSession) -> None:
     log.info("Agent '%s' is now sleeping", session.name)
 
 
+def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> ClaudeAgentOptions:
+    """Build ClaudeAgentOptions for a session."""
+    return ClaudeAgentOptions(
+        model="opus",
+        effort="high",
+        thinking={"type": "enabled", "budget_tokens": 128000},
+        betas=["context-1m-2025-08-07"],
+        setting_sources=["user", "project", "local"],
+        permission_mode="default",
+        can_use_tool=make_cwd_permission_callback(session.cwd),
+        cwd=session.cwd,
+        system_prompt=session.system_prompt,
+        include_partial_messages=True,
+        stderr=make_stderr_callback(session),
+        resume=resume_id,
+        sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
+        mcp_servers=session.mcp_servers or {},
+    )
+
+
+async def _wake_agent_via_bridge(session: AgentSession, options: ClaudeAgentOptions) -> ClaudeSDKClient:
+    """Wake an agent using the bridge transport.
+
+    Creates a BridgeTransport, spawns the CLI via bridge, then creates
+    a ClaudeSDKClient using that transport.
+    """
+    transport = BridgeTransport(
+        session.name, bridge_conn,
+        stderr_callback=make_stderr_callback(session),
+    )
+    await transport.connect()
+
+    # Build CLI args and spawn via bridge
+    cli_args, env, cwd = build_cli_spawn_args(options)
+    spawn_result = await transport.spawn(cli_args, env, cwd)
+
+    if spawn_result.get("already_running"):
+        log.info("CLI for '%s' already running in bridge (pid=%s)", session.name, spawn_result.get("pid"))
+
+    # Subscribe to start receiving output
+    await transport.subscribe()
+
+    # Create SDK client with our bridge transport
+    client = ClaudeSDKClient(options=options, transport=transport)
+    await client.__aenter__()
+    return client
+
+
 async def wake_agent(session: AgentSession) -> None:
-    """Wake a sleeping agent by creating a new ClaudeSDKClient with resume.
+    """Wake a sleeping agent by creating a new ClaudeSDKClient.
+
+    Uses the bridge process to manage the CLI subprocess when bridge_conn
+    is available, otherwise falls back to direct subprocess management.
 
     No-op if the session is already awake (client is not None).
     Falls back to a fresh session if resume fails.
@@ -1039,58 +1113,54 @@ async def wake_agent(session: AgentSession) -> None:
         log.info("Waking agent '%s' (session_id=%s)", session.name, session.session_id)
         resume_id = session.session_id
 
-        log.debug("Creating ClaudeSDKClient for '%s' (resume=%s)", session.name, resume_id)
+        options = _make_agent_options(session, resume_id)
 
-        options = ClaudeAgentOptions(
-            model="opus",
-            effort="high",
-            thinking={"type": "enabled", "budget_tokens": 128000},
-            betas=["context-1m-2025-08-07"],
-            setting_sources=["user", "project", "local"],
-            permission_mode="default",
-            can_use_tool=make_cwd_permission_callback(session.cwd),
-            cwd=session.cwd,
-            system_prompt=session.system_prompt,
-            include_partial_messages=True,
-            stderr=make_stderr_callback(session),
-            resume=resume_id,
-            sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
-            mcp_servers=session.mcp_servers or {},
-        )
-
-        try:
-            client = ClaudeSDKClient(options=options)
-            await client.__aenter__()
-            session.client = client  # Only expose after fully initialized
-            log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
-            if session._log:
-                session._log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
-        except Exception:
-            log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
-            # Retry without resume
-            options = ClaudeAgentOptions(
-                model="opus",
-                effort="high",
-                thinking={"type": "enabled", "budget_tokens": 128000},
-                betas=["context-1m-2025-08-07"],
-                setting_sources=["user", "project", "local"],
-                permission_mode="default",
-                can_use_tool=make_cwd_permission_callback(session.cwd),
-                cwd=session.cwd,
-                system_prompt=session.system_prompt,
-                include_partial_messages=True,
-                stderr=make_stderr_callback(session),
-                resume=None,
-                sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
-                mcp_servers=session.mcp_servers or {},
-            )
-            client = ClaudeSDKClient(options=options)
-            await client.__aenter__()
-            session.client = client  # Only expose after fully initialized
-            session.session_id = None
-            log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
-            if session._log:
-                session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
+        if bridge_conn and bridge_conn.is_alive:
+            # Bridge mode: spawn CLI via bridge
+            log.debug("Waking '%s' via bridge (resume=%s)", session.name, resume_id)
+            try:
+                client = await _wake_agent_via_bridge(session, options)
+                session.client = client
+                log.info("Agent '%s' is now awake via bridge (resumed=%s)", session.name, resume_id)
+                if session._log:
+                    session._log.info("SESSION_WAKE via bridge (resumed=%s)", bool(resume_id))
+            except Exception:
+                if resume_id:
+                    log.warning("Failed to resume '%s' via bridge, retrying fresh", session.name)
+                    options = _make_agent_options(session, resume_id=None)
+                    try:
+                        client = await _wake_agent_via_bridge(session, options)
+                        session.client = client
+                        session.session_id = None
+                        log.warning("Agent '%s' woke fresh via bridge (previous context lost)", session.name)
+                        if session._log:
+                            session._log.info("SESSION_WAKE via bridge (resumed=False, fresh after resume failure)")
+                    except Exception:
+                        log.exception("Failed to wake '%s' via bridge (even fresh)", session.name)
+                        raise
+                else:
+                    log.exception("Failed to wake '%s' via bridge", session.name)
+                    raise
+        else:
+            # Direct mode: original behavior (no bridge)
+            log.debug("Waking '%s' directly (no bridge, resume=%s)", session.name, resume_id)
+            try:
+                client = ClaudeSDKClient(options=options)
+                await client.__aenter__()
+                session.client = client
+                log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
+                if session._log:
+                    session._log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
+            except Exception:
+                log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
+                options = _make_agent_options(session, resume_id=None)
+                client = ClaudeSDKClient(options=options)
+                await client.__aenter__()
+                session.client = client
+                session.session_id = None
+                log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
+                if session._log:
+                    session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
 
 
 def get_master_session() -> AgentSession | None:
@@ -1935,10 +2005,156 @@ async def _process_message_queue(session: AgentSession) -> None:
 # --- Graceful shutdown (delegated to shutdown.py) ---
 
 
+# --- Bridge connection and reconnection ---
+
+
+async def _connect_bridge() -> None:
+    """Connect to the agent bridge (or start a new one).
+
+    If the bridge has running agents from a previous bot.py instance,
+    schedules reconnect+drain tasks to resume them.
+    """
+    global bridge_conn
+
+    try:
+        bridge_conn = await ensure_bridge(BRIDGE_SOCKET_PATH, timeout=10.0)
+        log.info("Bridge connection established")
+    except Exception:
+        log.exception("Failed to connect to bridge — agents will use direct subprocess mode")
+        bridge_conn = None
+        return
+
+    # List running agents in the bridge
+    try:
+        result = await bridge_conn.send_command("list")
+        bridge_agents = result.get("agents", {})
+        log.info("Bridge reports %d agent(s): %s", len(bridge_agents), list(bridge_agents.keys()))
+    except Exception:
+        log.exception("Failed to list bridge agents")
+        return
+
+    if not bridge_agents:
+        return
+
+    # For each running agent that we've reconstructed, schedule reconnect
+    for agent_name, info in bridge_agents.items():
+        session = agents.get(agent_name)
+        if session is None:
+            log.warning("Bridge has agent '%s' but no matching session — killing", agent_name)
+            try:
+                await bridge_conn.send_command("kill", name=agent_name)
+            except Exception:
+                log.exception("Failed to kill orphan bridge agent '%s'", agent_name)
+            continue
+
+        status = info.get("status", "unknown")
+        buffered = info.get("buffered_msgs", 0)
+        log.info(
+            "Reconnecting agent '%s' (status=%s, buffered=%d)",
+            agent_name, status, buffered,
+        )
+
+        # Mark as reconnecting to prevent on_message from waking a new CLI
+        session._reconnecting = True
+        asyncio.create_task(_reconnect_and_drain(session, info))
+
+
+async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None:
+    """Reconnect a single agent to the bridge and drain any buffered output.
+
+    This runs as a background task. It:
+    1. Acquires the query_lock (blocks new queries)
+    2. Creates BridgeTransport in reconnecting mode (fakes initialize)
+    3. Subscribes to the bridge (triggers buffer replay)
+    4. Creates a ClaudeSDKClient on top of the transport
+    5. If there's buffered output, streams it to the Discord channel
+    6. Clears the _reconnecting flag
+    7. Processes any queued messages
+    """
+    try:
+        async with session.query_lock:
+            if bridge_conn is None or not bridge_conn.is_alive:
+                log.warning("Bridge connection lost during reconnect of '%s'", session.name)
+                session._reconnecting = False
+                return
+
+            # Create transport in reconnecting mode
+            transport = BridgeTransport(
+                session.name, bridge_conn,
+                reconnecting=True,
+                stderr_callback=make_stderr_callback(session),
+            )
+            await transport.connect()
+
+            # Subscribe to get buffered output
+            sub_result = await transport.subscribe()
+            replayed = sub_result.get("replayed", 0)
+            cli_status = sub_result.get("status", "unknown")
+            log.info(
+                "Subscribed to '%s' (replayed=%d, cli_status=%s)",
+                session.name, replayed, cli_status,
+            )
+
+            # Build minimal options for reconnecting (no model/thinking needed — CLI already running)
+            options = ClaudeAgentOptions(
+                can_use_tool=make_cwd_permission_callback(session.cwd),
+                mcp_servers=session.mcp_servers or {},
+                permission_mode="default",
+                cwd=session.cwd,
+                include_partial_messages=True,
+                stderr=make_stderr_callback(session),
+            )
+
+            # Create SDK client with our bridge transport
+            client = ClaudeSDKClient(options=options, transport=transport)
+            await client.__aenter__()
+            session.client = client
+
+            if session._log:
+                session._log.info("SESSION_RECONNECT via bridge (replayed=%d)", replayed)
+
+            # If the CLI already exited while we were down, note it
+            if cli_status == "exited":
+                log.info("Agent '%s' CLI exited while we were down", session.name)
+                session._reconnecting = False
+                # Let the transport's read_messages detect the exit naturally
+                # The buffered exit message was replayed, so stream_response will handle it
+
+            # Clear reconnecting flag — agent is now live
+            session._reconnecting = False
+
+            # If the CLI is still running and had buffered output, drain it
+            # The agent may be mid-response: stream_response_to_channel will
+            # consume output until ResultMessage. Use a generous timeout
+            # in case the buffer has incomplete data (no ResultMessage yet).
+            if replayed > 0 and cli_status == "running":
+                channel = await get_agent_channel(session.name)
+                if channel:
+                    await send_system(channel, "*(reconnected after restart)*")
+                    try:
+                        async with asyncio.timeout(QUERY_TIMEOUT):
+                            await stream_response_to_channel(session, channel)
+                    except TimeoutError:
+                        log.warning("Drain timeout for '%s' — continuing", session.name)
+                    except Exception:
+                        log.exception("Error draining buffered output for '%s'", session.name)
+
+            log.info("Reconnect complete for '%s'", session.name)
+
+    except Exception:
+        log.exception("Failed to reconnect agent '%s'", session.name)
+        session._reconnecting = False
+
+    # Process any messages that were queued during reconnect
+    await _process_message_queue(session)
+
+
 def _init_shutdown_coordinator() -> None:
     """Wire up the ShutdownCoordinator with real bot callbacks.
 
     Called once from on_ready after all helpers are defined.
+    In bridge mode, uses exit_for_restart (agents keep running in bridge)
+    instead of kill_supervisor (which kills everything).
     """
     global shutdown_coordinator
 
@@ -1947,12 +2163,14 @@ def _init_shutdown_coordinator() -> None:
         if channel:
             await send_system(channel, message)
 
+    use_bridge = bridge_conn is not None and bridge_conn.is_alive
     shutdown_coordinator = ShutdownCoordinator(
         agents=agents,
         sleep_fn=sleep_agent,
         close_bot_fn=bot.close,
-        kill_fn=kill_supervisor,
+        kill_fn=exit_for_restart if use_bridge else kill_supervisor,
         notify_fn=_notify_agent_channel,
+        bridge_mode=use_bridge,
     )
 
 
@@ -2009,6 +2227,17 @@ async def on_message(message):
     # Block interaction with killed agents
     if killed_category and hasattr(message.channel, "category_id") and message.channel.category_id == killed_category.id:
         await send_system(message.channel, "This agent has been killed. Use `/spawn` to create a new one.")
+        return
+
+    # During bridge reconnect, queue messages instead of waking a new CLI
+    if session._reconnecting:
+        await session.message_queue.put((message.content, message.channel))
+        position = session.message_queue.qsize()
+        log.debug("Agent '%s' reconnecting after restart, queuing message (queue_size=%d)", agent_name, position)
+        await send_system(
+            message.channel,
+            f"Agent **{agent_name}** is reconnecting after restart — message queued (position {position}).",
+        )
         return
 
     log.debug("Routing message to agent '%s' (locked=%s, client=%s)", agent_name, session.query_lock.locked(), session.client is not None)
@@ -2653,6 +2882,9 @@ async def on_ready():
         await reconstruct_agents_from_channels()
     except Exception:
         log.exception("Failed to reconstruct agents from channels")
+
+    # Connect to the agent bridge (or start a new one)
+    await _connect_bridge()
 
     # Initialize shutdown coordinator now that all helpers are available
     _init_shutdown_coordinator()

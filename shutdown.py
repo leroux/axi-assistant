@@ -95,6 +95,17 @@ def kill_supervisor() -> None:
     os._exit(RESTART_EXIT_CODE)
 
 
+def exit_for_restart() -> None:
+    """Exit with code 42 without killing the supervisor.
+
+    Used for bridge-mode graceful restarts: the bridge process and its CLI
+    subprocesses keep running, bot.py exits, supervisor relaunches bot.py,
+    and it reconnects to the bridge.
+    """
+    log.info("Exiting for restart (bridge mode) — bridge stays alive")
+    os._exit(RESTART_EXIT_CODE)
+
+
 # ---------------------------------------------------------------------------
 # ShutdownCoordinator
 # ---------------------------------------------------------------------------
@@ -128,6 +139,7 @@ class ShutdownCoordinator:
         notify_fn: NotifyFn | None = None,
         deadline_timeout: float = SHUTDOWN_DEADLINE,
         bot_close_timeout: float = BOT_CLOSE_TIMEOUT,
+        bridge_mode: bool = False,
     ):
         self._agents = agents
         self._sleep_fn = sleep_fn
@@ -136,6 +148,7 @@ class ShutdownCoordinator:
         self._notify_fn = notify_fn
         self._deadline_timeout = deadline_timeout
         self._bot_close_timeout = bot_close_timeout
+        self._bridge_mode = bridge_mode
         self._requested = False
 
     # -- Public state -------------------------------------------------------
@@ -187,10 +200,14 @@ class ShutdownCoordinator:
 
         A safety-deadline thread is started first so that os._exit(42) fires
         even if any step below hangs.
+
+        In bridge mode, agents are NOT slept — they keep running in the bridge
+        process and will be reconnected after restart.
         """
         _start_deadline_thread(self._deadline_timeout)
 
-        await self.sleep_all(skip=skip_agent)
+        if not self._bridge_mode:
+            await self.sleep_all(skip=skip_agent)
 
         try:
             await asyncio.wait_for(self._close_bot_fn(), timeout=self._bot_close_timeout)
@@ -212,12 +229,21 @@ class ShutdownCoordinator:
 
         There is **no hard timeout** on the wait. Agents get as much time as
         they need. The user can call force_shutdown() to bail out.
+
+        In bridge mode, busy agents are not waited for — they keep running
+        in the bridge process and will be reconnected after restart.
         """
         if self._requested:
             log.info("Graceful shutdown already in progress (ignoring duplicate from %s)", source)
             return
         self._requested = True
         log.info("Graceful shutdown initiated from %s", source)
+
+        # In bridge mode, agents keep running — no need to wait or sleep
+        if self._bridge_mode:
+            log.info("Bridge mode — skipping agent wait, agents keep running")
+            await self._execute_exit(skip_agent=skip_agent)
+            return  # unreachable (os._exit) but makes intent clear
 
         busy = self.get_busy_agents(skip=skip_agent)
 
