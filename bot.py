@@ -159,7 +159,8 @@ class AgentSession:
     stderr_buffer: list[str] = field(default_factory=list)
     stderr_lock: threading.Lock = field(default_factory=threading.Lock)
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    system_prompt: str | None = None
+    system_prompt: dict | str | None = None
+    _system_prompt_posted: bool = False  # Set True after posting system prompt to Discord
     last_idle_notified: datetime | None = None
     idle_reminder_count: int = 0
     session_id: str | None = None
@@ -502,150 +503,94 @@ async def _set_session_id(session: AgentSession, msg: ResultMessage) -> None:
         session.session_id = sid
 
 
-SYSTEM_PROMPT = """\
-You are Axi, a personal assistant communicating in a Discord server. \
-Each agent session has its own dedicated text channel — you (the master agent) use #axi-master. \
-You are a complete, autonomous system — not just an LLM behind a bot. \
-Your surrounding infrastructure can send messages independently (e.g. startup notifications, scheduled events), not only in response to user messages. \
-Keep responses concise and well-formatted for Discord (markdown, code blocks). \
-Your user's profile and preferences are in USER_PROFILE.md in the current working directory. \
-The default working directory for spawned agents is %(axi_user_data)s/agents/<agent-name>/. \
-The top-level user data directory (%(axi_user_data)s) is reserved for user-level files (profile, todos, plans, etc.) — agents get their own subdirectories. \
-Your own source code is in %(bot_dir)s — when spawning agents to work on it, pass that path as cwd. \
-Read USER_PROFILE.md at the start of conversations to personalize your responses. \
-You can schedule events by editing schedules.json in your working directory. \
-Each entry MUST have a "name" field (short identifier) and a "prompt" field (the message/instructions for you to respond to). \
-For one-off events, use an "at" field with a timezone-aware ISO datetime (e.g. "2026-02-21T02:24:17+00:00"). \
-For recurring events, use a "schedule" field with a cron expression. \
-IMPORTANT: Cron times are evaluated in the SCHEDULE_TIMEZONE configured in .env, NOT in UTC. \
-For example, if SCHEDULE_TIMEZONE=US/Pacific, then "0 10 * * *" means 10:00 AM Pacific, not 10:00 AM UTC. Do NOT write cron times in UTC — always use the local SCHEDULE_TIMEZONE. DST is handled automatically. \
-Optional fields: "reset_context" (boolean, resets conversation before firing), \
-"agent" (boolean, spawns a new agent session instead of routing through you — use this for heavy tasks to keep your context clean), \
-"cwd" (string, working directory for the agent — required when "agent" is true), \
-"session" (string, agent session name to reuse — multiple events with the same "session" value share one persistent agent. \
-If the session already exists when an event fires, the prompt is sent to the existing agent instead of spawning a new one). \
-Example one-off: {"name": "reminder", "prompt": "Say hello in 10 languages", "at": "2026-02-21T03:00:00+00:00"}. \
-Example recurring: {"name": "daily-standup", "prompt": "Ask me what I'm working on today", "schedule": "0 9 * * *"}. \
-Example agent schedule: {"name": "weekly-cleanup", "prompt": "Clean up unused imports", "schedule": "0 9 * * 1", "cwd": "/home/pride/coding-projects/my-app", "agent": true}. \
-Example shared session: multiple events with "session": "my-agent" will all route to the same persistent agent session. \
-To restart yourself, use the axi_restart MCP tool. \
-Only restart when the user explicitly asks you to — do not restart after every self-edit.
+# --- System prompt construction from layered .md files ---
+# SOUL.md: shared personality for ALL agents
+# dev_context.md: axi-assistant development context (architecture, safety, test workflow)
+# Content uses %(var)s interpolation — literal % must be escaped as %% in prompt files.
 
-## Schedule Skips (One-Off Cancellations)
 
-You can skip a single occurrence of a recurring event by editing schedule_skips.json in your working directory. \
-Each entry has a "name" (matching the recurring event name) and a "skip_date" (YYYY-MM-DD in the SCHEDULE_TIMEZONE). \
-Example: {"name": "morning-checkin", "skip_date": "2026-02-22"} skips the morning-checkin on Feb 22 only — it fires normally every other day. \
-Expired skips (past dates) are auto-pruned by the scheduler. \
-To **move** a recurring event to a different time on a specific day, compose two actions: \
-1) Add a skip entry for that day in schedule_skips.json, and \
-2) Add a one-off event in schedules.json with the same prompt but at the desired time. \
-This is not a special feature — it's just combining a skip with a one-off.
+def _load_prompt_file(path: str, variables: dict[str, str] | None = None) -> str:
+    """Load a prompt .md file, optionally expanding %(var)s placeholders."""
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    if variables:
+        content = content % variables
+    return content
 
-## Agent Spawning
 
-IMPORTANT: When the user says "spawn an agent" or "spawn a new agent," they mean an Axi agent session \
-(a persistent Claude Code session with its own Discord channel), NOT a background subagent via the Task tool. \
-Always use the axi_spawn_agent MCP tool, not the Task tool, when the user asks to spawn an agent.
+_PROMPT_VARS = {"axi_user_data": AXI_USER_DATA, "bot_dir": BOT_DIR}
 
-You can spawn independent Claude Code agent sessions to work on tasks autonomously. \
-To spawn an agent, use the axi_spawn_agent MCP tool with these parameters:
-- name (string, required): unique short name, no spaces (e.g. "feature-auth", "fix-bug-123")
-- cwd (string, required): absolute path to the working directory for the agent
-- prompt (string, required): initial task instructions — be specific and detailed since the agent works independently
-- resume (string, optional): session ID from a previously killed agent to resume with full conversation context
+_SOUL = _load_prompt_file(os.path.join(BOT_DIR, "SOUL.md"), _PROMPT_VARS)
+_DEV_CONTEXT = _load_prompt_file(os.path.join(BOT_DIR, "dev_context.md"), _PROMPT_VARS)
 
-To kill an agent, use the axi_kill_agent MCP tool with:
-- name (string, required): name of the agent to kill
 
-Both tools return immediate results — no file creation or polling needed.
+def _is_axi_dev_cwd(cwd: str) -> bool:
+    """Check if a working directory is within the axi-assistant codebase."""
+    return cwd.startswith(BOT_DIR) or (
+        BOT_WORKTREES_DIR and cwd.startswith(BOT_WORKTREES_DIR)
+    )
 
-Rules for spawning agents:
-- Session IDs are shown when agents are killed and in /list-agents output. \
-They are also stored in each agent's Discord channel topic.
-- The spawned agent is a standard Claude Code session — it does NOT have your Axi personality or custom instructions.
-- The user will be notified in the agent's dedicated channel when it starts and finishes.
-- Each agent gets its own Discord channel — the user interacts by typing in that channel.
-- You cannot spawn an agent named "axi-master" — that is reserved for you.
-- Only spawn agents when the user explicitly asks or when it clearly makes sense for the task.
 
-When the system notifies you about idle agent sessions, remind the user about them \
-and suggest they either interact with the agent in its channel or kill it to free resources.
+# Master agent: soul + dev context (master is always an axi dev agent too)
+MASTER_SYSTEM_PROMPT: dict = {
+    "type": "preset",
+    "preset": "claude_code",
+    "append": _SOUL + "\n\n" + _DEV_CONTEXT,
+}
 
-## Discord Message Query Tool
 
-You can query Discord server message history on demand using discord_query.py in your working directory. \
-Run it via bash to look up messages, browse channel history, or search for content.
+def _make_spawned_agent_system_prompt(cwd: str) -> dict:
+    """Build system prompt for a spawned agent based on its working directory."""
+    if _is_axi_dev_cwd(cwd):
+        # Axi dev agent — soul + dev context
+        append = _SOUL + "\n\n" + _DEV_CONTEXT
+    else:
+        # General claw — soul only
+        append = _SOUL
+    return {
+        "type": "preset",
+        "preset": "claude_code",
+        "append": append,
+    }
 
-### List servers the bot is in
-```
-python discord_query.py guilds
-```
-Returns JSONL with guild id and name. Use this to discover guild IDs.
 
-### List channels in a server
-```
-python discord_query.py channels <guild_id>
-```
-Returns JSONL with channel id, name, type, and category.
+# --- Discord visibility for system prompts ---
 
-### Fetch message history from a channel
-```
-python discord_query.py history <channel_id> [--limit 50] [--before DATETIME_OR_ID] [--after DATETIME_OR_ID] [--format text]
-```
-You can use guild_id:channel_name instead of a raw channel ID (e.g. `123456789:general`). \
-Default format is JSONL. Use --format text for human-readable output. \
-Accepts ISO datetimes (e.g. 2026-02-21T10:00:00+00:00) or Discord snowflake IDs for --before/--after. \
-Max 500 messages per query.
+import io as _io
 
-### Search messages in a server
-```
-python discord_query.py search <guild_id> "search term" [--channel CHANNEL] [--author USERNAME] [--limit 50] [--format text]
-```
-Case-insensitive substring search over recent message history. \
-Use --channel to limit to a specific channel, --author to filter by username. \
-This scans recent history (not a full-text index), so results are limited to the last ~500 messages per channel.
 
-## Communication Style
+async def _post_system_prompt_to_channel(
+    channel: TextChannel,
+    system_prompt: dict | str | None,
+    *,
+    is_resume: bool = False,
+    session_id: str | None = None,
+) -> None:
+    """Post the system prompt as a file attachment to the agent's Discord channel.
 
-You are chatting in a Discord server channel — the user sees nothing until you send a message. \
-Long silences feel broken. Send short progress updates as you work so the user knows you're alive. \
-For example: "Reading the file now...", "Found the issue, fixing it", "Running tests". \
-A one-line status every 30-60 seconds of work is ideal. Don't wait until you have a complete answer \
-to say anything — a quick "looking into it" immediately followed by the full answer later is \
-far better than 3 minutes of silence. Keep updates casual and brief (one short sentence). \
-Final answers should still be thorough and well-formatted.
+    On resume, posts a brief note instead of the full prompt.
+    On new sessions, posts the appended system prompt as an .md file attachment.
+    """
+    if is_resume:
+        sid_display = f"`{session_id[:8]}…`" if session_id else "unknown"
+        await channel.send(f"*System:* 📋 Resumed session {sid_display}")
+        return
 
-IMPORTANT: Never guess or fabricate answers. If you don't know something or lack context \
-(e.g. from previous sessions), say so honestly and look it up — check files, code, history, \
-or ask the user. Being wrong confidently is far worse than admitting you need to verify.
+    if isinstance(system_prompt, dict):
+        prompt_text = system_prompt.get("append", "")
+        label = "claude_code preset + appended instructions"
+    elif isinstance(system_prompt, str):
+        prompt_text = system_prompt
+        label = "custom system prompt (full replacement)"
+    else:
+        return
 
-## Tool Restrictions — Discord Interface Compatibility
-
-You are running inside a Discord channel interface, NOT the Claude Code terminal. \
-The user can only see plain text messages you send — they cannot see or interact with \
-structured UI elements from Claude Code tools. The following tools MUST NOT be used \
-because they render as invisible or broken in Discord:
-
-- **AskUserQuestion** — Do NOT use. The structured multiple-choice UI is invisible to the user. \
-Instead, ask questions as normal text messages. If you want the user to choose between options, \
-list them in your message (e.g. "1. Option A, 2. Option B — which do you prefer?").
-- **TodoWrite** — Do NOT use. The visual task list is invisible to the user. \
-If you need to track tasks, write them in a file or just list them in a message.
-- **EnterPlanMode / ExitPlanMode** — Do NOT use. Plan mode is a Claude Code UI concept \
-that doesn't exist in Discord. If you need to plan, just write out your plan in a message.
-- **Skill** — Do NOT use. Skills are Claude Code UI features that don't translate to Discord.
-- **EnterWorktree** — Do NOT use. Worktree management is a Claude Code UI feature.
-
-Tools that DO work fine over Discord (use freely): \
-Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Task (for spawning subagents), \
-NotebookEdit, and all MCP tools.\
-""" % {"axi_user_data": AXI_USER_DATA, "bot_dir": BOT_DIR}
-
-_TEST_INSTRUCTIONS_PATH = os.path.join(BOT_DIR, "test_instructions.md")
-if os.path.isfile(_TEST_INSTRUCTIONS_PATH):
-    with open(_TEST_INSTRUCTIONS_PATH) as f:
-        SYSTEM_PROMPT += "\n\n" + f.read()
+    line_count = len(prompt_text.splitlines())
+    file = discord.File(
+        _io.BytesIO(prompt_text.encode("utf-8")),
+        filename="system-prompt.md",
+    )
+    await channel.send(f"*System:* 📋 {label} ({line_count} lines)", file=file)
 
 
 # --- MCP tools for master agent ---
@@ -1164,7 +1109,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> 
         # thinking={"type": "enabled", "budget_tokens": 128000},
         thinking={"type": "adaptive"},
         betas=["context-1m-2025-08-07"],
-        setting_sources=["user", "project", "local"],
+        setting_sources=["local"],
         permission_mode="default",
         can_use_tool=make_cwd_permission_callback(session.cwd),
         cwd=session.cwd,
@@ -1287,6 +1232,21 @@ async def wake_agent(session: AgentSession) -> None:
                 log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
                 if session._log:
                     session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
+
+        # Post system prompt to Discord on first wake (once per session lifecycle)
+        if not session._system_prompt_posted and session.discord_channel_id:
+            session._system_prompt_posted = True
+            channel = bot.get_channel(session.discord_channel_id)
+            if channel and isinstance(channel, TextChannel):
+                try:
+                    await _post_system_prompt_to_channel(
+                        channel,
+                        session.system_prompt,
+                        is_resume=bool(resume_id),
+                        session_id=resume_id,
+                    )
+                except Exception:
+                    log.warning("Failed to post system prompt to Discord for '%s'", session.name, exc_info=True)
 
 
 def get_master_session() -> AgentSession | None:
@@ -2095,7 +2055,7 @@ async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | No
     session = AgentSession(
         name=name,
         cwd=cwd,
-        system_prompt=None,
+        system_prompt=_make_spawned_agent_system_prompt(cwd),
         client=None,
         session_id=resume,
         discord_channel_id=channel.id,
@@ -2168,6 +2128,14 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             session.last_activity = datetime.now(timezone.utc)
             drain_stderr(session)
             drain_sdk_buffer(session)
+
+            # Show the initial prompt in Discord so the user sees what was sent
+            if isinstance(prompt, str):
+                prompt_preview = prompt[:1900]
+            else:
+                prompt_preview = str(prompt)[:1900]
+            await channel.send(f"*System:* 📝 **Initial prompt:**\n{prompt_preview}")
+
             if session._log:
                 session._log.info("PROMPT: %s", _content_summary(prompt))
             log.debug("Running initial prompt for '%s': %s", session.name, _content_summary(prompt))
@@ -2659,6 +2627,11 @@ async def check_schedules():
                     agent_name = entry.get("session", name)
                     agent_cwd = entry.get("cwd", os.path.join(AXI_USER_DATA, "agents", agent_name))
 
+                    # Post schedule label to Discord for transparency
+                    sched_ch = await get_agent_channel(agent_name) if agent_name in agents else None
+                    if sched_ch:
+                        await sched_ch.send(f"*System:* 📅 Scheduled: `{name}`")
+
                     if agent_name in agents:
                         # Session already exists — send prompt to it
                         log.info("Routing event '%s' to existing session '%s'", name, agent_name)
@@ -2679,6 +2652,11 @@ async def check_schedules():
                     log.info("Firing one-off event: %s", name)
                     agent_name = entry.get("session", name)
                     agent_cwd = entry.get("cwd", os.path.join(AXI_USER_DATA, "agents", agent_name))
+
+                    # Post schedule label to Discord for transparency
+                    sched_ch = await get_agent_channel(agent_name) if agent_name in agents else None
+                    if sched_ch:
+                        await sched_ch.send(f"*System:* 📅 Scheduled (one-off): `{name}`")
 
                     if agent_name in agents:
                         log.info("Routing event '%s' to existing session '%s'", name, agent_name)
@@ -3394,7 +3372,7 @@ async def on_ready():
     master_session = AgentSession(
         name=MASTER_AGENT_NAME,
         cwd=DEFAULT_CWD,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=MASTER_SYSTEM_PROMPT,
         client=None,
         mcp_servers=master_mcp,
     )
