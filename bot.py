@@ -74,7 +74,6 @@ SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
 ENABLE_CRASH_HANDLER = os.environ.get("ENABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
-README_CHANNEL_ID = int(os.environ["README_CHANNEL_ID"]) if os.environ.get("README_CHANNEL_ID") else None
 README_CONTENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "readme_content.md")
 
 # --- Discord bot setup ---
@@ -3350,9 +3349,8 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
 # --- Readme channel sync ---
 
 async def sync_readme_channel() -> None:
-    """Sync the readme channel: find or create it, lock permissions, update message.
+    """Sync the readme channel: find or create #readme, lock permissions, update message.
 
-    Uses README_CHANNEL_ID if set, otherwise finds or creates a #readme channel.
     Skips entirely if readme_content.md doesn't exist.
     """
     # Load content from file — if no file, skip silently
@@ -3370,19 +3368,9 @@ async def sync_readme_channel() -> None:
         log.warning("No guild available — skipping readme sync")
         return
 
-    # Resolve the channel: explicit ID, or find/create by name
+    # Find or create #readme channel
     channel = None
-    if README_CHANNEL_ID is not None:
-        channel = bot.get_channel(README_CHANNEL_ID)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(README_CHANNEL_ID)
-            except discord.NotFound:
-                log.warning("README_CHANNEL_ID %s not found — will create instead", README_CHANNEL_ID)
-
-    if channel is None:
-        # Look for existing #readme channel (outside categories)
-        for ch in guild.text_channels:
+    for ch in guild.text_channels:
             if ch.name == "readme" and ch.category is None:
                 channel = ch
                 break
