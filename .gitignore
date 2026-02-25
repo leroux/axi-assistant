@@ -31,8 +31,9 @@ server_log.jsonl
 projects/
 personal/
 
-# Nova instructions (instance-specific)
+# Instance-specific instructions (gitignored, loaded into system prompt)
 nova_instructions.md
+test_instructions.md
 
 # Runtime signals and state
 .restart_requested
@@ -41,4 +42,6 @@ nova_instructions.md
 .crash_log_snapshot
 .active_sessions
 .bot_output.log
+.bridge.log
+.bot.lock
 logs/

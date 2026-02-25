@@ -33,6 +33,7 @@ CRASH_ANALYSIS_MARKER = ".crash_analysis"
 LOG_FILE = ".bot_output.log"
 BRIDGE_SOCKET = ".bridge.sock"
 MAX_RUNTIME_CRASHES = 3
+ENABLE_ROLLBACK = os.environ.get("ENABLE_ROLLBACK", "").lower() in ("1", "true", "yes")
 
 DIR = Path(__file__).resolve().parent
 
@@ -272,6 +273,15 @@ def main():
         log.warning("Quick crash detected (%ds < %ds threshold).", elapsed, CRASH_THRESHOLD)
 
         crash_log = tail_log()
+
+        if not ENABLE_ROLLBACK:
+            log.info("Rollback disabled. Writing crash marker and relaunching...")
+            write_crash_marker(code, elapsed, crash_log)
+            runtime_crash_count += 1
+            if runtime_crash_count >= MAX_RUNTIME_CRASHES:
+                log.error("Max consecutive crashes (%d) reached. Stopping.", MAX_RUNTIME_CRASHES)
+                sys.exit(code)
+            continue
 
         if rollback_attempted:
             log.error("Rollback already attempted. Stopping to prevent infinite loop.")

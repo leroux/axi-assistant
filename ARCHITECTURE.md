@@ -178,9 +178,8 @@ The supervisor uses a **60-second threshold** (`CRASH_THRESHOLD = 60`) to distin
 | `SCHEDULE_TIMEZONE` | No | `UTC` | IANA timezone for cron evaluation (via `ZoneInfo`) |
 | `DISCORD_GUILD_ID` | Yes | — | Target Discord server ID. `KeyError` at import if missing. Cast to `int`. |
 | `DAY_BOUNDARY_HOUR` | No | `0` | Hour (0-23) when a new "logical day" starts for `get_date_and_time` MCP tool. Cast to `int`. |
-| `DISABLE_CRASH_HANDLER` | No | `""` | When `1`/`true`/`yes`, skips spawning crash-handler agents |
-| `EXTRA_ALLOWED_DIRS` | No | `""` | Comma-separated additional writable directories. Parsed via `[os.path.realpath(d.strip()) for d in ...split(",") if d.strip()]`. Also gates the `"discord"` MCP server (non-empty → attach discord MCP to master). |
-| `EXTRA_SYSTEM_PROMPT_FILE` | No | `""` | Path to file whose contents are appended to master's system prompt |
+| `ENABLE_CRASH_HANDLER` | No | `""` | When `1`/`true`/`yes`, auto-spawns crash-handler agents on crash recovery |
+| `ENABLE_ROLLBACK` | No | `""` | When `1`/`true`/`yes` (in supervisor.py), enables automatic git rollback on startup crashes |
 
 Required env vars (`DISCORD_TOKEN`, `ALLOWED_USER_IDS`, `DISCORD_GUILD_ID`) use `os.environ["KEY"]` — a missing key raises `KeyError` at module load time, crashing immediately (supervisor classifies as startup crash).
 
@@ -365,9 +364,9 @@ Two independent layers restrict what agents can do:
 
 **Layer 1 — OS-level sandbox**: `sandbox={"enabled": True, "autoAllowBashIfSandboxed": True}`. Claude Code's built-in sandboxing — bash commands run in an isolated environment, and `autoAllowBashIfSandboxed` means bash commands are auto-approved since the sandbox contains blast radius.
 
-**Layer 2 — `make_cwd_permission_callback(allowed_cwd)`**: Returns an async `_check_permission(tool_name, tool_input, ctx)` closure. For file-writing tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`), checks that the target path (from `file_path` or `notebook_path`) resolves (via `os.path.realpath()`) to within any of: the agent's `cwd`, `AXI_USER_DATA`, or any path in `EXTRA_ALLOWED_DIRS`. Returns `PermissionResultAllow()` or `PermissionResultDeny(message=...)`. All other tools (reads, bash, web) are allowed everywhere.
+**Layer 2 — `make_cwd_permission_callback(allowed_cwd)`**: Returns an async `_check_permission(tool_name, tool_input, ctx)` closure. For file-writing tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`), checks that the target path (from `file_path` or `notebook_path`) resolves (via `os.path.realpath()`) to within any of: the agent's `cwd`, `AXI_USER_DATA`, or (for code-rooted agents) `BOT_WORKTREES_DIR`. Returns `PermissionResultAllow()` or `PermissionResultDeny(message=...)`. All other tools (reads, bash, web) are allowed everywhere. "Code-rooted" means the agent's cwd is under `BOT_DIR` or `BOT_WORKTREES_DIR`.
 
-**CWD restriction for spawn**: `axi_spawn_agent` validates that the requested cwd is under `AXI_USER_DATA`, `BOT_DIR`, or any `EXTRA_ALLOWED_DIRS` path.
+**CWD restriction for spawn**: `axi_spawn_agent` validates that the requested cwd is under `AXI_USER_DATA`, `BOT_DIR`, or `BOT_WORKTREES_DIR`.
 
 ### 4.13 Message Flow — User to Agent
 
@@ -510,7 +509,7 @@ Contains three tools: `axi_spawn_agent`, `axi_kill_agent`, `axi_restart`.
 Parameters: `name` (string, required), `cwd` (string, optional — defaults to `AXI_USER_DATA/agents/<name>/`), `prompt` (string, required), `resume` (string, optional session ID).
 
 Validation:
-- CWD must be under `AXI_USER_DATA`, `BOT_DIR`, or any `EXTRA_ALLOWED_DIRS` path
+- CWD must be under `AXI_USER_DATA`, `BOT_DIR`, or `BOT_WORKTREES_DIR`
 - Name cannot be empty or `"axi-master"`
 - Name must be unique (unless `resume` is set, in which case it calls `reclaim_agent_name()` first)
 - Agent count must be under `MAX_AGENTS` (20)
@@ -542,7 +541,7 @@ No parameters. Uses the `arrow` library (imported inline). Returns JSON with:
 
 ### 5.3 The `"discord"` MCP Server (Master, Conditional)
 
-Contains three tools using `httpx.AsyncClient` for Discord REST API calls (base URL: `https://discord.com/api/v10`, timeout 15s). **Only attached to the master when `EXTRA_ALLOWED_DIRS` is set** — this gates cross-instance communication capability.
+Contains three tools using `httpx.AsyncClient` for Discord REST API calls (base URL: `https://discord.com/api/v10`, timeout 15s). **Only attached to the master when `BOT_WORKTREES_DIR` exists on disk** — this gates cross-instance communication capability.
 
 #### `discord_list_channels`
 
@@ -752,7 +751,7 @@ If agent exists: sleeps it, removes from `agents` dict, sends "Recycled previous
 
 1. Install global async exception handler (`_handle_task_exception`)
 2. Guard against duplicate `on_ready` (Discord gateway reconnects) via `_on_ready_fired`
-3. Register master agent as **sleeping** (`client=None`) with `"axi"` MCP server (and `"discord"` MCP if `EXTRA_ALLOWED_DIRS` is set)
+3. Register master agent as **sleeping** (`client=None`) with `"axi"` MCP server (and `"discord"` MCP if `BOT_WORKTREES_DIR` exists)
 4. Set up guild infrastructure: find/create Active and Killed categories, sync permissions
 5. Create/find master channel, bind to session, set topic to "Axi master control channel"
 6. Reconstruct sleeping agents from existing Active category channels
@@ -761,12 +760,12 @@ If agent exists: sleeps it, removes from `agents` dict, sends "Recycled previous
 9. Check for rollback marker → parse JSON, delete file, format notification
 10. Check for crash analysis marker → parse JSON, delete file, format notification
 11. Send startup notification to master channel: rollback details, crash details, or simple "Axi restarted"
-12. If `DISABLE_CRASH_HANDLER` is set, skip crash handler spawn
-13. Otherwise, if either marker exists: `reclaim_agent_name("crash-handler")` then `spawn_agent("crash-handler", BOT_DIR, crash_prompt)` with detailed analysis instructions
+12. If `ENABLE_CRASH_HANDLER` is set, spawn crash handler agent for any detected crash
+13. If either marker exists and handler is enabled: `reclaim_agent_name("crash-handler")` then `spawn_agent("crash-handler", BOT_DIR, crash_prompt)` with detailed analysis instructions
 
 ### 10.1 Crash Handler Agent
 
-When either marker exists (and `DISABLE_CRASH_HANDLER` is not set), a `crash-handler` agent is spawned with a prompt containing:
+When either marker exists (and `ENABLE_CRASH_HANDLER` is set), a `crash-handler` agent is spawned with a prompt containing:
 - Exit code, uptime, timestamp
 - Rollback details (what was stashed/reverted, commit hashes)
 - Last 200 lines of crash log
@@ -820,7 +819,7 @@ The master agent's system prompt (~140 lines) defines Axi's identity and capabil
 
 **Interpolated values**: `%(axi_user_data)s` and `%(bot_dir)s` are substituted via `%` formatting at module load time.
 
-**Extra system prompt**: If `EXTRA_SYSTEM_PROMPT_FILE` is set and the file exists, its contents are appended with `"\n\n"` separator. Used for instance-specific instructions (e.g. Nova management).
+**Extra system prompt**: If `test_instructions.md` exists in `BOT_DIR`, its contents are appended with `"\n\n"` separator. Used for test instance management instructions.
 
 **Spec divergence**: The system prompt documents `agent` and `reset_context` as valid schedule fields, but the scheduler does not implement them (see Section 7.2).
 
@@ -915,9 +914,9 @@ Reproducer for a ClaudeSDKClient subprocess leak bug in claude-agent-sdk. Docume
 
 ## 17. Self-Modification Capability
 
-Axi can modify its own source code. The master agent's `cwd` is set by `DEFAULT_CWD`, which defaults to `os.getcwd()` — in practice the bot directory, since `supervisor.py` does `os.chdir(DIR)` before launching. The `can_use_tool` callback allows writes within `cwd`, `AXI_USER_DATA`, and any `EXTRA_ALLOWED_DIRS` paths — which includes `bot.py`, `schedules.json`, `USER_PROFILE.md`, etc.
+Axi can modify its own source code. The master agent's `cwd` is set by `DEFAULT_CWD`, which defaults to `os.getcwd()` — in practice the bot directory, since `supervisor.py` does `os.chdir(DIR)` before launching. The `can_use_tool` callback allows writes within `cwd`, `AXI_USER_DATA`, and (for code-rooted agents) `BOT_WORKTREES_DIR` — which includes `bot.py`, `schedules.json`, `USER_PROFILE.md`, etc.
 
-The safety net for self-modification is the supervisor's rollback mechanism. If a code change crashes the bot on startup (within 60 seconds), the supervisor reverts the change and spawns a crash-handler agent to analyze what went wrong.
+The safety net for self-modification is the supervisor's optional rollback mechanism (enabled via `ENABLE_ROLLBACK=1`). If enabled and a code change crashes the bot on startup (within 60 seconds), the supervisor reverts the change. If `ENABLE_CRASH_HANDLER=1` is also set, a crash-handler agent is spawned to analyze what went wrong.
 
 The system prompt instructs Axi to only restart when explicitly asked — not after every self-edit.
 

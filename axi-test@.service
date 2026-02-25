@@ -1,0 +1,13 @@
+[Unit]
+Description=Axi Test Instance (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/axi-tests/%i
+ExecStart=/home/ubuntu/.local/bin/uv run python supervisor.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+Environment="PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

@@ -72,9 +72,7 @@ AXI_USER_DATA = os.environ.get("AXI_USER_DATA", os.path.expanduser("~/axi-user-d
 SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
-DISABLE_CRASH_HANDLER = os.environ.get("DISABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
-EXTRA_ALLOWED_DIRS = [os.path.realpath(d.strip()) for d in os.environ.get("EXTRA_ALLOWED_DIRS", "").split(",") if d.strip()]
-EXTRA_SYSTEM_PROMPT_FILE = os.environ.get("EXTRA_SYSTEM_PROMPT_FILE", "")
+ENABLE_CRASH_HANDLER = os.environ.get("ENABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
 
 # --- Discord bot setup ---
 
@@ -89,6 +87,7 @@ bot = Bot(command_prefix="!", intents=intents)
 # --- Scheduler state ---
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+BOT_WORKTREES_DIR = os.path.join(os.path.dirname(BOT_DIR), "axi-tests")
 SCHEDULES_PATH = os.path.join(BOT_DIR, "schedules.json")
 HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
 SKIPS_PATH = os.path.join(BOT_DIR, "schedule_skips.json")
@@ -96,6 +95,7 @@ ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
 schedule_last_fired: dict[str, datetime] = {}
+_bot_start_time = datetime.now(timezone.utc)
 
 # --- Agent session management ---
 
@@ -348,15 +348,24 @@ def make_cwd_permission_callback(allowed_cwd: str):
     """Create a can_use_tool callback that restricts file writes to allowed_cwd and AXI_USER_DATA."""
     allowed = os.path.realpath(allowed_cwd)
     user_data = os.path.realpath(AXI_USER_DATA)
+    worktrees = os.path.realpath(BOT_WORKTREES_DIR)
+    bot_dir = os.path.realpath(BOT_DIR)
+
+    # Agents rooted in bot code or worktree dirs also get worktree write access
+    is_code_agent = (allowed == bot_dir or allowed.startswith(bot_dir + os.sep) or
+                     allowed == worktrees or allowed.startswith(worktrees + os.sep))
+    bases = [allowed, user_data]
+    if is_code_agent:
+        bases.append(worktrees)
 
     async def _check_permission(
         tool_name: str, tool_input: dict, ctx: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
-        # File-writing tools — check path is within cwd or user data
+        # File-writing tools — check path is within allowed bases
         if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
             resolved = os.path.realpath(path)
-            for base in (allowed, user_data, *EXTRA_ALLOWED_DIRS):
+            for base in bases:
                 if resolved == base or resolved.startswith(base + os.sep):
                     return PermissionResultAllow()
             return PermissionResultDeny(
@@ -632,8 +641,9 @@ Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Task (for spawning sub
 NotebookEdit, and all MCP tools.\
 """ % {"axi_user_data": AXI_USER_DATA, "bot_dir": BOT_DIR}
 
-if EXTRA_SYSTEM_PROMPT_FILE and os.path.isfile(EXTRA_SYSTEM_PROMPT_FILE):
-    with open(EXTRA_SYSTEM_PROMPT_FILE) as f:
+_TEST_INSTRUCTIONS_PATH = os.path.join(BOT_DIR, "test_instructions.md")
+if os.path.isfile(_TEST_INSTRUCTIONS_PATH):
+    with open(_TEST_INSTRUCTIONS_PATH) as f:
         SYSTEM_PROMPT += "\n\n" + f.read()
 
 
@@ -661,9 +671,9 @@ async def axi_spawn_agent(args):
     agent_prompt = args.get("prompt", "")
     agent_resume = args.get("resume")
 
-    ALLOWED_CWDS = (os.path.realpath(AXI_USER_DATA), os.path.realpath(BOT_DIR), *EXTRA_ALLOWED_DIRS)
+    ALLOWED_CWDS = (os.path.realpath(AXI_USER_DATA), os.path.realpath(BOT_DIR), os.path.realpath(BOT_WORKTREES_DIR))
     if not any(agent_cwd == d or agent_cwd.startswith(d + os.sep) for d in ALLOWED_CWDS):
-        return {"content": [{"type": "text", "text": f"Error: cwd must be under {AXI_USER_DATA} or {BOT_DIR}."}], "is_error": True}
+        return {"content": [{"type": "text", "text": f"Error: cwd must be under {AXI_USER_DATA}, {BOT_DIR}, or {BOT_WORKTREES_DIR}."}], "is_error": True}
 
     if not agent_name:
         return {"content": [{"type": "text", "text": "Error: 'name' is required and cannot be empty."}], "is_error": True}
@@ -2403,6 +2413,11 @@ def _init_shutdown_coordinator() -> None:
         if channel:
             await send_system(channel, message)
 
+    async def _send_goodbye() -> None:
+        master_ch = await get_master_channel()
+        if master_ch:
+            await master_ch.send("*System:* Shutting down — see you soon!")
+
     use_bridge = bridge_conn is not None and bridge_conn.is_alive
     shutdown_coordinator = ShutdownCoordinator(
         agents=agents,
@@ -2410,6 +2425,7 @@ def _init_shutdown_coordinator() -> None:
         close_bot_fn=bot.close,
         kill_fn=exit_for_restart if use_bridge else kill_supervisor,
         notify_fn=_notify_agent_channel,
+        goodbye_fn=_send_goodbye,
         bridge_mode=use_bridge,
     )
 
@@ -2773,6 +2789,19 @@ async def agent_autocomplete(interaction, current: str) -> list[app_commands.Cho
         for name in agents.keys()
         if current.lower() in name.lower()
     ][:25]
+
+
+@bot.tree.command(name="ping", description="Check bot latency and uptime.")
+async def ping_command(interaction: discord.Interaction):
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+    uptime = datetime.now(timezone.utc) - _bot_start_time
+    hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    await interaction.response.send_message(
+        f"Pong! Latency: {round(bot.latency * 1000)}ms | Uptime: {hours}h {minutes}m {seconds}s"
+    )
 
 
 @bot.tree.command(name="list-agents", description="List all active agent sessions.")
@@ -3251,7 +3280,7 @@ async def on_ready():
 
     # Register master agent as sleeping — it will wake on first message
     master_mcp = {"axi": _axi_mcp_server}
-    if EXTRA_ALLOWED_DIRS:
+    if os.path.isdir(BOT_WORKTREES_DIR):
         master_mcp["discord"] = _discord_mcp_server
     master_session = AgentSession(
         name=MASTER_AGENT_NAME,
@@ -3358,24 +3387,29 @@ async def on_ready():
                 msg_lines.append(
                     "Stashed changes: `git stash list` / `git stash show -p` / `git stash pop`"
                 )
-            msg_lines.append("Spawning crash analysis agent...")
+            if ENABLE_CRASH_HANDLER:
+                msg_lines.append("Spawning crash analysis agent...")
             await master_ch.send("\n".join(msg_lines))
         elif crash_info:
             exit_code = crash_info.get("exit_code", "unknown")
             uptime = crash_info.get("uptime_seconds", "?")
             timestamp = crash_info.get("timestamp", "unknown")
-            await master_ch.send(
+            crash_msg = (
+                f"Ow... I think I just blacked out for a second there. What happened?\n\n"
                 f"*System:* **Runtime crash detected.**\n"
-                f"Axi crashed after {uptime}s of uptime (exit code {exit_code}) at {timestamp}.\n"
-                f"Spawning crash analysis agent..."
+                f"Axi crashed after {uptime}s of uptime (exit code {exit_code}) at {timestamp}."
             )
+            if ENABLE_CRASH_HANDLER:
+                crash_msg += "\nSpawning crash analysis agent..."
+            await master_ch.send(crash_msg)
         else:
             await master_ch.send("*System:* Axi restarted.")
         log.info("Sent restart notification to master channel")
 
     # Spawn crash handler agent if a crash was detected (startup or runtime)
-    if DISABLE_CRASH_HANDLER and (rollback_info or crash_info):
-        log.info("Crash handler disabled via DISABLE_CRASH_HANDLER; skipping agent spawn")
+    if not ENABLE_CRASH_HANDLER:
+        if rollback_info or crash_info:
+            log.info("Crash handler not enabled (set ENABLE_CRASH_HANDLER=1 to auto-spawn)")
     elif rollback_info:
         crash_log = rollback_info.get("crash_log", "(no crash log available)")
         exit_code = rollback_info.get("exit_code", "unknown")

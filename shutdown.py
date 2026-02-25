@@ -54,6 +54,7 @@ class Sleepable(Protocol):
 SleepFn = Callable[[Sleepable], Awaitable[None]]       # sleep one agent
 CloseBotFn = Callable[[], Awaitable[None]]              # close discord bot
 NotifyFn = Callable[[str, str], Awaitable[None]]        # (agent_name, message) → send status
+GoodbyeFn = Callable[[], Awaitable[None]]               # send goodbye message to master channel
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,7 @@ class ShutdownCoordinator:
         close_bot_fn: CloseBotFn,
         kill_fn: Callable[[], None] = kill_supervisor,
         notify_fn: NotifyFn | None = None,
+        goodbye_fn: GoodbyeFn | None = None,
         deadline_timeout: float = SHUTDOWN_DEADLINE,
         bot_close_timeout: float = BOT_CLOSE_TIMEOUT,
         bridge_mode: bool = False,
@@ -146,6 +148,7 @@ class ShutdownCoordinator:
         self._close_bot_fn = close_bot_fn
         self._kill_fn = kill_fn
         self._notify_fn = notify_fn
+        self._goodbye_fn = goodbye_fn
         self._deadline_timeout = deadline_timeout
         self._bot_close_timeout = bot_close_timeout
         self._bridge_mode = bridge_mode
@@ -205,6 +208,12 @@ class ShutdownCoordinator:
         process and will be reconnected after restart.
         """
         _start_deadline_thread(self._deadline_timeout)
+
+        if self._goodbye_fn is not None:
+            try:
+                await self._goodbye_fn()
+            except Exception:
+                log.exception("Failed to send goodbye message")
 
         if not self._bridge_mode:
             await self.sleep_all(skip=skip_agent)
