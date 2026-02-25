@@ -194,8 +194,8 @@ def wait_for_slot(config, explicit_guild, instance_name, timeout, poll_interval=
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            print(f"\nError: Timed out after {timeout}s waiting for a bot token slot", file=sys.stderr)
-            print("Either stop an instance or add another bot to the config", file=sys.stderr)
+            print(f"\nCould not reserve a bot token slot after waiting {timeout}s.", file=sys.stderr)
+            print("All bot tokens are still in use. Please ask the user how to proceed.", file=sys.stderr)
             sys.exit(1)
 
         sleep_time = min(poll_interval, remaining)
@@ -588,8 +588,8 @@ def main():
     p_up.add_argument("--guild", help="Guild name from config (default: auto-pick)")
     p_up.add_argument("--wait", action="store_true",
                        help="Wait for a bot token slot if all are in use")
-    p_up.add_argument("--wait-timeout", type=int, default=600,
-                       help="Max seconds to wait for a slot (default: 600)")
+    p_up.add_argument("--wait-timeout", type=int, default=7200,
+                       help="Max seconds to wait for a slot (default: 7200)")
     p_up.set_defaults(func=cmd_up)
 
     # down
