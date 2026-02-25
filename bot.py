@@ -1311,6 +1311,9 @@ def _build_category_overwrites(guild: discord.Guild) -> dict[discord.Object | di
         guild.default_role: discord.PermissionOverwrite(
             send_messages=False,
             add_reactions=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            send_messages_in_threads=False,
             view_channel=True,
             read_message_history=True,
         ),
@@ -1318,6 +1321,10 @@ def _build_category_overwrites(guild: discord.Guild) -> dict[discord.Object | di
             send_messages=True,
             manage_channels=True,
             manage_messages=True,
+            manage_threads=True,
+            create_public_threads=True,
+            create_private_threads=True,
+            send_messages_in_threads=True,
             view_channel=True,
             read_message_history=True,
         ),
@@ -1326,6 +1333,9 @@ def _build_category_overwrites(guild: discord.Guild) -> dict[discord.Object | di
         overwrites[discord.Object(id=uid)] = discord.PermissionOverwrite(
             send_messages=True,
             add_reactions=True,
+            create_public_threads=True,
+            create_private_threads=True,
+            send_messages_in_threads=True,
             view_channel=True,
             read_message_history=True,
         )
