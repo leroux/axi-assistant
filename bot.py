@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import base64
+
 import discord
 from dotenv import load_dotenv
 from discord import Intents, app_commands, CategoryChannel, TextChannel
@@ -193,14 +195,71 @@ def drain_stderr(session: AgentSession) -> list[str]:
     return msgs
 
 
-async def _as_stream(text: str):
-    """Wrap a string prompt as an AsyncIterable for streaming mode (required by can_use_tool)."""
+async def _as_stream(content: str | list):
+    """Wrap a prompt as an AsyncIterable for streaming mode (required by can_use_tool).
+
+    ``content`` may be a plain string or a list of content blocks (text + image)
+    for multi-modal messages.
+    """
     yield {
         "type": "user",
         "session_id": "",
-        "message": {"role": "user", "content": text},
+        "message": {"role": "user", "content": content},
         "parent_tool_use_id": None,
     }
+
+
+# --- Image attachment support ---
+
+_SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB per image
+
+
+async def _extract_message_content(message: discord.Message) -> str | list:
+    """Extract text and image content from a Discord message.
+
+    Returns a plain string if there are no image attachments, or a list of
+    content blocks ``[{"type": "text", ...}, {"type": "image", ...}, ...]``
+    when images are present.
+    """
+    image_attachments = [
+        a for a in message.attachments
+        if a.content_type
+        and a.content_type.split(";")[0].strip() in _SUPPORTED_IMAGE_TYPES
+        and a.size <= _MAX_IMAGE_SIZE
+    ]
+
+    if not image_attachments:
+        return message.content
+
+    blocks: list[dict] = []
+    if message.content:
+        blocks.append({"type": "text", "text": message.content})
+
+    for attachment in image_attachments:
+        try:
+            data = await attachment.read()
+            b64 = base64.b64encode(data).decode("utf-8")
+            mime = attachment.content_type.split(";")[0].strip()
+            blocks.append({"type": "image", "data": b64, "mimeType": mime})
+            log.debug("Attached image: %s (%s, %d bytes)", attachment.filename, mime, len(data))
+        except Exception:
+            log.warning("Failed to download attachment %s", attachment.filename, exc_info=True)
+
+    return blocks if blocks else message.content
+
+
+def _content_summary(content: str | list) -> str:
+    """Short text summary of message content for logging."""
+    if isinstance(content, str):
+        return content[:200]
+    parts = []
+    for block in content:
+        if block.get("type") == "text":
+            parts.append(block["text"][:100])
+        elif block.get("type") == "image":
+            parts.append(f"[image:{block.get('mimeType', '?')}]")
+    return " ".join(parts)[:200]
 
 
 def drain_sdk_buffer(session: AgentSession) -> int:
@@ -1892,7 +1951,7 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
     asyncio.create_task(_run_initial_prompt(session, prompt, channel))
 
 
-async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextChannel) -> None:
+async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel: TextChannel) -> None:
     """Run the initial prompt for a spawned agent. Notifies when done."""
     try:
         timed_out = False
@@ -1920,8 +1979,8 @@ async def _run_initial_prompt(session: AgentSession, prompt: str, channel: TextC
             drain_stderr(session)
             drain_sdk_buffer(session)
             if session._log:
-                session._log.info("PROMPT: %s", prompt[:2000])
-            log.debug("Running initial prompt for '%s': %s", session.name, prompt[:200])
+                session._log.info("PROMPT: %s", _content_summary(prompt))
+            log.debug("Running initial prompt for '%s': %s", session.name, _content_summary(prompt))
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(prompt))
@@ -1964,7 +2023,7 @@ async def _process_message_queue(session: AgentSession) -> None:
         remaining = session.message_queue.qsize()
         log.debug("Processing queued message for '%s' (%d remaining)", session.name, remaining)
         if session._log:
-            session._log.info("QUEUED_MSG: %s", content[:2000])
+            session._log.info("QUEUED_MSG: %s", _content_summary(content))
         if remaining > 0:
             await send_system(channel, f"Processing queued message ({remaining} more in queue)…")
 
@@ -2205,7 +2264,9 @@ async def on_message(message):
     if message.author.id not in ALLOWED_USER_IDS:
         return
 
-    log.info("Message from %s in #%s: %s", message.author, message.channel.name, message.content[:200])
+    # Extract text + image content from the message (may be str or list of blocks)
+    content = await _extract_message_content(message)
+    log.info("Message from %s in #%s: %s", message.author, message.channel.name, _content_summary(content))
 
     if shutdown_coordinator and shutdown_coordinator.requested:
         await send_system(message.channel, "Bot is restarting — not accepting new messages.")
@@ -2244,7 +2305,7 @@ async def on_message(message):
 
     # Queue messages while rate limited (don't waste API calls)
     if _is_rate_limited() and not session.query_lock.locked():
-        await session.message_queue.put((message.content, message.channel))
+        await session.message_queue.put((content, message.channel))
         position = session.message_queue.qsize()
         log.debug("Rate-limited, queuing for '%s' (queue_size=%d)", agent_name, position)
         remaining = _format_time_remaining(_rate_limit_remaining_seconds())
@@ -2256,7 +2317,7 @@ async def on_message(message):
         return
 
     if session.query_lock.locked():
-        await session.message_queue.put((message.content, message.channel))
+        await session.message_queue.put((content, message.channel))
         position = session.message_queue.qsize()
         log.debug("Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position)
         await send_system(
@@ -2274,7 +2335,7 @@ async def on_message(message):
                 await wake_agent(session)
             except ConcurrencyLimitError:
                 log.info("Concurrency limit hit for '%s' — queuing message", agent_name)
-                await session.message_queue.put((message.content, message.channel))
+                await session.message_queue.put((content, message.channel))
                 position = session.message_queue.qsize()
                 awake = _count_awake_agents()
                 await send_system(
@@ -2297,11 +2358,11 @@ async def on_message(message):
         drain_stderr(session)
         drain_sdk_buffer(session)
         if session._log:
-            session._log.info("USER: %s", message.content)
+            session._log.info("USER: %s", _content_summary(content))
         log.debug("Starting query for '%s'", agent_name)
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
-                await session.client.query(_as_stream(message.content))
+                await session.client.query(_as_stream(content))
                 await stream_response_to_channel(session, message.channel)
         except TimeoutError:
             await _handle_query_timeout(session, message.channel)
