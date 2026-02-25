@@ -3350,50 +3350,79 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
 # --- Readme channel sync ---
 
 async def sync_readme_channel() -> None:
-    """Sync the readme channel: load content from file, lock permissions, update message."""
-    if README_CHANNEL_ID is None:
-        log.info("README_CHANNEL_ID not set — skipping readme sync")
-        return
+    """Sync the readme channel: find or create it, lock permissions, update message.
 
-    # Load content from file
+    Uses README_CHANNEL_ID if set, otherwise finds or creates a #readme channel.
+    Skips entirely if readme_content.md doesn't exist.
+    """
+    # Load content from file — if no file, skip silently
     try:
         readme_text = open(README_CONTENT_PATH).read().strip()
     except FileNotFoundError:
-        log.warning("readme_content.md not found at %s — skipping readme sync", README_CONTENT_PATH)
+        log.debug("readme_content.md not found — skipping readme sync")
         return
-
     if not readme_text:
-        log.warning("readme_content.md is empty — skipping readme sync")
+        log.debug("readme_content.md is empty — skipping readme sync")
         return
 
-    channel = bot.get_channel(README_CHANNEL_ID)
+    guild = target_guild
+    if guild is None:
+        log.warning("No guild available — skipping readme sync")
+        return
+
+    # Resolve the channel: explicit ID, or find/create by name
+    channel = None
+    if README_CHANNEL_ID is not None:
+        channel = bot.get_channel(README_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(README_CHANNEL_ID)
+            except discord.NotFound:
+                log.warning("README_CHANNEL_ID %s not found — will create instead", README_CHANNEL_ID)
+
     if channel is None:
+        # Look for existing #readme channel (outside categories)
+        for ch in guild.text_channels:
+            if ch.name == "readme" and ch.category is None:
+                channel = ch
+                break
+
+    if channel is None:
+        # Create it at the top of the channel list, outside any category
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                send_messages=False,
+                view_channel=True,
+                read_message_history=True,
+            ),
+            guild.me: discord.PermissionOverwrite(
+                send_messages=True,
+                manage_messages=True,
+                view_channel=True,
+                read_message_history=True,
+            ),
+        }
+        channel = await guild.create_text_channel("readme", overwrites=overwrites, position=0)
+        log.info("Created #readme channel")
+    else:
+        # Sync permissions on existing channel
         try:
-            channel = await bot.fetch_channel(README_CHANNEL_ID)
-        except discord.NotFound:
-            log.warning("Readme channel %s not found — skipping", README_CHANNEL_ID)
-            return
-
-    guild = channel.guild
-
-    # Lock permissions: deny Send Messages for @everyone, allow for bot
-    try:
-        overwrites = channel.overwrites.copy()
-        overwrites[guild.default_role] = discord.PermissionOverwrite(
-            send_messages=False,
-            view_channel=True,
-            read_message_history=True,
-        )
-        overwrites[guild.me] = discord.PermissionOverwrite(
-            send_messages=True,
-            manage_messages=True,
-            view_channel=True,
-            read_message_history=True,
-        )
-        await channel.edit(overwrites=overwrites)
-        log.info("Readme channel permissions synced")
-    except Exception:
-        log.exception("Failed to set readme channel permissions")
+            overwrites = channel.overwrites.copy()
+            overwrites[guild.default_role] = discord.PermissionOverwrite(
+                send_messages=False,
+                view_channel=True,
+                read_message_history=True,
+            )
+            overwrites[guild.me] = discord.PermissionOverwrite(
+                send_messages=True,
+                manage_messages=True,
+                view_channel=True,
+                read_message_history=True,
+            )
+            await channel.edit(overwrites=overwrites)
+            log.info("Readme channel permissions synced")
+        except Exception:
+            log.exception("Failed to set readme channel permissions")
 
     # Find existing bot message (should be the only one from us)
     existing_msg = None
