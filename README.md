@@ -95,7 +95,7 @@ Axi maintains a registry of named Claude Code sessions. One session is always ac
 - **Master agent (`axi-master`):** The primary session with the full Axi personality and system prompt. Always exists. Cannot be killed. Default recipient of all messages.
 - **Spawned agents:** Independent Claude Code sessions with no custom personality. They work in a specified directory and are sandboxed to it (see [Permissions & Sandboxing](#permissions--sandboxing)).
 - **Active agent:** The session that currently receives your DM messages. Only one agent is active at a time.
-- **Hard limit:** Maximum 20 concurrent agent sessions (`MAX_AGENTS`).
+- **Concurrency:** Up to 5 agents can be awake simultaneously (`MAX_AWAKE_AGENTS`). Sleeping agents are unlimited.
 
 ### Session Configuration
 
@@ -529,7 +529,7 @@ The [rollback system](#restart--rollback-system) exists specifically as a safety
 | Constant | Value | Description |
 |---|---|---|
 | `MASTER_AGENT_NAME` | `"axi-master"` | Reserved name for the primary agent |
-| `MAX_AGENTS` | `20` | Maximum concurrent agent sessions |
+| `MAX_AWAKE_AGENTS` | `5` | Maximum concurrently awake agents |
 | `IDLE_REMINDER_THRESHOLDS` | `[30m, 3h, 48h]` | Escalating idle notification intervals (cumulative) |
 | `QUERY_TIMEOUT` | `600` | Seconds (10 min) before a query is forcefully interrupted |
 | `INTERRUPT_TIMEOUT` | `15` | Seconds to wait for graceful interrupt before killing session |

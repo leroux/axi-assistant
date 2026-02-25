@@ -32,7 +32,7 @@
 │  ┌──────────────────────────────────────────────────────────────────────────┐   │
 │  │  Agent Orchestrator                                                      │   │
 │  │                                                                          │   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   MAX_AGENTS = 20   │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                     │   │
 │  │  │ axi-master  │  │  agent-1    │  │  agent-2    │   MAX_AWAKE  = 5    │   │
 │  │  │ [sleeping/  │  │ [sleeping/  │  │ [sleeping/  │                     │   │
 │  │  │  awake/busy]│  │  awake/busy]│  │  awake/busy]│   Concurrency:      │   │
@@ -190,7 +190,6 @@ Required env vars (`DISCORD_TOKEN`, `ALLOWED_USER_IDS`, `DISCORD_GUILD_ID`) use 
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `MASTER_AGENT_NAME` | `"axi-master"` | Reserved name for the primary agent |
-| `MAX_AGENTS` | `20` | Hard cap on total agent sessions (awake + sleeping) |
 | `MAX_AWAKE_AGENTS` | `5` | Hard cap on concurrently awake agents (each ~280 MB) |
 | `IDLE_REMINDER_THRESHOLDS` | `[30min, 3h, 48h]` | Escalating idle notification intervals (cumulative) |
 | `QUERY_TIMEOUT` | `43200` (12 hours) | Per-query timeout before interrupt+kill |
@@ -512,7 +511,6 @@ Validation:
 - CWD must be under `AXI_USER_DATA`, `BOT_DIR`, or `BOT_WORKTREES_DIR`
 - Name cannot be empty or `"axi-master"`
 - Name must be unique (unless `resume` is set, in which case it calls `reclaim_agent_name()` first)
-- Agent count must be under `MAX_AGENTS` (20)
 
 Returns MCP result immediately. The actual spawn runs as `asyncio.create_task(_do_spawn())`. Errors in the background task are caught, logged, and reported to the agent's Discord channel.
 
@@ -584,7 +582,7 @@ This means: anyone in the server can watch agent conversations, but only allowed
 - **Lookup**: `get_agent_channel(name)` — checks `discord_channel_id` first, falls back to channel name search in Active category. `get_master_channel()` is a convenience wrapper.
 - **Naming**: `_normalize_channel_name(name)` — lowercases, replaces spaces with hyphens, strips non-alphanumeric (regex `[^a-z0-9\-_]`), truncates to 100 chars.
 - **Metadata**: Channel topics store `cwd: /path | session: uuid` parsed by `_parse_channel_topic()`. `_set_session_id()` updates the topic when a new session_id is received from `ResultMessage`, but **skips master** to avoid topic churn (master gets new session every restart). Uses `_format_channel_topic()` to build the topic string. **Note**: `_set_session_id()` unconditionally assigns `session.session_id = sid` in the else branch, which means a `ResultMessage` with no session_id (`sid=None`) will overwrite any previously stored session_id with `None`.
-- **Auto-registration**: `on_guild_channel_create()` — when a user manually creates a channel in the Active category, automatically registers a sleeping agent for it with default cwd under `AXI_USER_DATA/agents/<name>/`, attaches `"utils"` MCP, creates the cwd directory, sets channel topic. Guards: text channel only, Active category only, not in `_bot_creating_channels`, not master, not already registered, under `MAX_AGENTS`.
+- **Auto-registration**: `on_guild_channel_create()` — when a user manually creates a channel in the Active category, automatically registers a sleeping agent for it with default cwd under `AXI_USER_DATA/agents/<name>/`, attaches `"utils"` MCP, creates the cwd directory, sets channel topic. Guards: text channel only, Active category only, not in `_bot_creating_channels`, not master, not already registered.
 
 ### 6.4 Agent Reconstruction on Restart
 
