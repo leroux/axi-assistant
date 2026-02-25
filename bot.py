@@ -1963,9 +1963,8 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                     pre_tokens = metadata.get("pre_tokens")
                     log.info("Agent '%s' context compacted: trigger=%s pre_tokens=%s",
                              session.name, trigger, pre_tokens)
-                    if trigger == "auto":
-                        token_info = f" ({pre_tokens:,} tokens)" if pre_tokens else ""
-                        await channel.send(f"🔄 Context auto-compacted{token_info}")
+                    token_info = f" ({pre_tokens:,} tokens)" if pre_tokens else ""
+                    await channel.send(f"🔄 Context compacted{token_info}")
 
             else:
                 # Log any other parsed message types (UserMessage, etc.)
