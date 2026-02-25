@@ -74,6 +74,7 @@ SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
 ENABLE_CRASH_HANDLER = os.environ.get("ENABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
+SHOW_AWAITING_INPUT = os.environ.get("SHOW_AWAITING_INPUT", "").lower() in ("1", "true", "yes")
 README_CONTENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "readme_content.md")
 
 # --- Discord bot setup ---
@@ -1849,7 +1850,7 @@ def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
     return None
 
 
-async def stream_response_to_channel(session: AgentSession, channel, show_awaiting_input: bool = True) -> None:
+async def stream_response_to_channel(session: AgentSession, channel) -> None:
     """Stream Claude's response from a specific agent session to a Discord channel.
 
     Message flow:
@@ -2044,7 +2045,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
 
     log.debug("Stream complete for '%s'", session.name)
 
-    if show_awaiting_input:
+    if SHOW_AWAITING_INPUT:
         await send_system(channel, "Bot has finished responding and is awaiting input.")
 
 
@@ -2218,7 +2219,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(prompt))
-                    await stream_response_to_channel(session, channel, show_awaiting_input=False)
+                    await stream_response_to_channel(session, channel)
                     session.last_activity = datetime.now(timezone.utc)
             except TimeoutError:
                 timed_out = True
@@ -2802,8 +2803,9 @@ async def check_schedules():
                 f"Agent **{agent_name}** has been idle for {idle_minutes} minutes. "
                 f"Use `/kill-agent` to terminate.",
             )
-        # Also notify in the master channel so Axi can remind the user
-        if master_ch:
+        # Only notify master channel on the final threshold (48h) to reduce noise
+        is_final_threshold = session.idle_reminder_count + 1 >= len(IDLE_REMINDER_THRESHOLDS)
+        if master_ch and is_final_threshold:
             await send_system(
                 master_ch,
                 f"Agent **{agent_name}** has been idle for {idle_minutes} minutes "
@@ -3354,7 +3356,7 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
             async with asyncio.timeout(QUERY_TIMEOUT):
                 await session.client.query(_as_stream(command))
                 channel = bot.get_channel(session.discord_channel_id) or interaction.channel
-                await stream_response_to_channel(session, channel, show_awaiting_input=False)
+                await stream_response_to_channel(session, channel)
             await interaction.followup.send(f"*System:* {label} for **{agent_name}**.")
         except TimeoutError:
             await interaction.followup.send(f"*System:* {label} timed out for **{agent_name}**.")

@@ -270,6 +270,7 @@ def cmd_up(args):
         f"DEFAULT_CWD={worktree_path}\n"
         f"AXI_USER_DATA={data_path}\n"
         f"DAY_BOUNDARY_HOUR={defaults.get('day_boundary_hour', '0')}\n"
+        f"SHOW_AWAITING_INPUT=true\n"
     )
     with open(os.path.join(worktree_path, ".env"), "w") as f:
         f.write(env_content)
