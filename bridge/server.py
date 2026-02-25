@@ -376,8 +376,9 @@ def main():
     socket_path = sys.argv[1]
 
     # Set up logging for the bridge process
+    log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s %(levelname)-8s [bridge] %(message)s",
         stream=sys.stderr,
     )

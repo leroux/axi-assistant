@@ -43,9 +43,9 @@ load_dotenv()
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 
-# Console handler: INFO level (preserves original behavior)
+# Console handler: configurable via LOG_LEVEL env var (default INFO)
 _console_handler = logging.StreamHandler()
-_console_handler.setLevel(logging.INFO)
+_console_handler.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
 _console_fmt = logging.Formatter("%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s")
 _console_fmt.converter = time.gmtime
 _console_handler.setFormatter(_console_fmt)
@@ -916,7 +916,7 @@ async def discord_read_messages(args):
 
 @tool(
     "discord_send_message",
-    "Send a message to a Discord channel.",
+    "Send a message to a Discord channel OTHER than your own. Your text responses are automatically delivered to your own channel — do NOT use this tool for that. This tool is only for cross-channel messaging.",
     {
         "type": "object",
         "properties": {
@@ -929,6 +929,17 @@ async def discord_read_messages(args):
 async def discord_send_message(args):
     channel_id = args["channel_id"]
     content = args["content"]
+    # Prevent agents from sending to their own channel (responses are streamed automatically)
+    agent_name = channel_to_agent.get(int(channel_id))
+    if agent_name:
+        return {
+            "content": [{"type": "text", "text":
+                f"Error: Cannot send to agent channel #{agent_name}. "
+                f"Your text responses are automatically sent to your own channel. "
+                f"Just write your response as normal text instead of using this tool. "
+                f"This tool is only for sending messages to OTHER channels."}],
+            "is_error": True,
+        }
     try:
         resp = await _discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
         msg = resp.json()
@@ -1505,12 +1516,13 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
 async def send_long(channel, text: str) -> None:
     """Send a potentially long message, splitting as needed."""
     chunks = split_message(text.strip())
-    log.debug("send_long: channel=%s chunks=%d text=%r", getattr(channel, 'name', '?'), len(chunks), text.strip()[:80])
+    log.info("SEND_LONG: channel=%s chunks=%d text=%r", getattr(channel, 'name', '?'), len(chunks), text.strip()[:80])
     for i, chunk in enumerate(chunks):
         if chunk:
-            log.debug("send_long: sending chunk %d/%d len=%d", i+1, len(chunks), len(chunk))
+            log.info("SEND_LONG: chunk %d/%d len=%d channel=%s", i+1, len(chunks), len(chunk), getattr(channel, 'name', '?'))
             try:
-                await channel.send(chunk)
+                result = await channel.send(chunk)
+                log.info("SEND_LONG: sent msg_id=%s", result.id)
             except discord.NotFound:
                 # Channel was deleted — try to recreate it
                 agent_name = channel_to_agent.get(channel.id)

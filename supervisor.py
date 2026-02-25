@@ -9,6 +9,7 @@ Signal semantics:
 """
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -17,6 +18,13 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+LOG_LEVEL = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)-8s [supervisor] %(message)s",
+)
+log = logging.getLogger(__name__)
 
 RESTART_EXIT_CODE = 42
 CRASH_THRESHOLD = 60
@@ -69,13 +77,13 @@ def _kill_bridge():
             pid = int(pid_str)
             if pid == os.getpid():
                 continue
-            print(f"Killing bridge process (pid={pid})")
+            log.info("Killing bridge process (pid=%d)", pid)
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
     except Exception as e:
-        print(f"Warning: failed to find/kill bridge: {e}")
+        log.warning("Failed to find/kill bridge: %s", e)
     # Clean up stale socket
     if sock_path.exists():
         try:
@@ -210,73 +218,74 @@ def main():
 
         # SIGTERM/SIGINT — full stop: kill bridge and exit
         if _stopping:
-            print(f"Received stop signal, bot exited with code {code}. Killing bridge and stopping.")
+            log.info("Received stop signal, bot exited with code %d. Killing bridge and stopping.", code)
             _kill_bridge()
             sys.exit(0)
 
         # SIGHUP — hot restart: just relaunch bot.py, bridge stays
         if _hot_restart:
-            print(f"Received SIGHUP, bot exited with code {code}. Hot-restarting (bridge stays alive)...")
+            log.info("Received SIGHUP, bot exited with code %d. Hot-restarting (bridge stays alive)...", code)
             _hot_restart = False
             rollback_attempted = False
             runtime_crash_count = 0
             continue
 
         if code == RESTART_EXIT_CODE:
-            print("Restart requested, relaunching...")
+            log.info("Restart requested, relaunching...")
             rollback_attempted = False
             runtime_crash_count = 0
             continue
 
         if code == 0:
-            print("Clean exit, stopping.")
+            log.info("Clean exit, stopping.")
             sys.exit(0)
 
         # Killed by signal (e.g. SIGTERM) — treat as intentional stop, not a crash
         if code < 0 or code == 128 + 15:  # negative = signal on Popen, 143 = SIGTERM
-            print(f"Killed by signal (exit code {code}), stopping.")
+            log.info("Killed by signal (exit code %d), stopping.", code)
             sys.exit(0)
 
         elapsed = int(time.time() - start_time)
-        print(f"Bot exited with code {code} after {elapsed}s.")
+        log.info("Bot exited with code %d after %ds.", code, elapsed)
 
         # --- Runtime crash (ran long enough) ---
         if elapsed >= CRASH_THRESHOLD:
             runtime_crash_count += 1
-            print(
-                f"Runtime crash detected ({elapsed}s >= {CRASH_THRESHOLD}s threshold). "
-                f"Consecutive count: {runtime_crash_count}/{MAX_RUNTIME_CRASHES}."
+            log.warning(
+                "Runtime crash detected (%ds >= %ds threshold). "
+                "Consecutive count: %d/%d.",
+                elapsed, CRASH_THRESHOLD, runtime_crash_count, MAX_RUNTIME_CRASHES,
             )
 
             if runtime_crash_count >= MAX_RUNTIME_CRASHES:
-                print(f"Max consecutive runtime crashes ({MAX_RUNTIME_CRASHES}) reached. Stopping.")
+                log.error("Max consecutive runtime crashes (%d) reached. Stopping.", MAX_RUNTIME_CRASHES)
                 sys.exit(code)
 
             crash_log = tail_log()
             write_crash_marker(code, elapsed, crash_log)
 
-            print("Crash analysis marker written. Relaunching for runtime crash recovery...")
+            log.info("Crash analysis marker written. Relaunching for runtime crash recovery...")
             rollback_attempted = False
             continue
 
         # --- Startup crash (quick failure) ---
-        print(f"Quick crash detected ({elapsed}s < {CRASH_THRESHOLD}s threshold).")
+        log.warning("Quick crash detected (%ds < %ds threshold).", elapsed, CRASH_THRESHOLD)
 
         crash_log = tail_log()
 
         if rollback_attempted:
-            print("Rollback already attempted. Stopping to prevent infinite loop.")
+            log.error("Rollback already attempted. Stopping to prevent infinite loop.")
             sys.exit(code)
 
         if not is_git_repo():
-            print("Not a git repository. Cannot rollback. Stopping.")
+            log.error("Not a git repository. Cannot rollback. Stopping.")
             sys.exit(code)
 
         current_commit = get_head()
         uncommitted = has_uncommitted_changes()
 
         if current_commit == pre_launch_commit and not uncommitted:
-            print("No changes (committed or uncommitted) to roll back. Stopping.")
+            log.error("No changes (committed or uncommitted) to roll back. Stopping.")
             sys.exit(code)
 
         rollback_details = ""
@@ -284,20 +293,20 @@ def main():
 
         # Stash uncommitted changes
         if uncommitted:
-            print("Stashing uncommitted changes...")
+            log.info("Stashing uncommitted changes...")
             r = git("stash", "push", "--include-untracked", "-m",
                      f"auto-rollback: crash with exit code {code}")
             stash_output = (r.stdout + r.stderr).strip()
-            print(stash_output)
+            log.info("%s", stash_output)
             rollback_details = "uncommitted changes stashed"
 
         # Revert committed changes if HEAD moved
         if pre_launch_commit and current_commit != pre_launch_commit:
             r = git("rev-list", "--count", f"{pre_launch_commit}..{current_commit}")
             new_commits = r.stdout.strip() if r.returncode == 0 else "?"
-            print(
-                f"HEAD moved from {pre_launch_commit[:7]} to {current_commit[:7]} "
-                f"({new_commits} new commit(s)). Resetting..."
+            log.warning(
+                "HEAD moved from %s to %s (%s new commit(s)). Resetting...",
+                pre_launch_commit[:7], current_commit[:7], new_commits,
             )
             git("reset", "--hard", pre_launch_commit)
             detail = f"{new_commits} commit(s) reverted"
@@ -308,7 +317,7 @@ def main():
             pre_launch_commit, current_commit, crash_log,
         )
 
-        print(f"Rollback marker written. Relaunching with pre-launch code ({pre_launch_commit[:7]})...")
+        log.info("Rollback marker written. Relaunching with pre-launch code (%s)...", pre_launch_commit[:7])
         rollback_attempted = True
 
 
