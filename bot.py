@@ -1967,8 +1967,22 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                     session._log.info("RESULT: cost=$%s turns=%d duration=%dms session=%s",
                                       msg.total_cost_usd, msg.num_turns, msg.duration_ms, msg.session_id)
 
+            elif isinstance(msg, SystemMessage):
+                if session._log:
+                    session._log.debug("SYSTEM_MSG: subtype=%s data=%s",
+                                       msg.subtype, json.dumps(msg.data)[:500])
+                if msg.subtype == "compact_boundary":
+                    metadata = msg.data.get("compact_metadata", {})
+                    trigger = metadata.get("trigger", "unknown")
+                    pre_tokens = metadata.get("pre_tokens")
+                    log.info("Agent '%s' context compacted: trigger=%s pre_tokens=%s",
+                             session.name, trigger, pre_tokens)
+                    if trigger == "auto":
+                        token_info = f" ({pre_tokens:,} tokens)" if pre_tokens else ""
+                        await channel.send(f"🔄 Context auto-compacted{token_info}")
+
             else:
-                # Log any other parsed message types (UserMessage, SystemMessage, etc.)
+                # Log any other parsed message types (UserMessage, etc.)
                 if session._log:
                     session._log.debug("OTHER_MSG: %s", type(msg).__name__)
 
