@@ -3338,7 +3338,20 @@ async def stop_agent(interaction, agent_name: str | None = None):
     try:
         # interrupt cancels current query
         await session.client.interrupt()
-        await interaction.response.send_message(f"*System:* Interrupt signal sent to **{agent_name}**.")
+
+        # Drain queued messages so they don't get processed after the interrupt
+        cleared = 0
+        while not session.message_queue.empty():
+            _, ch, dropped_msg = session.message_queue.get_nowait()
+            await _remove_reaction(dropped_msg, "📨")
+            cleared += 1
+
+        if cleared:
+            await interaction.response.send_message(
+                f"*System:* Interrupt signal sent to **{agent_name}** and cleared {cleared} queued message{'s' if cleared != 1 else ''}."
+            )
+        else:
+            await interaction.response.send_message(f"*System:* Interrupt signal sent to **{agent_name}**.")
     except Exception as e:
         log.exception("Failed to interrupt agent '%s'", agent_name)
         await interaction.response.send_message(f"Failed to interrupt **{agent_name}**: {e}", ephemeral=True)
