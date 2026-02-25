@@ -235,7 +235,7 @@ class RateLimitQuota:
     utilization: float | None = None  # 0.0-1.0, only present on warnings
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-_rate_limit_quota: RateLimitQuota | None = None
+_rate_limit_quotas: dict[str, RateLimitQuota] = {}
 
 # Guild infrastructure (populated in on_ready)
 target_guild: discord.Guild | None = None
@@ -1657,15 +1657,15 @@ def _record_session_usage(agent_name: str, msg: ResultMessage) -> None:
 
 
 def _update_rate_limit_quota(data: dict) -> None:
-    global _rate_limit_quota
     info = data.get("rate_limit_info", {})
     resets_at_unix = info.get("resetsAt")
     if resets_at_unix is None:
         return
-    _rate_limit_quota = RateLimitQuota(
+    rl_type = info.get("rateLimitType", "unknown")
+    _rate_limit_quotas[rl_type] = RateLimitQuota(
         status=info.get("status", "unknown"),
         resets_at=datetime.fromtimestamp(resets_at_unix, tz=timezone.utc),
-        rate_limit_type=info.get("rateLimitType", "unknown"),
+        rate_limit_type=rl_type,
         utilization=info.get("utilization"),
     )
 
@@ -2955,34 +2955,47 @@ async def claude_usage_command(interaction: discord.Interaction):
     lines.append("")
 
     # Rate limit section
-    if _rate_limit_quota:
-        q = _rate_limit_quota
+    if _rate_limit_quotas:
         now = datetime.now(timezone.utc)
-        remaining_s = max(0, int((q.resets_at - now).total_seconds()))
-        resets_str = _format_time_remaining(remaining_s) if remaining_s > 0 else "now"
+        lines.append("**Rate Limits**")
 
-        # Format reset time in schedule timezone
-        local_reset = q.resets_at.astimezone(SCHEDULE_TIMEZONE)
-        reset_time_str = local_reset.strftime("%-I:%M %p")
+        # Display order: five_hour first, then seven_day, then any others
+        display_order = ["five_hour", "seven_day"]
+        sorted_keys = [k for k in display_order if k in _rate_limit_quotas]
+        sorted_keys += [k for k in _rate_limit_quotas if k not in display_order]
 
-        if q.status == "rejected":
-            if q.utilization is not None:
+        for rl_type in sorted_keys:
+            q = _rate_limit_quotas[rl_type]
+            remaining_s = max(0, int((q.resets_at - now).total_seconds()))
+            resets_str = _format_time_remaining(remaining_s) if remaining_s > 0 else "now"
+
+            # Format reset time in schedule timezone
+            local_reset = q.resets_at.astimezone(SCHEDULE_TIMEZONE)
+            reset_time_str = local_reset.strftime("%-I:%M %p")
+            # Add day name if reset is not today
+            local_now = now.astimezone(SCHEDULE_TIMEZONE)
+            if local_reset.date() != local_now.date():
+                reset_time_str = local_reset.strftime("%-I:%M %p %a")
+
+            if q.status == "rejected":
+                if q.utilization is not None:
+                    pct = int(q.utilization * 100)
+                    status_str = f"\U0001f6ab Rate limited ({pct}% used)"
+                else:
+                    status_str = "\U0001f6ab Rate limited"
+            elif q.status == "allowed_warning" and q.utilization is not None:
                 pct = int(q.utilization * 100)
-                status_str = f"\U0001f6ab Rate limited ({pct}% used)"
+                status_str = f"\u26a0\ufe0f {pct}% used"
             else:
-                status_str = "\U0001f6ab Rate limited"
-        elif q.status == "allowed_warning" and q.utilization is not None:
-            pct = int(q.utilization * 100)
-            status_str = f"\u26a0\ufe0f {pct}% used"
-        else:
-            status_str = "\u2705 OK (< 80%)"
+                status_str = "\u2705 OK (< 80%)"
 
-        age_s = int((now - q.updated_at).total_seconds())
+            label = q.rate_limit_type.replace("_", " ")
+            lines.append(f"  {label}: {status_str} — resets at {reset_time_str} (in {resets_str})")
+
+        # Use most recent updated_at across all quotas
+        latest_update = max(q.updated_at for q in _rate_limit_quotas.values())
+        age_s = int((now - latest_update).total_seconds())
         age_str = _format_time_remaining(age_s) if age_s > 0 else "just now"
-
-        lines.append(f"**Rate Limit** ({q.rate_limit_type.replace('_', ' ')})")
-        lines.append(f"  Status: {status_str}")
-        lines.append(f"  Resets at: {reset_time_str} (in {resets_str})")
         lines.append(f"  Last checked: {age_str} ago")
     elif _rate_limited_until:
         remaining = _format_time_remaining(_rate_limit_remaining_seconds())
