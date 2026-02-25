@@ -313,7 +313,12 @@ async def _extract_message_content(message: discord.Message) -> str | list:
     Returns a plain string if there are no image attachments, or a list of
     content blocks ``[{"type": "text", ...}, {"type": "image", ...}, ...]``
     when images are present.
+
+    A UTC timestamp from the Discord message is prepended to give the LLM
+    temporal awareness.
     """
+    ts_prefix = message.created_at.strftime("[%Y-%m-%d %H:%M:%S UTC] ")
+
     image_attachments = [
         a for a in message.attachments
         if a.content_type
@@ -322,11 +327,10 @@ async def _extract_message_content(message: discord.Message) -> str | list:
     ]
 
     if not image_attachments:
-        return message.content
+        return ts_prefix + message.content
 
     blocks: list[dict] = []
-    if message.content:
-        blocks.append({"type": "text", "text": message.content})
+    blocks.append({"type": "text", "text": ts_prefix + (message.content or "")})
 
     for attachment in image_attachments:
         try:
@@ -2223,6 +2227,10 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
         log.warning("send_prompt_to_agent: no channel for agent '%s'", agent_name)
         return
 
+    # Prepend UTC timestamp for LLM temporal awareness
+    ts_prefix = datetime.now(timezone.utc).strftime("[%Y-%m-%d %H:%M:%S UTC] ")
+    prompt = ts_prefix + prompt
+
     asyncio.create_task(_run_initial_prompt(session, prompt, channel))
 
 
@@ -2616,7 +2624,7 @@ async def on_message(message):
 
     # During bridge reconnect, queue messages instead of waking a new CLI
     if session._reconnecting:
-        await session.message_queue.put((message.content, message.channel, message))
+        await session.message_queue.put((content, message.channel, message))
         position = session.message_queue.qsize()
         log.debug("Agent '%s' reconnecting after restart, queuing message (queue_size=%d)", agent_name, position)
         await _add_reaction(message, "📨")
