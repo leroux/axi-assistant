@@ -254,6 +254,28 @@ async def _as_stream(content: str | list):
     }
 
 
+# --- Emoji reaction helpers ---
+
+async def _add_reaction(message: discord.Message | None, emoji: str) -> None:
+    """Add a reaction to a message, silently ignoring errors."""
+    if message is None:
+        return
+    try:
+        await message.add_reaction(emoji)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass  # Message deleted, no permission, or Discord hiccup
+
+
+async def _remove_reaction(message: discord.Message | None, emoji: str) -> None:
+    """Remove the bot's own reaction from a message, silently ignoring errors."""
+    if message is None:
+        return
+    try:
+        await message.remove_reaction(emoji, bot.user)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+
+
 # --- Image attachment support ---
 
 _SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
@@ -1282,6 +1304,7 @@ def _build_category_overwrites(guild: discord.Guild) -> dict[discord.Object | di
         ),
         guild.me: discord.PermissionOverwrite(
             send_messages=True,
+            add_reactions=True,
             manage_channels=True,
             manage_messages=True,
             manage_threads=True,
@@ -2114,7 +2137,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
                     await wake_agent(session)
                 except ConcurrencyLimitError:
                     log.info("Concurrency limit hit for '%s' initial prompt — queuing", session.name)
-                    await session.message_queue.put((prompt, channel))
+                    await session.message_queue.put((prompt, channel, None))
                     awake = _count_awake_agents()
                     await send_system(
                         channel,
@@ -2181,12 +2204,14 @@ async def _process_message_queue(session: AgentSession) -> None:
             log.info("Rate limited — pausing queue processing for '%s' (%d messages pending)",
                      session.name, session.message_queue.qsize())
             break  # Retry worker will resume processing when rate limit expires
-        content, channel = session.message_queue.get_nowait()
+        content, channel, orig_message = session.message_queue.get_nowait()
 
         remaining = session.message_queue.qsize()
         log.debug("Processing queued message for '%s' (%d remaining)", session.name, remaining)
         if session._log:
             session._log.info("QUEUED_MSG: %s", _content_summary(content))
+        await _remove_reaction(orig_message, "📨")
+        await _add_reaction(orig_message, "👀")
         if remaining > 0:
             await send_system(channel, f"Processing queued message ({remaining} more in queue)…")
 
@@ -2197,10 +2222,14 @@ async def _process_message_queue(session: AgentSession) -> None:
                     await wake_agent(session)
                 except Exception:
                     log.exception("Failed to wake agent '%s' for queued message", session.name)
+                    await _remove_reaction(orig_message, "👀")
+                    await _add_reaction(orig_message, "❌")
                     await send_system(channel, f"Failed to wake agent **{session.name}** — dropping queued message.")
                     # Clear remaining queue
                     while not session.message_queue.empty():
-                        _, ch = session.message_queue.get_nowait()
+                        _, ch, dropped_msg = session.message_queue.get_nowait()
+                        await _remove_reaction(dropped_msg, "📨")
+                        await _add_reaction(dropped_msg, "❌")
                         await send_system(ch, f"Failed to wake agent **{session.name}** — dropping queued message.")
                     return
 
@@ -2214,10 +2243,16 @@ async def _process_message_queue(session: AgentSession) -> None:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(content))
                     await stream_response_to_channel(session, channel)
+                await _remove_reaction(orig_message, "👀")
+                await _add_reaction(orig_message, "✅")
             except TimeoutError:
+                await _remove_reaction(orig_message, "👀")
+                await _add_reaction(orig_message, "⏳")
                 await _handle_query_timeout(session, channel)
             except Exception:
                 log.exception("Error querying agent '%s' (queued message)", session.name)
+                await _remove_reaction(orig_message, "👀")
+                await _add_reaction(orig_message, "❌")
                 await send_system(
                     channel,
                     f"Error processing queued message for **{session.name}**.",
@@ -2484,9 +2519,10 @@ async def on_message(message):
 
     # During bridge reconnect, queue messages instead of waking a new CLI
     if session._reconnecting:
-        await session.message_queue.put((message.content, message.channel))
+        await session.message_queue.put((message.content, message.channel, message))
         position = session.message_queue.qsize()
         log.debug("Agent '%s' reconnecting after restart, queuing message (queue_size=%d)", agent_name, position)
+        await _add_reaction(message, "📨")
         await send_system(
             message.channel,
             f"Agent **{agent_name}** is reconnecting after restart — message queued (position {position}).",
@@ -2497,9 +2533,10 @@ async def on_message(message):
 
     # Queue messages while rate limited (don't waste API calls)
     if _is_rate_limited() and not session.query_lock.locked():
-        await session.message_queue.put((content, message.channel))
+        await session.message_queue.put((content, message.channel, message))
         position = session.message_queue.qsize()
         log.debug("Rate-limited, queuing for '%s' (queue_size=%d)", agent_name, position)
+        await _add_reaction(message, "📨")
         remaining = _format_time_remaining(_rate_limit_remaining_seconds())
         await send_system(
             message.channel,
@@ -2509,9 +2546,10 @@ async def on_message(message):
         return
 
     if session.query_lock.locked():
-        await session.message_queue.put((content, message.channel))
+        await session.message_queue.put((content, message.channel, message))
         position = session.message_queue.qsize()
         log.debug("Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position)
+        await _add_reaction(message, "📨")
         await send_system(
             message.channel,
             f"Agent **{agent_name}** is busy — message queued (position {position}). "
@@ -2527,9 +2565,10 @@ async def on_message(message):
                 await wake_agent(session)
             except ConcurrencyLimitError:
                 log.info("Concurrency limit hit for '%s' — queuing message", agent_name)
-                await session.message_queue.put((content, message.channel))
+                await session.message_queue.put((content, message.channel, message))
                 position = session.message_queue.qsize()
                 awake = _count_awake_agents()
+                await _add_reaction(message, "📨")
                 await send_system(
                     message.channel,
                     f"⏳ All {awake} agent slots are busy. "
@@ -2538,12 +2577,14 @@ async def on_message(message):
                 return
             except Exception:
                 log.exception("Failed to wake agent '%s'", agent_name)
+                await _add_reaction(message, "❌")
                 await send_system(
                     message.channel,
                     f"Failed to wake agent **{agent_name}**. Try `/kill-agent {agent_name}` and respawn.",
                 )
                 return
 
+        await _add_reaction(message, "👀")
         session.last_activity = datetime.now(timezone.utc)
         session.last_idle_notified = None
         session.idle_reminder_count = 0
@@ -2558,10 +2599,16 @@ async def on_message(message):
             async with asyncio.timeout(QUERY_TIMEOUT):
                 await session.client.query(_as_stream(content))
                 await stream_response_to_channel(session, message.channel)
+            await _remove_reaction(message, "👀")
+            await _add_reaction(message, "✅")
         except TimeoutError:
+            await _remove_reaction(message, "👀")
+            await _add_reaction(message, "⏳")
             await _handle_query_timeout(session, message.channel)
         except Exception:
             log.exception("Error querying agent '%s'", agent_name)
+            await _remove_reaction(message, "👀")
+            await _add_reaction(message, "❌")
             await send_system(
                 message.channel,
                 f"Error communicating with agent **{agent_name}**. The session may have crashed. "
@@ -2741,8 +2788,9 @@ async def check_schedules():
             if (session.client is None
                     and not session.message_queue.empty()
                     and not session.query_lock.locked()):
-                content, ch = session.message_queue.get_nowait()
+                content, ch, stranded_msg = session.message_queue.get_nowait()
                 log.info("Stranded message found for sleeping agent '%s', waking", agent_name)
+                await _remove_reaction(stranded_msg, "📨")
                 asyncio.create_task(_run_initial_prompt(session, content, ch))
                 break  # One at a time to respect concurrency limit
 
