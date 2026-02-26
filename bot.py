@@ -37,7 +37,7 @@ from bridge import (
     connect_to_bridge,
 )
 from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
-from flowcoder import FlowcoderProcess
+from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
 
 load_dotenv()
 
@@ -1105,8 +1105,12 @@ async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
 
 
 def _count_awake_agents() -> int:
-    """Count the number of agents that are currently awake (client is not None)."""
-    return sum(1 for s in agents.values() if s.client is not None)
+    """Count agents that are currently awake (client or running flowcoder engine)."""
+    return sum(
+        1 for s in agents.values()
+        if s.client is not None
+        or (s.flowcoder_process is not None and s.flowcoder_process.is_running)
+    )
 
 
 async def _evict_idle_agent(exclude: str | None = None) -> bool:
@@ -1169,11 +1173,18 @@ async def sleep_agent(session: AgentSession) -> None:
 
     No-op if the session is already sleeping (client is None).
     For flowcoder agents: stops the process if running, then returns.
+    Bridge-backed flowcoder processes are detached (not killed) if mid-execution.
     """
+    # Handle flowcoder process (both dedicated flowcoder agents and inline flowcharts)
+    if session.flowcoder_process:
+        proc = session.flowcoder_process
+        if getattr(proc, 'is_bridge_backed', False) and session.query_lock.locked():
+            await proc.detach()  # mid-execution: bridge buffers
+        else:
+            await proc.stop()  # idle or direct: kill
+        session.flowcoder_process = None
+
     if session.agent_type == "flowcoder":
-        if session.flowcoder_process and session.flowcoder_process.is_running:
-            await session.flowcoder_process.stop()
-            session.flowcoder_process = None
         return
 
     if session.client is None:
@@ -1191,11 +1202,12 @@ async def sleep_agent(session: AgentSession) -> None:
 def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions for a session."""
     return ClaudeAgentOptions(
-        model="opus",
-        effort="high",
+        # model="opus",
+        model="haiku",
+        #effort="high",
         # thinking={"type": "enabled", "budget_tokens": 128000},
-        thinking={"type": "adaptive"},
-        betas=["context-1m-2025-08-07"],
+        #thinking={"type": "adaptive"},
+        #betas=["context-1m-2025-08-07"],
         setting_sources=["local"],
         permission_mode="default",
         can_use_tool=make_cwd_permission_callback(session.cwd),
@@ -2316,29 +2328,91 @@ async def _run_flowcoder(session: AgentSession, channel: TextChannel) -> None:
                 cmd_display += f" {session.flowcoder_args}"
             await channel.send(f"*System:* Running flowcoder command: `{cmd_display}`")
 
-            proc = FlowcoderProcess(
-                command=session.flowcoder_command,
-                args=session.flowcoder_args,
-                cwd=session.cwd,
-            )
+            if bridge_conn and bridge_conn.is_alive:
+                proc = BridgeFlowcoderProcess(
+                    bridge_name=f"{session.name}:flowcoder",
+                    conn=bridge_conn,
+                    command=session.flowcoder_command,
+                    args=session.flowcoder_args,
+                    cwd=session.cwd,
+                )
+            else:
+                proc = FlowcoderProcess(
+                    command=session.flowcoder_command,
+                    args=session.flowcoder_args,
+                    cwd=session.cwd,
+                )
             await proc.start()
             session.flowcoder_process = proc
 
             try:
                 await _stream_flowcoder_to_channel(session, channel)
+            except asyncio.CancelledError:
+                if getattr(proc, 'is_bridge_backed', False):
+                    await proc.detach()
+                    session.flowcoder_process = None
+                    session.activity = ActivityState(phase="idle")
+                    log.info("Flowcoder '%s' detached on cancel (bridge will buffer)", session.name)
+                    raise
+                raise
             except Exception:
                 log.exception("Error streaming flowcoder output for '%s'", session.name)
                 await send_system(channel, f"Flowcoder agent **{session.name}** encountered a streaming error.")
             finally:
+                if session.flowcoder_process is not None:
+                    await proc.stop()
+                    session.flowcoder_process = None
+                    session.activity = ActivityState(phase="idle")
+
+        log.info("Flowcoder agent '%s' finished", session.name)
+
+    except asyncio.CancelledError:
+        log.debug("Flowcoder agent '%s' task cancelled", session.name)
+    except Exception:
+        log.exception("Error running flowcoder agent '%s'", session.name)
+        await send_system(channel, f"Flowcoder agent **{session.name}** encountered an error.")
+
+
+async def _run_inline_flowchart(session: AgentSession, channel, command: str, args: str) -> None:
+    """Run a flowchart command inline in an agent's channel."""
+    async with session.query_lock:
+        session.last_activity = datetime.now(timezone.utc)
+        session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+
+        cmd_display = command + (f" {args}" if args else "")
+        await send_system(channel, f"Running flowchart: `{cmd_display}`")
+
+        if bridge_conn and bridge_conn.is_alive:
+            proc = BridgeFlowcoderProcess(
+                bridge_name=f"{session.name}:flowcoder",
+                conn=bridge_conn,
+                command=command, args=args, cwd=session.cwd,
+            )
+        else:
+            proc = FlowcoderProcess(command=command, args=args, cwd=session.cwd)
+        await proc.start()
+        session.flowcoder_process = proc
+
+        try:
+            await _stream_flowcoder_to_channel(session, channel)
+        except asyncio.CancelledError:
+            if getattr(proc, 'is_bridge_backed', False):
+                await proc.detach()
+                session.flowcoder_process = None
+                session.activity = ActivityState(phase="idle")
+                log.info("Inline flowchart '%s' detached on cancel (bridge will buffer)", command)
+                raise
+            raise
+        except Exception:
+            log.exception("Error streaming flowchart for '%s'", session.name)
+            await send_system(channel, f"Flowchart `{command}` encountered an error.")
+        finally:
+            if session.flowcoder_process is not None:
                 await proc.stop()
                 session.flowcoder_process = None
                 session.activity = ActivityState(phase="idle")
 
-        log.info("Flowcoder agent '%s' finished", session.name)
-
-    except Exception:
-        log.exception("Error running flowcoder agent '%s'", session.name)
-        await send_system(channel, f"Flowcoder agent **{session.name}** encountered an error.")
+    await _process_message_queue(session)
 
 
 async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChannel) -> None:
@@ -2348,8 +2422,12 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
 
     text_buffer: list[str] = []
     current_block = ""
+    current_block_type = ""
     block_count = 0
     start_time = time.monotonic()
+
+    # Block types that produce no useful output for the user
+    _SILENT_BLOCK_TYPES = {"start", "end", "variable"}
 
     async def _flush_buffer() -> None:
         if text_buffer:
@@ -2370,12 +2448,15 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
             block_name = data.get("block_name", "?")
             block_type = data.get("block_type", "?")
             current_block = block_name
+            current_block_type = block_type
             session.activity = ActivityState(
                 phase="tool_use",
                 tool_name=f"flowcoder:{block_type}",
                 query_started=session.activity.query_started,
             )
-            await channel.send(f"> **[{block_count}]** {block_name} ({block_type})...")
+            # Skip noisy markers for start/end/variable blocks
+            if block_type not in _SILENT_BLOCK_TYPES:
+                await channel.send(f"▶ **{block_name}** (`{block_type}`)")
 
         elif msg_type == "system" and msg_subtype == "block_complete":
             await _flush_buffer()
@@ -2391,13 +2472,27 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
             inner_type = inner.get("type", "")
 
             if inner_type == "assistant":
-                # Turn complete — flush any accumulated stream text.
-                await _flush_buffer()
+                # Turn complete — flush stream text, or extract from assistant msg
+                if text_buffer:
+                    await _flush_buffer()
+                else:
+                    # Stream deltas didn't arrive — extract text from assistant message
+                    message = inner.get("message", {})
+                    content = message.get("content", [])
+                    parts: list[str] = []
+                    if isinstance(content, str):
+                        parts.append(content)
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                parts.append(block.get("text", ""))
+                    fallback_text = "\n".join(parts)
+                    if fallback_text.strip():
+                        await send_long(channel, fallback_text)
 
             elif inner_type == "stream_event":
                 event = inner.get("event", {})
                 event_type = event.get("type", "")
-                # claude stream-json: content_block_delta with delta.text
                 if event_type == "content_block_delta":
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
@@ -2417,14 +2512,15 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
             summary = f"Flowchart {status} in {elapsed:.0f}s | Cost: ${cost:.4f} | Blocks: {block_count}"
             await send_system(channel, summary)
 
-            if result_text and len(result_text) <= 1900:
-                await channel.send(f"```\n{result_text}\n```")
-            elif result_text:
-                await channel.send(f"```\n{result_text[:1900]}…\n```")
-
             # Reset for potential follow-up commands via the message loop
             block_count = 0
             start_time = time.monotonic()
+
+        elif msg_type == "status_response":
+            # Engine replied to a status_request (used during reconnect).
+            # If not busy, the flowchart is done — stop streaming.
+            if not msg.get("busy", False):
+                break
 
         elif msg_type == "control_request":
             # Auto-allow control requests
@@ -2612,6 +2708,28 @@ async def _connect_bridge() -> None:
 
     # For each running agent that we've reconstructed, schedule reconnect
     for agent_name, info in bridge_agents.items():
+        # Handle :flowcoder processes separately
+        if agent_name.endswith(":flowcoder"):
+            base_name = agent_name.removesuffix(":flowcoder")
+            session = agents.get(base_name)
+            if session is None:
+                log.warning("Bridge has flowcoder '%s' but no matching session — killing", agent_name)
+                try:
+                    await bridge_conn.send_command("kill", name=agent_name)
+                except Exception:
+                    log.exception("Failed to kill orphan bridge flowcoder '%s'", agent_name)
+                continue
+            if info.get("status") == "exited":
+                log.info("Bridge flowcoder '%s' already exited — cleaning up", agent_name)
+                try:
+                    await bridge_conn.send_command("kill", name=agent_name)
+                except Exception:
+                    pass
+                continue
+            session._reconnecting = True
+            asyncio.create_task(_reconnect_flowcoder(session, agent_name, info))
+            continue
+
         session = agents.get(agent_name)
         if session is None:
             log.warning("Bridge has agent '%s' but no matching session — killing", agent_name)
@@ -2743,6 +2861,59 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
     await _process_message_queue(session)
 
 
+async def _reconnect_flowcoder(session: AgentSession, bridge_name: str, bridge_info: dict) -> None:
+    """Reconnect to a flowcoder engine that survived bot.py restart."""
+    log.info("Reconnecting flowcoder '%s' for session '%s'", bridge_name, session.name)
+    try:
+        async with session.query_lock:
+            if bridge_conn is None or not bridge_conn.is_alive:
+                log.warning("Bridge connection lost during flowcoder reconnect of '%s'", bridge_name)
+                session._reconnecting = False
+                return
+
+            proc = BridgeFlowcoderProcess(
+                bridge_name=bridge_name,
+                conn=bridge_conn,
+                command=session.flowcoder_command,
+                args=session.flowcoder_args,
+                cwd=session.cwd,
+            )
+            sub_result = await proc.subscribe()
+            session.flowcoder_process = proc
+            session._reconnecting = False
+
+            replayed = sub_result.replayed or 0
+            log.info(
+                "Flowcoder '%s' subscribed (replayed=%d, status=%s)",
+                bridge_name, replayed, sub_result.status,
+            )
+
+            channel = await get_agent_channel(session.name)
+
+            # Ask the engine if it's mid-flowchart. The engine's _read_loop
+            # handles status_request even during execution, responding on
+            # stdout immediately. _stream_flowcoder_to_channel will break
+            # when it sees status_response(busy=false).
+            await proc.send({"type": "status_request"})
+
+            if channel:
+                if replayed > 0:
+                    await send_system(channel, "*(reconnected — resuming flowchart)*")
+                await _stream_flowcoder_to_channel(session, channel)
+
+            # Engine finished or was idle — clean up
+            await proc.stop()
+            session.flowcoder_process = None
+            session.activity = ActivityState(phase="idle")
+            log.info("Flowcoder '%s' reconnect complete — cleaned up", bridge_name)
+
+    except Exception:
+        log.exception("Failed to reconnect flowcoder '%s'", bridge_name)
+        session._reconnecting = False
+
+    await _process_message_queue(session)
+
+
 def _init_shutdown_coordinator() -> None:
     """Wire up the ShutdownCoordinator with real bot callbacks.
 
@@ -2758,6 +2929,13 @@ def _init_shutdown_coordinator() -> None:
             await send_system(channel, message)
 
     async def _send_goodbye() -> None:
+        # Detach all bridge-backed flowcoder processes so they survive restart
+        for s in agents.values():
+            if s.flowcoder_process and getattr(s.flowcoder_process, 'is_bridge_backed', False):
+                await s.flowcoder_process.detach()
+                log.info("Detached bridge flowcoder for '%s' before shutdown", s.name)
+                s.flowcoder_process = None
+
         master_ch = await get_master_channel()
         if master_ch:
             await master_ch.send("*System:* Shutting down — see you soon!")
@@ -2845,14 +3023,16 @@ async def on_message(message):
 
     log.debug("Routing message to agent '%s' (locked=%s, client=%s)", agent_name, session.query_lock.locked(), session.client is not None)
 
-    # Flowcoder agents: forward messages to stdin or report finished
+    # Inline flowchart or dedicated flowcoder agent — forward messages to stdin
+    if session.flowcoder_process and session.flowcoder_process.is_running:
+        user_msg = {"type": "user", "message": {"role": "user", "content": content if isinstance(content, str) else str(content)}}
+        await session.flowcoder_process.send(user_msg)
+        await _add_reaction(message, "✅")
+        return
+
+    # Dedicated flowcoder agent that has finished
     if session.agent_type == "flowcoder":
-        if session.flowcoder_process and session.flowcoder_process.is_running:
-            user_msg = {"type": "user", "message": {"role": "user", "content": content if isinstance(content, str) else str(content)}}
-            await session.flowcoder_process.send(user_msg)
-            await _add_reaction(message, "✅")
-        else:
-            await send_system(message.channel, f"Flowcoder agent **{agent_name}** has finished.")
+        await send_system(message.channel, f"Flowcoder agent **{agent_name}** has finished.")
         return
 
     # Queue messages while rate limited (don't waste API calls)
@@ -3745,6 +3925,99 @@ async def compact_context(interaction, agent_name: str | None = None):
 async def clear_context(interaction, agent_name: str | None = None):
     log.info("Slash command /clear agent=%s from %s", agent_name, interaction.user)
     await _run_agent_sdk_command(interaction, agent_name, "/clear", "Context cleared")
+
+
+def _list_flowchart_commands() -> list[dict]:
+    """Return available flowchart commands as [{name, description}, ...]."""
+    flowcoder_home = os.environ.get("FLOWCODER_HOME", os.path.expanduser("~/flowcoder-rewrite"))
+    commands_dir = os.path.join(flowcoder_home, "examples", "commands")
+    results = []
+    if not os.path.isdir(commands_dir):
+        return results
+    for fname in sorted(os.listdir(commands_dir)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(commands_dir, fname)) as f:
+                data = json.load(f)
+            results.append({
+                "name": data.get("name", fname.removesuffix(".json")),
+                "description": data.get("description", ""),
+            })
+        except Exception:
+            results.append({"name": fname.removesuffix(".json"), "description": ""})
+    return results
+
+
+async def flowchart_name_autocomplete(interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete callback for flowchart command names."""
+    commands = _list_flowchart_commands()
+    return [
+        app_commands.Choice(name=cmd["name"], value=cmd["name"])
+        for cmd in commands
+        if current.lower() in cmd["name"].lower()
+    ][:25]
+
+
+@bot.tree.command(name="flowchart", description="Run a flowchart command inline in the current agent's channel.")
+@app_commands.describe(name="Flowchart command name", args="Arguments for the flowchart command")
+@app_commands.autocomplete(name=flowchart_name_autocomplete)
+async def flowchart_cmd(interaction: discord.Interaction, name: str, args: str | None = None):
+    log.info("Slash command /flowchart name=%s args=%s from %s", name, args, interaction.user)
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    # Infer agent from channel
+    agent_name = channel_to_agent.get(interaction.channel_id)
+    if agent_name is None:
+        await interaction.response.send_message(
+            "Could not determine agent for this channel. Use this in an agent's channel.", ephemeral=True
+        )
+        return
+
+    session = agents.get(agent_name)
+    if session is None:
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+        return
+
+    if session.query_lock.locked():
+        await interaction.response.send_message(f"Agent **{agent_name}** is busy. Wait for it to finish.", ephemeral=True)
+        return
+
+    if session.flowcoder_process and session.flowcoder_process.is_running:
+        await interaction.response.send_message(f"Agent **{agent_name}** already has a flowchart running.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    channel = bot.get_channel(session.discord_channel_id) or interaction.channel
+    asyncio.create_task(_run_inline_flowchart(session, channel, name, args or ""))
+
+    await interaction.followup.send(f"*System:* Flowchart `{name}` started on **{agent_name}**.")
+
+
+@bot.tree.command(name="flowchart-list", description="List available flowchart commands.")
+async def flowchart_list_cmd(interaction: discord.Interaction):
+    log.info("Slash command /flowchart-list from %s", interaction.user)
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    commands = _list_flowchart_commands()
+    if not commands:
+        await interaction.response.send_message("No flowchart commands found.", ephemeral=True)
+        return
+
+    lines = []
+    for cmd in commands:
+        desc = f" — {cmd['description']}" if cmd["description"] else ""
+        lines.append(f"• `{cmd['name']}`{desc}")
+
+    await interaction.response.send_message(
+        f"*System:* **Available flowcharts** ({len(commands)}):\n" + "\n".join(lines),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="restart", description="Hot-reload bot.py (bridge stays alive, agents keep running).")

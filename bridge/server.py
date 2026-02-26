@@ -150,6 +150,8 @@ class BridgeServer:
             await self._cmd_interrupt(name)
         elif cmd == "subscribe":
             await self._cmd_subscribe(name)
+        elif cmd == "unsubscribe":
+            await self._cmd_unsubscribe(name)
         elif cmd == "list":
             await self._cmd_list()
         elif cmd == "status":
@@ -230,6 +232,14 @@ class BridgeServer:
             ok=True, name=name, replayed=buffered_count,
             status=cp.status, exit_code=cp.exit_code, idle=cp.idle,
         ))
+
+    async def _cmd_unsubscribe(self, name: str):
+        cp = self._cli_procs.get(name)
+        if cp is None:
+            await self._send_result(ResultMsg(ok=False, name=name, error="not found"))
+            return
+        cp.subscribed = False
+        await self._send_result(ResultMsg(ok=True, name=name))
 
     async def _cmd_list(self):
         agents = {}

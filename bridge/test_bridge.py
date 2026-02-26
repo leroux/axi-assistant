@@ -2728,3 +2728,246 @@ class TestAwakeAgentLimit:
         assert _count_awake(agents) == MAX_AWAKE_AGENTS
         assert agents["a-2"].client is None
         assert agents["a-10"].client is not None
+
+
+# ---------------------------------------------------------------------------
+# Flowcoder engine integration tests
+# ---------------------------------------------------------------------------
+
+# A mock flowcoder engine: emits block_start, reads stdin for user/shutdown,
+# emits block_complete, then result, then exits.
+def _mock_flowcoder_engine_script() -> list[str]:
+    return [
+        PYTHON, "-c",
+        "import json, sys\n"
+        "# Emit block_start\n"
+        "print(json.dumps({'type':'system','subtype':'block_start','data':{'block_id':'b1','block_name':'Ask','block_type':'prompt'}}), flush=True)\n"
+        "# Wait for user input or shutdown\n"
+        "for line in sys.stdin:\n"
+        "    data = json.loads(line)\n"
+        "    if data.get('type') == 'shutdown':\n"
+        "        break\n"
+        "    if data.get('type') == 'user':\n"
+        "        # Echo it back as a block_complete\n"
+        "        print(json.dumps({'type':'system','subtype':'block_complete','data':{'block_id':'b1','block_name':'Ask','success':True}}), flush=True)\n"
+        "        print(json.dumps({'type':'result','status':'completed'}), flush=True)\n"
+        "        break\n"
+    ]
+
+
+# A mock engine that emits several messages slowly (for disconnect/reconnect tests).
+def _slow_flowcoder_engine_script(n: int = 3, delay: float = 0.2) -> list[str]:
+    return [
+        PYTHON, "-c",
+        f"import json, sys, time\n"
+        f"for i in range({n}):\n"
+        f"    print(json.dumps({{'type':'system','subtype':'block_start','data':{{'block_id':f'b{{i}}','block_name':f'Step {{i}}','block_type':'prompt'}}}}), flush=True)\n"
+        f"    time.sleep({delay})\n"
+        f"    print(json.dumps({{'type':'system','subtype':'block_complete','data':{{'block_id':f'b{{i}}','block_name':f'Step {{i}}','success':True}}}}), flush=True)\n"
+        f"print(json.dumps({{'type':'result','status':'completed'}}), flush=True)\n"
+    ]
+
+
+class TestFlowcoderBridgeIntegration:
+    """Integration tests running mock flowcoder engines through the bridge."""
+
+    @pytest.mark.asyncio
+    async def test_spawn_flowcoder_named(self):
+        """':flowcoder' naming works, shows in list."""
+        sock = _tmp_sock()
+        server, srv = await _start_server(sock)
+        conn = await _connect(sock)
+        try:
+            result = await asyncio.wait_for(
+                conn.send_command(
+                    "spawn", name="agent-x:flowcoder",
+                    cli_args=_slow_cli_script(1, 5),
+                    env=dict(os.environ), cwd="/tmp",
+                ),
+                timeout=3,
+            )
+            assert result.ok is True
+            assert result.name == "agent-x:flowcoder"
+
+            list_result = await asyncio.wait_for(conn.send_command("list"), timeout=3)
+            assert "agent-x:flowcoder" in list_result.agents
+        finally:
+            await _cleanup(server, srv, conn, sock)
+
+    @pytest.mark.asyncio
+    async def test_flowcoder_stdin_stdout(self):
+        """User message -> engine -> response back through bridge."""
+        sock = _tmp_sock()
+        server, srv = await _start_server(sock)
+        conn = await _connect(sock)
+        try:
+            name = "test:flowcoder"
+            await asyncio.wait_for(
+                conn.send_command(
+                    "spawn", name=name,
+                    cli_args=_mock_flowcoder_engine_script(),
+                    env=dict(os.environ), cwd="/tmp",
+                ),
+                timeout=3,
+            )
+
+            q = conn.register_agent(name)
+            await asyncio.wait_for(
+                conn.send_command("subscribe", name=name), timeout=3,
+            )
+
+            # Should receive block_start from engine startup
+            msg = await asyncio.wait_for(q.get(), timeout=3)
+            assert isinstance(msg, StdoutMsg)
+            assert msg.data.get("subtype") == "block_start"
+
+            # Send user message
+            await conn.send_stdin(name, {"type": "user", "message": "hello"})
+
+            # Should receive block_complete and result
+            msgs = []
+            for _ in range(3):  # block_complete, result, exit
+                m = await asyncio.wait_for(q.get(), timeout=3)
+                msgs.append(m)
+                if isinstance(m, ExitMsg):
+                    break
+
+            stdout_msgs = [m for m in msgs if isinstance(m, StdoutMsg)]
+            assert any(m.data.get("subtype") == "block_complete" for m in stdout_msgs)
+        finally:
+            await _cleanup(server, srv, conn, sock)
+
+    @pytest.mark.asyncio
+    async def test_flowcoder_survives_disconnect(self):
+        """Engine stays alive after client disconnect, reconnect works."""
+        sock = _tmp_sock()
+        server, srv = await _start_server(sock)
+        conn1 = await _connect(sock)
+        try:
+            name = "persist:flowcoder"
+            await asyncio.wait_for(
+                conn1.send_command(
+                    "spawn", name=name,
+                    cli_args=_slow_flowcoder_engine_script(5, 0.3),
+                    env=dict(os.environ), cwd="/tmp",
+                ),
+                timeout=3,
+            )
+
+            # Subscribe and read first message
+            q1 = conn1.register_agent(name)
+            await asyncio.wait_for(
+                conn1.send_command("subscribe", name=name), timeout=3,
+            )
+            first_msg = await asyncio.wait_for(q1.get(), timeout=3)
+            assert isinstance(first_msg, StdoutMsg)
+
+            # Disconnect (simulate bot.py crash)
+            conn1._demux_task.cancel()
+            try:
+                conn1._writer.close()
+            except Exception:
+                pass
+
+            # Wait for engine to produce more output
+            await asyncio.sleep(0.5)
+
+            # Reconnect
+            conn2 = await _connect(sock)
+            try:
+                # Engine should still be listed
+                list_result = await asyncio.wait_for(
+                    conn2.send_command("list"), timeout=3,
+                )
+                assert name in list_result.agents
+
+                # Subscribe should replay buffered messages
+                q2 = conn2.register_agent(name)
+                sub = await asyncio.wait_for(
+                    conn2.send_command("subscribe", name=name), timeout=3,
+                )
+                assert sub.ok
+                assert (sub.replayed or 0) > 0  # some messages were buffered
+            finally:
+                conn2._demux_task.cancel()
+                try:
+                    conn2._writer.close()
+                except Exception:
+                    pass
+        finally:
+            # Clean up remaining processes
+            for cp in list(server._cli_procs.values()):
+                await server._kill_cli(cp)
+            srv.close()
+            if os.path.exists(sock):
+                os.unlink(sock)
+
+    @pytest.mark.asyncio
+    async def test_coexist_with_claude_cli(self):
+        """Both 'agent' and 'agent:flowcoder' in bridge simultaneously."""
+        sock = _tmp_sock()
+        server, srv = await _start_server(sock)
+        conn = await _connect(sock)
+        try:
+            # Spawn a "Claude CLI" agent
+            r1 = await asyncio.wait_for(
+                conn.send_command(
+                    "spawn", name="agent-x",
+                    cli_args=_slow_cli_script(1, 10),
+                    env=dict(os.environ), cwd="/tmp",
+                ),
+                timeout=3,
+            )
+            assert r1.ok
+
+            # Spawn a flowcoder engine for the same agent
+            r2 = await asyncio.wait_for(
+                conn.send_command(
+                    "spawn", name="agent-x:flowcoder",
+                    cli_args=_slow_cli_script(1, 10),
+                    env=dict(os.environ), cwd="/tmp",
+                ),
+                timeout=3,
+            )
+            assert r2.ok
+
+            # Both should be listed
+            list_result = await asyncio.wait_for(conn.send_command("list"), timeout=3)
+            assert "agent-x" in list_result.agents
+            assert "agent-x:flowcoder" in list_result.agents
+            assert r1.pid != r2.pid  # different processes
+        finally:
+            await _cleanup(server, srv, conn, sock)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_then_kill(self):
+        """Graceful shutdown -> kill cleanup."""
+        sock = _tmp_sock()
+        server, srv = await _start_server(sock)
+        conn = await _connect(sock)
+        try:
+            name = "cleanup:flowcoder"
+            await asyncio.wait_for(
+                conn.send_command(
+                    "spawn", name=name,
+                    cli_args=_mock_flowcoder_engine_script(),
+                    env=dict(os.environ), cwd="/tmp",
+                ),
+                timeout=3,
+            )
+
+            # Send shutdown via stdin
+            await conn.send_stdin(name, {"type": "shutdown"})
+            await asyncio.sleep(0.3)
+
+            # Kill to clean up
+            kill_result = await asyncio.wait_for(
+                conn.send_command("kill", name=name), timeout=3,
+            )
+            assert kill_result.ok
+
+            # Should no longer be listed
+            list_result = await asyncio.wait_for(conn.send_command("list"), timeout=3)
+            assert name not in list_result.agents
+        finally:
+            await _cleanup(server, srv, conn, sock)

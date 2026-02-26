@@ -1,4 +1,9 @@
-"""FlowcoderProcess — manages a flowcoder-engine subprocess via JSON-lines on stdin/stdout."""
+"""FlowcoderProcess — manages a flowcoder-engine subprocess via JSON-lines on stdin/stdout.
+
+Provides two implementations:
+- FlowcoderProcess: direct subprocess (default)
+- BridgeFlowcoderProcess: backed by the agent bridge for persistence across bot restarts
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,63 @@ from collections.abc import AsyncIterator
 
 log = logging.getLogger(__name__)
 
+# Bridge protocol types — optional import (bridge package may not be available)
+try:
+    from bridge.protocol import StdoutMsg, StderrMsg, ExitMsg
+except ImportError:  # pragma: no cover
+    StdoutMsg = StderrMsg = ExitMsg = None  # type: ignore[assignment,misc]
+
+
+# ------------------------------------------------------------------
+# Shared helpers
+# ------------------------------------------------------------------
+
+
+def build_engine_cmd(
+    command: str,
+    args: str = "",
+    search_paths: list[str] | None = None,
+) -> list[str]:
+    """Build flowcoder-engine argv (binary resolution + flags)."""
+    import shutil
+
+    engine_bin = shutil.which("flowcoder-engine")
+    if not engine_bin:
+        flowcoder_home = os.environ.get(
+            "FLOWCODER_HOME",
+            os.path.expanduser("~/flowcoder-rewrite"),
+        )
+        engine_bin = os.path.join(
+            flowcoder_home,
+            "packages", "flowcoder-engine", ".venv", "bin", "flowcoder-engine",
+        )
+
+    flowcoder_home = os.environ.get(
+        "FLOWCODER_HOME",
+        os.path.expanduser("~/flowcoder-rewrite"),
+    )
+    default_search = os.path.join(flowcoder_home, "examples", "commands")
+
+    cmd: list[str] = [engine_bin, "--command", command]
+    if args:
+        cmd += ["--args", args]
+    for sp in [default_search] + (search_paths or []):
+        cmd += ["--search-path", sp]
+    return cmd
+
+
+def build_engine_env() -> dict[str, str]:
+    """Build clean env (strip CLAUDECODE/SDK vars)."""
+    return {
+        k: v for k, v in os.environ.items()
+        if k not in ("CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_ENTRYPOINT")
+    }
+
+
+# ------------------------------------------------------------------
+# Direct subprocess implementation
+# ------------------------------------------------------------------
+
 
 class FlowcoderProcess:
     """Wraps a ``flowcoder-engine`` subprocess.
@@ -17,6 +79,8 @@ class FlowcoderProcess:
     Communication uses newline-delimited JSON on stdin (inbound) and stdout
     (outbound).  Stderr is forwarded to the logger.
     """
+
+    is_bridge_backed: bool = False
 
     def __init__(
         self,
@@ -38,39 +102,8 @@ class FlowcoderProcess:
 
     async def start(self) -> None:
         """Spawn the flowcoder-engine subprocess."""
-        import shutil
-
-        # Prefer the installed flowcoder-engine from PATH (pip-installed),
-        # fall back to a standalone install at FLOWCODER_HOME
-        engine_bin = shutil.which("flowcoder-engine")
-        if not engine_bin:
-            flowcoder_home = os.environ.get(
-                "FLOWCODER_HOME",
-                os.path.expanduser("~/flowcoder-rewrite"),
-            )
-            engine_bin = os.path.join(
-                flowcoder_home,
-                "packages", "flowcoder-engine", ".venv", "bin", "flowcoder-engine",
-            )
-
-        # Default search path for built-in commands
-        flowcoder_home = os.environ.get(
-            "FLOWCODER_HOME",
-            os.path.expanduser("~/flowcoder-rewrite"),
-        )
-        default_search = os.path.join(flowcoder_home, "examples", "commands")
-
-        cmd: list[str] = [engine_bin, "--command", self.command]
-        if self.args:
-            cmd += ["--args", self.args]
-        for sp in [default_search] + self.search_paths:
-            cmd += ["--search-path", sp]
-
-        # Strip env vars that confuse nested Claude detection
-        env = {
-            k: v for k, v in os.environ.items()
-            if k not in ("CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_ENTRYPOINT")
-        }
+        cmd = build_engine_cmd(self.command, self.args, self.search_paths)
+        env = build_engine_env()
 
         log.info("Starting flowcoder-engine: %s (cwd=%s)", " ".join(cmd), self.cwd)
 
@@ -180,3 +213,160 @@ class FlowcoderProcess:
     def is_running(self) -> bool:
         """True if the subprocess is still running."""
         return self._proc is not None and self._proc.returncode is None
+
+
+# ------------------------------------------------------------------
+# Bridge-backed implementation
+# ------------------------------------------------------------------
+
+
+class BridgeFlowcoderProcess:
+    """Flowcoder engine backed by the agent bridge.
+
+    Same interface as FlowcoderProcess but the subprocess lives in the bridge,
+    surviving bot.py restarts. Uses bridge spawn/subscribe/kill commands.
+    """
+
+    is_bridge_backed: bool = True
+
+    def __init__(
+        self,
+        bridge_name: str,
+        conn: object,  # BridgeConnection — typed loosely to avoid hard import
+        command: str,
+        args: str = "",
+        search_paths: list[str] | None = None,
+        cwd: str | None = None,
+    ) -> None:
+        self.bridge_name = bridge_name
+        self.command = command
+        self.args = args
+        self.search_paths = search_paths or []
+        self.cwd = cwd
+        self._conn = conn  # BridgeConnection
+        self._queue: asyncio.Queue | None = None
+        self._running = False
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Spawn the engine in the bridge and subscribe to its output."""
+        cmd = build_engine_cmd(self.command, self.args, self.search_paths)
+        env = build_engine_env()
+
+        log.info(
+            "Starting bridge flowcoder '%s': %s (cwd=%s)",
+            self.bridge_name, " ".join(cmd), self.cwd,
+        )
+
+        # Register queue before spawn so we don't miss early output
+        self._queue = self._conn.register_agent(self.bridge_name)
+
+        result = await self._conn.send_command(
+            "spawn", name=self.bridge_name, cli_args=cmd, env=env, cwd=self.cwd,
+        )
+        if not result.ok and not result.already_running:
+            self._conn.unregister_agent(self.bridge_name)
+            self._queue = None
+            raise RuntimeError(
+                f"Bridge spawn failed for '{self.bridge_name}': {result.error}"
+            )
+
+        sub_result = await self._conn.send_command("subscribe", name=self.bridge_name)
+        if not sub_result.ok:
+            log.warning("Subscribe warning for '%s': %s", self.bridge_name, sub_result.error)
+
+        self._running = True
+
+    async def subscribe(self):
+        """Reconnect — register + subscribe without spawning.
+
+        Returns the subscribe ResultMsg (has .replayed, .status, .idle fields).
+        """
+        self._queue = self._conn.register_agent(self.bridge_name)
+        result = await self._conn.send_command("subscribe", name=self.bridge_name)
+        if not result.ok:
+            self._conn.unregister_agent(self.bridge_name)
+            self._queue = None
+            raise RuntimeError(
+                f"Bridge subscribe failed for '{self.bridge_name}': {result.error}"
+            )
+        self._running = True
+        return result
+
+    # ------------------------------------------------------------------
+    # I/O
+    # ------------------------------------------------------------------
+
+    async def messages(self) -> AsyncIterator[dict]:
+        """Async iterator reading from bridge agent queue.
+
+        Yields StdoutMsg.data dicts, logs StderrMsg, stops on ExitMsg/None.
+        """
+        if not self._queue:
+            return
+
+        while True:
+            msg = await self._queue.get()
+            if msg is None:
+                # Connection lost sentinel
+                self._running = False
+                break
+            if StdoutMsg and isinstance(msg, StdoutMsg):
+                yield msg.data
+            elif StderrMsg and isinstance(msg, StderrMsg):
+                log.debug("[flowcoder-engine bridge stderr] %s", msg.text)
+            elif ExitMsg and isinstance(msg, ExitMsg):
+                self._running = False
+                log.info(
+                    "Bridge flowcoder '%s' exited (code=%s)",
+                    self.bridge_name, msg.code,
+                )
+                break
+
+    async def send(self, msg: dict) -> None:
+        """Send a JSON message to the engine's stdin via the bridge."""
+        await self._conn.send_stdin(self.bridge_name, msg)
+
+    # ------------------------------------------------------------------
+    # Shutdown
+    # ------------------------------------------------------------------
+
+    async def stop(self) -> None:
+        """Send shutdown message, then kill via bridge, then unregister."""
+        try:
+            await self.send({"type": "shutdown"})
+        except Exception:
+            pass
+        try:
+            await self._conn.send_command("kill", name=self.bridge_name)
+        except Exception:
+            pass
+        self._conn.unregister_agent(self.bridge_name)
+        self._queue = None
+        self._running = False
+        log.info("Bridge flowcoder '%s' stopped", self.bridge_name)
+
+    async def detach(self) -> None:
+        """Unsubscribe and unregister without killing — bridge buffers output.
+
+        Used during sleep/shutdown when the engine is mid-execution.
+        """
+        try:
+            await self._conn.send_command("unsubscribe", name=self.bridge_name)
+        except Exception:
+            pass
+        self._conn.unregister_agent(self.bridge_name)
+        self._queue = None
+        log.info("Bridge flowcoder '%s' detached (bridge buffering)", self.bridge_name)
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def is_running(self) -> bool:
+        """True if the engine is believed to be running in the bridge."""
+        return self._running
