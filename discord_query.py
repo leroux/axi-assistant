@@ -17,8 +17,8 @@ from datetime import datetime, timezone
 import httpx
 from dotenv import load_dotenv
 
-# Load .env from the same directory as this script
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+# Load .env from cwd if present (supports both main and test instances)
+load_dotenv()
 
 API_BASE = "https://discord.com/api/v10"
 DISCORD_EPOCH_MS = 1420070400000
@@ -32,7 +32,16 @@ MAX_RETRIES = 3
 def get_token() -> str:
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
-        print("Error: DISCORD_TOKEN not set in environment.", file=sys.stderr)
+        # Fall back to sender_token from test config
+        config_path = os.path.expanduser("~/.config/axi/test-config.json")
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            token = config.get("defaults", {}).get("sender_token")
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+    if not token:
+        print("Error: DISCORD_TOKEN not set and no sender_token in test config.", file=sys.stderr)
         sys.exit(1)
     return token
 

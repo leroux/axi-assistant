@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""CLI for managing disposable Axi test instances.
+"""CLI for managing Axi test instance bot/guild reservations.
 
-Each test instance is a git worktree with its own .env, venv, and systemd service.
-Managed via systemd template units (axi-test@<name>.service).
+Handles Discord bot token and guild slot allocation. Agents are responsible
+for worktree creation, dependency installation, and service management.
 
 Usage:
-    axi-test up <name> [--branch BRANCH] [--guild GUILD] [--wait] [--wait-timeout SECS]
-    axi-test down <name> [--keep]
+    axi-test up <name> [--guild GUILD] [--wait] [--wait-timeout SECS]
+    axi-test down <name>
     axi-test restart <name>
     axi-test list
     axi-test msg <name> <message> [--timeout SECS]
@@ -15,7 +15,6 @@ Usage:
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -25,12 +24,6 @@ from dotenv import dotenv_values
 
 TESTS_DIR = "/home/ubuntu/axi-tests"
 CONFIG_PATH = os.path.expanduser("~/.config/axi/test-config.json")
-# Discover the main repo (bare checkout) from any worktree
-_git_common = subprocess.run(
-    ["git", "worktree", "list", "--porcelain"],
-    capture_output=True, text=True, cwd=os.path.dirname(__file__),
-)
-REPO_DIR = _git_common.stdout.split("\n")[0].removeprefix("worktree ").strip() if _git_common.returncode == 0 else "/home/ubuntu/axi-assistant"
 API_BASE = "https://discord.com/api/v10"
 SENTINEL = "Bot has finished responding"
 
@@ -55,7 +48,7 @@ def load_config() -> dict:
 
 
 def resolve_bot_token(config: dict, guild_name: str) -> str:
-    """Resolve guild name → bot name → token."""
+    """Resolve guild name -> bot name -> token."""
     guild = config["guilds"].get(guild_name)
     if not guild:
         print(f"Error: Guild '{guild_name}' not found in config", file=sys.stderr)
@@ -219,10 +212,13 @@ def wait_for_slot(config, explicit_guild, instance_name, timeout, poll_interval=
 def cmd_up(args):
     config = load_config()
     name = args.name
-    branch = args.branch or "HEAD"
-    external_worktree = args.worktree  # --worktree /path/to/existing
-    worktree_path = os.path.join(TESTS_DIR, name)
+    instance_path = os.path.join(TESTS_DIR, name)
     data_path = os.path.join(TESTS_DIR, f"{name}-data")
+
+    if os.path.isfile(os.path.join(instance_path, ".env")):
+        print(f"Error: Instance '{name}' already has a reservation (.env exists)", file=sys.stderr)
+        print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
+        sys.exit(1)
 
     guild_name = pick_guild(config, args.guild)
 
@@ -251,53 +247,19 @@ def cmd_up(args):
     token = resolve_bot_token(config, guild_name)
     defaults = config.get("defaults", {})
 
-    os.makedirs(TESTS_DIR, exist_ok=True)
-
-    if external_worktree:
-        # Use an existing worktree — create a symlink in TESTS_DIR
-        external_worktree = os.path.realpath(external_worktree)
-        if not os.path.isdir(external_worktree):
-            print(f"Error: Worktree path does not exist: {external_worktree}", file=sys.stderr)
-            sys.exit(1)
-        if os.path.exists(worktree_path):
-            # If symlink already points to the right place, continue
-            if os.path.islink(worktree_path) and os.path.realpath(worktree_path) == external_worktree:
-                print(f"Symlink already exists: {worktree_path} -> {external_worktree}")
-            else:
-                print(f"Error: {worktree_path} already exists", file=sys.stderr)
-                print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
-                sys.exit(1)
-        else:
-            os.symlink(external_worktree, worktree_path)
-            print(f"Linked existing worktree: {worktree_path} -> {external_worktree}")
-    else:
-        # Create a new worktree
-        if os.path.exists(worktree_path):
-            print(f"Error: Worktree already exists: {worktree_path}", file=sys.stderr)
-            print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
-            sys.exit(1)
-
-        print(f"Creating worktree from {branch}...")
-        result = subprocess.run(
-            ["git", "worktree", "add", worktree_path, branch],
-            cwd=REPO_DIR, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            print(f"Error creating worktree: {result.stderr.strip()}", file=sys.stderr)
-            sys.exit(1)
-
-    # Write .env
+    # Write .env (instance directory must already exist)
+    os.makedirs(instance_path, exist_ok=True)
     env_content = (
         f"DISCORD_TOKEN={token}\n"
         f"DISCORD_GUILD_ID={guild_id}\n"
         f"ALLOWED_USER_IDS={defaults.get('allowed_user_ids', '')}\n"
         f"SCHEDULE_TIMEZONE={defaults.get('schedule_timezone', 'UTC')}\n"
-        f"DEFAULT_CWD={worktree_path}\n"
+        f"DEFAULT_CWD={instance_path}\n"
         f"AXI_USER_DATA={data_path}\n"
         f"DAY_BOUNDARY_HOUR={defaults.get('day_boundary_hour', '0')}\n"
         f"SHOW_AWAITING_INPUT=true\n"
     )
-    with open(os.path.join(worktree_path, ".env"), "w") as f:
+    with open(os.path.join(instance_path, ".env"), "w") as f:
         f.write(env_content)
 
     # Create data directory with empty schedule files
@@ -308,74 +270,25 @@ def cmd_up(args):
             with open(fpath, "w") as f:
                 json.dump([], f)
 
-    # uv sync
-    actual_worktree = external_worktree or worktree_path
-    print("Syncing dependencies...")
-    result = subprocess.run(
-        ["uv", "sync"], cwd=actual_worktree, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"Warning: uv sync failed: {result.stderr.strip()}", file=sys.stderr)
-
-    # Start service
-    print("Starting service...")
-    subprocess.run(
-        ["systemctl", "--user", "start", f"axi-test@{name}"],
-        check=True,
-    )
-
-    actual_branch = get_worktree_branch(actual_worktree)
-    print(f"\nInstance '{name}' created")
-    print(f"  Guild:    {guild_name} ({guild_id})")
-    print(f"  Branch:   {actual_branch}")
-    print(f"  Worktree: {actual_worktree}")
-    print(f"  Data:     {data_path}")
-    print(f"  Service:  axi-test@{name}")
+    print(f"Reserved guild '{guild_name}' ({guild_id}) for instance '{name}'")
+    print(f"  .env:  {instance_path}/.env")
+    print(f"  Data:  {data_path}")
 
 
 def cmd_down(args):
     name = args.name
-    worktree_path = os.path.join(TESTS_DIR, name)
+    instance_path = os.path.join(TESTS_DIR, name)
     data_path = os.path.join(TESTS_DIR, f"{name}-data")
+    env_path = os.path.join(instance_path, ".env")
 
-    # Stop service (don't error if already stopped)
-    print(f"Stopping axi-test@{name}...")
-    subprocess.run(
-        ["systemctl", "--user", "stop", f"axi-test@{name}"],
-        capture_output=True,
-    )
+    if not os.path.isfile(env_path):
+        print(f"Error: No reservation found for '{name}' (no .env)", file=sys.stderr)
+        sys.exit(1)
 
-    if args.keep:
-        print(f"Instance stopped. Worktree kept at {worktree_path}")
-        return
+    # Remove .env to release the reservation
+    os.remove(env_path)
 
-    # Clean up worktree
-    if os.path.islink(worktree_path):
-        # External worktree via symlink — only remove the symlink, not the worktree
-        target = os.path.realpath(worktree_path)
-        os.unlink(worktree_path)
-        print(f"Removed symlink to {target} (external worktree preserved)")
-        # Clean up .env we wrote into the external worktree
-        ext_env = os.path.join(target, ".env")
-        if os.path.isfile(ext_env):
-            os.unlink(ext_env)
-            print(f"Removed .env from external worktree")
-    elif os.path.isdir(worktree_path):
-        print(f"Removing worktree...")
-        result = subprocess.run(
-            ["git", "worktree", "remove", "--force", worktree_path],
-            cwd=REPO_DIR, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            print(f"Warning: git worktree remove failed: {result.stderr.strip()}", file=sys.stderr)
-            print(f"Removing directory manually...", file=sys.stderr)
-            shutil.rmtree(worktree_path, ignore_errors=True)
-
-    # Remove data directory
-    if os.path.isdir(data_path):
-        shutil.rmtree(data_path)
-
-    print(f"Instance '{name}' removed")
+    print(f"Released reservation for instance '{name}'")
 
 
 def cmd_restart(args):
@@ -394,7 +307,7 @@ def cmd_list(args):
         print("No test instances found")
         return
 
-    # Build guild_id → guild_name map
+    # Build guild_id -> guild_name map
     id_to_guild = {}
     for gname, ginfo in config["guilds"].items():
         id_to_guild[ginfo["guild_id"]] = gname
@@ -406,10 +319,13 @@ def cmd_list(args):
             continue
 
         env = get_instance_env(entry)
+        if not env:
+            continue  # No reservation
+
         guild_id = env.get("DISCORD_GUILD_ID", "?")
         guild_name = id_to_guild.get(guild_id, "?")
         status = "running" if is_instance_running(entry) else "stopped"
-        branch = get_worktree_branch(path)
+        branch = get_worktree_branch(path) if os.path.isdir(os.path.join(path, ".git")) or os.path.isfile(os.path.join(path, ".git")) else "-"
 
         rows.append((entry, guild_name, branch, status, guild_id))
 
@@ -508,15 +424,11 @@ def is_sentinel(msg: dict) -> bool:
 
 
 def get_sender_token() -> str:
-    """Get the sender bot token for sending test messages.
-
-    Uses defaults.sender_token from test-config.json — the sender bot's user ID
-    must be in ALLOWED_USER_IDS on test instances.
-    """
+    """Get the dedicated sender bot token for test messages."""
     config = load_config()
     token = config.get("defaults", {}).get("sender_token")
     if not token:
-        print("Error: No defaults.sender_token in test-config.json", file=sys.stderr)
+        print("Error: No sender_token in test-config.json defaults", file=sys.stderr)
         sys.exit(1)
     return token
 
@@ -525,19 +437,13 @@ def cmd_msg(args):
     name = args.name
     message = args.message
     timeout = args.timeout
-    worktree_path = os.path.join(TESTS_DIR, name)
-
-    if not os.path.isdir(worktree_path):
-        print(f"Error: Instance '{name}' not found", file=sys.stderr)
-        sys.exit(1)
 
     env = get_instance_env(name)
     guild_id = env.get("DISCORD_GUILD_ID")
     if not guild_id:
-        print(f"Error: Could not read DISCORD_GUILD_ID from instance .env", file=sys.stderr)
+        print(f"Error: No reservation found for '{name}' (no .env or missing DISCORD_GUILD_ID)", file=sys.stderr)
         sys.exit(1)
 
-    # Send as Prime's bot (test bot ignores its own messages)
     sender_token = get_sender_token()
 
     with httpx.Client(
@@ -614,15 +520,13 @@ def cmd_logs(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="axi-test",
-        description="Manage disposable Axi test instances",
+        description="Manage Axi test instance bot/guild reservations",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # up
-    p_up = sub.add_parser("up", help="Create and start a test instance")
-    p_up.add_argument("name", help="Instance name (used in paths and service name)")
-    p_up.add_argument("--branch", help="Git branch or ref (default: HEAD)")
-    p_up.add_argument("--worktree", help="Path to existing worktree to use instead of creating a new one")
+    p_up = sub.add_parser("up", help="Reserve a bot/guild slot for a test instance")
+    p_up.add_argument("name", help="Instance name")
     p_up.add_argument("--guild", help="Guild name from config (default: auto-pick)")
     p_up.add_argument("--wait", action="store_true",
                        help="Wait for a bot token slot if all are in use")
@@ -631,13 +535,12 @@ def main():
     p_up.set_defaults(func=cmd_up)
 
     # down
-    p_down = sub.add_parser("down", help="Stop and remove a test instance")
+    p_down = sub.add_parser("down", help="Release a bot/guild reservation")
     p_down.add_argument("name", help="Instance name")
-    p_down.add_argument("--keep", action="store_true", help="Keep worktree and data after stopping")
     p_down.set_defaults(func=cmd_down)
 
     # restart
-    p_restart = sub.add_parser("restart", help="Restart a test instance")
+    p_restart = sub.add_parser("restart", help="Restart a test instance service")
     p_restart.add_argument("name", help="Instance name")
     p_restart.set_defaults(func=cmd_restart)
 
