@@ -25,7 +25,12 @@ from dotenv import dotenv_values
 
 TESTS_DIR = "/home/ubuntu/axi-tests"
 CONFIG_PATH = os.path.expanduser("~/.config/axi/test-config.json")
-REPO_DIR = "/home/ubuntu/axi-assistant"
+# Discover the main repo (bare checkout) from any worktree
+_git_common = subprocess.run(
+    ["git", "worktree", "list", "--porcelain"],
+    capture_output=True, text=True, cwd=os.path.dirname(__file__),
+)
+REPO_DIR = _git_common.stdout.split("\n")[0].removeprefix("worktree ").strip() if _git_common.returncode == 0 else "/home/ubuntu/axi-assistant"
 API_BASE = "https://discord.com/api/v10"
 SENTINEL = "Bot has finished responding"
 
@@ -215,13 +220,9 @@ def cmd_up(args):
     config = load_config()
     name = args.name
     branch = args.branch or "HEAD"
+    external_worktree = args.worktree  # --worktree /path/to/existing
     worktree_path = os.path.join(TESTS_DIR, name)
     data_path = os.path.join(TESTS_DIR, f"{name}-data")
-
-    if os.path.exists(worktree_path):
-        print(f"Error: Worktree already exists: {worktree_path}", file=sys.stderr)
-        print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
-        sys.exit(1)
 
     guild_name = pick_guild(config, args.guild)
 
@@ -250,16 +251,40 @@ def cmd_up(args):
     token = resolve_bot_token(config, guild_name)
     defaults = config.get("defaults", {})
 
-    # Create worktree
     os.makedirs(TESTS_DIR, exist_ok=True)
-    print(f"Creating worktree from {branch}...")
-    result = subprocess.run(
-        ["git", "worktree", "add", worktree_path, branch],
-        cwd=REPO_DIR, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"Error creating worktree: {result.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
+
+    if external_worktree:
+        # Use an existing worktree — create a symlink in TESTS_DIR
+        external_worktree = os.path.realpath(external_worktree)
+        if not os.path.isdir(external_worktree):
+            print(f"Error: Worktree path does not exist: {external_worktree}", file=sys.stderr)
+            sys.exit(1)
+        if os.path.exists(worktree_path):
+            # If symlink already points to the right place, continue
+            if os.path.islink(worktree_path) and os.path.realpath(worktree_path) == external_worktree:
+                print(f"Symlink already exists: {worktree_path} -> {external_worktree}")
+            else:
+                print(f"Error: {worktree_path} already exists", file=sys.stderr)
+                print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
+                sys.exit(1)
+        else:
+            os.symlink(external_worktree, worktree_path)
+            print(f"Linked existing worktree: {worktree_path} -> {external_worktree}")
+    else:
+        # Create a new worktree
+        if os.path.exists(worktree_path):
+            print(f"Error: Worktree already exists: {worktree_path}", file=sys.stderr)
+            print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Creating worktree from {branch}...")
+        result = subprocess.run(
+            ["git", "worktree", "add", worktree_path, branch],
+            cwd=REPO_DIR, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"Error creating worktree: {result.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
 
     # Write .env
     env_content = (
@@ -284,9 +309,10 @@ def cmd_up(args):
                 json.dump([], f)
 
     # uv sync
+    actual_worktree = external_worktree or worktree_path
     print("Syncing dependencies...")
     result = subprocess.run(
-        ["uv", "sync"], cwd=worktree_path, capture_output=True, text=True,
+        ["uv", "sync"], cwd=actual_worktree, capture_output=True, text=True,
     )
     if result.returncode != 0:
         print(f"Warning: uv sync failed: {result.stderr.strip()}", file=sys.stderr)
@@ -298,11 +324,11 @@ def cmd_up(args):
         check=True,
     )
 
-    actual_branch = get_worktree_branch(worktree_path)
+    actual_branch = get_worktree_branch(actual_worktree)
     print(f"\nInstance '{name}' created")
     print(f"  Guild:    {guild_name} ({guild_id})")
     print(f"  Branch:   {actual_branch}")
-    print(f"  Worktree: {worktree_path}")
+    print(f"  Worktree: {actual_worktree}")
     print(f"  Data:     {data_path}")
     print(f"  Service:  axi-test@{name}")
 
@@ -323,8 +349,18 @@ def cmd_down(args):
         print(f"Instance stopped. Worktree kept at {worktree_path}")
         return
 
-    # Remove worktree
-    if os.path.isdir(worktree_path):
+    # Clean up worktree
+    if os.path.islink(worktree_path):
+        # External worktree via symlink — only remove the symlink, not the worktree
+        target = os.path.realpath(worktree_path)
+        os.unlink(worktree_path)
+        print(f"Removed symlink to {target} (external worktree preserved)")
+        # Clean up .env we wrote into the external worktree
+        ext_env = os.path.join(target, ".env")
+        if os.path.isfile(ext_env):
+            os.unlink(ext_env)
+            print(f"Removed .env from external worktree")
+    elif os.path.isdir(worktree_path):
         print(f"Removing worktree...")
         result = subprocess.run(
             ["git", "worktree", "remove", "--force", worktree_path],
@@ -472,15 +508,15 @@ def is_sentinel(msg: dict) -> bool:
 
 
 def get_sender_token() -> str:
-    """Get Prime's bot token for sending test messages.
+    """Get the sender bot token for sending test messages.
 
-    Uses the main repo's .env — Prime is in ALLOWED_USER_IDS on test instances,
-    so messages from Prime's bot are processed by the test bot.
+    Uses defaults.sender_token from test-config.json — the sender bot's user ID
+    must be in ALLOWED_USER_IDS on test instances.
     """
-    prime_env = dotenv_values(os.path.join(REPO_DIR, ".env"))
-    token = prime_env.get("DISCORD_TOKEN")
+    config = load_config()
+    token = config.get("defaults", {}).get("sender_token")
     if not token:
-        print(f"Error: Could not read DISCORD_TOKEN from {REPO_DIR}/.env", file=sys.stderr)
+        print("Error: No defaults.sender_token in test-config.json", file=sys.stderr)
         sys.exit(1)
     return token
 
@@ -586,6 +622,7 @@ def main():
     p_up = sub.add_parser("up", help="Create and start a test instance")
     p_up.add_argument("name", help="Instance name (used in paths and service name)")
     p_up.add_argument("--branch", help="Git branch or ref (default: HEAD)")
+    p_up.add_argument("--worktree", help="Path to existing worktree to use instead of creating a new one")
     p_up.add_argument("--guild", help="Guild name from config (default: auto-pick)")
     p_up.add_argument("--wait", action="store_true",
                        help="Wait for a bot token slot if all are in use")

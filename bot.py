@@ -37,6 +37,7 @@ from bridge import (
     connect_to_bridge,
 )
 from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
+from flowcoder import FlowcoderProcess
 
 load_dotenv()
 
@@ -156,6 +157,7 @@ def _tool_display(name: str) -> str:
 @dataclass
 class AgentSession:
     name: str
+    agent_type: str = "claude_code"  # "claude_code" or "flowcoder"
     client: ClaudeSDKClient | None = None
     cwd: str = ""
     query_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -173,6 +175,9 @@ class AgentSession:
     _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
     _bridge_busy: bool = False   # True when reconnected to a mid-task CLI (bridge idle=False)
     activity: ActivityState = field(default_factory=ActivityState)
+    flowcoder_process: FlowcoderProcess | None = None
+    flowcoder_command: str = ""
+    flowcoder_args: str = ""
     _log: logging.Logger | None = None
 
     def __post_init__(self):
@@ -659,6 +664,9 @@ async def _post_system_prompt_to_channel(
             "cwd": {"type": "string", "description": "Absolute path to the working directory for the agent. Defaults to a per-agent subdirectory under user data (agents/<name>/)."},
             "prompt": {"type": "string", "description": "Initial task instructions for the agent"},
             "resume": {"type": "string", "description": "Optional session ID to resume a previous agent session"},
+            "agent_type": {"type": "string", "enum": ["claude_code", "flowcoder"], "description": "Agent type. 'claude_code' (default) for interactive Claude, 'flowcoder' for flowchart executor."},
+            "command": {"type": "string", "description": "Flowcoder command name (required when agent_type='flowcoder')"},
+            "command_args": {"type": "string", "description": "Arguments for the flowcoder command (shell-style string)"},
         },
         "required": ["name", "prompt"],
     },
@@ -669,6 +677,16 @@ async def axi_spawn_agent(args):
     agent_cwd = os.path.realpath(os.path.expanduser(args.get("cwd", default_cwd)))
     agent_prompt = args.get("prompt", "")
     agent_resume = args.get("resume")
+    agent_type = args.get("agent_type", "claude_code")
+    fc_command = args.get("command", "")
+    fc_command_args = args.get("command_args", "")
+
+    # Flowcoder-specific validation
+    if agent_type == "flowcoder":
+        if not fc_command:
+            return {"content": [{"type": "text", "text": "Error: 'command' is required when agent_type='flowcoder'."}], "is_error": True}
+        if agent_resume:
+            return {"content": [{"type": "text", "text": "Error: 'resume' is not supported for flowcoder agents."}], "is_error": True}
 
     ALLOWED_CWDS = (os.path.realpath(AXI_USER_DATA), os.path.realpath(BOT_DIR), os.path.realpath(BOT_WORKTREES_DIR))
     if not any(agent_cwd == d or agent_cwd.startswith(d + os.sep) for d in ALLOWED_CWDS):
@@ -685,7 +703,10 @@ async def axi_spawn_agent(args):
         try:
             if agent_name in agents and agent_resume:
                 await reclaim_agent_name(agent_name)
-            await spawn_agent(agent_name, agent_cwd, agent_prompt, resume=agent_resume)
+            await spawn_agent(
+                agent_name, agent_cwd, agent_prompt, resume=agent_resume,
+                agent_type=agent_type, command=fc_command, command_args=fc_command_args,
+            )
         except Exception:
             log.exception("Error in background spawn of agent '%s'", agent_name)
             try:
@@ -695,9 +716,9 @@ async def axi_spawn_agent(args):
             except Exception:
                 pass
 
-    log.info("Spawning agent '%s' via MCP tool (cwd=%s, resume=%s)", agent_name, agent_cwd, agent_resume)
+    log.info("Spawning agent '%s' via MCP tool (type=%s, cwd=%s, resume=%s)", agent_name, agent_type, agent_cwd, agent_resume)
     asyncio.create_task(_do_spawn())
-    return {"content": [{"type": "text", "text": f"Agent '{agent_name}' spawn initiated in {agent_cwd}. The agent's channel will be notified when it's ready."}]}
+    return {"content": [{"type": "text", "text": f"Agent '{agent_name}' ({agent_type}) spawn initiated in {agent_cwd}. The agent's channel will be notified when it's ready."}]}
 
 
 @tool(
@@ -1042,12 +1063,15 @@ async def end_session(name: str) -> None:
     session = agents.get(name)
     if session is None:
         return
+    if session.flowcoder_process:
+        await session.flowcoder_process.stop()
+        session.flowcoder_process = None
     if session.client is not None:
         await _disconnect_client(session.client, name)
         session.client = None
     session.close_log()
     agents.pop(name, None)
-    log.info("Claude session '%s' ended", name)
+    log.info("Session '%s' ended", name)
 
 
 async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
@@ -1139,7 +1163,14 @@ async def sleep_agent(session: AgentSession) -> None:
     """Shut down a session's ClaudeSDKClient but keep the AgentSession in the agents dict.
 
     No-op if the session is already sleeping (client is None).
+    For flowcoder agents: stops the process if running, then returns.
     """
+    if session.agent_type == "flowcoder":
+        if session.flowcoder_process and session.flowcoder_process.is_running:
+            await session.flowcoder_process.stop()
+            session.flowcoder_process = None
+        return
+
     if session.client is None:
         return
 
@@ -1207,11 +1238,15 @@ async def wake_agent(session: AgentSession) -> None:
     Uses the bridge process to manage the CLI subprocess when bridge_conn
     is available, otherwise falls back to direct subprocess management.
 
+    No-op for flowcoder agents (they don't use wake/sleep).
     No-op if the session is already awake (client is not None).
     Falls back to a fresh session if resume fails.
     Enforces the awake-agent concurrency limit by evicting idle agents if needed.
     Uses _wake_lock to prevent TOCTOU races when multiple agents try to wake concurrently.
     """
+    if session.agent_type == "flowcoder":
+        return  # Flowcoder agents don't use wake/sleep
+
     if session.client is not None:
         return
 
@@ -1549,13 +1584,10 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
 async def send_long(channel, text: str) -> None:
     """Send a potentially long message, splitting as needed."""
     chunks = split_message(text.strip())
-    log.info("SEND_LONG: channel=%s chunks=%d text=%r", getattr(channel, 'name', '?'), len(chunks), text.strip()[:80])
-    for i, chunk in enumerate(chunks):
+    for chunk in chunks:
         if chunk:
-            log.info("SEND_LONG: chunk %d/%d len=%d channel=%s", i+1, len(chunks), len(chunk), getattr(channel, 'name', '?'))
             try:
-                result = await channel.send(chunk)
-                log.info("SEND_LONG: sent msg_id=%s", result.id)
+                await channel.send(chunk)
             except discord.NotFound:
                 # Channel was deleted — try to recreate it
                 agent_name = channel_to_agent.get(channel.id)
@@ -2166,7 +2198,10 @@ async def reclaim_agent_name(name: str) -> None:
         await send_system(channel, f"Recycled previous **{name}** session for new scheduled run.")
 
 
-async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | None = None) -> None:
+async def spawn_agent(
+    name: str, cwd: str, initial_prompt: str, resume: str | None = None,
+    agent_type: str = "claude_code", command: str = "", command_args: str = "",
+) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
     # Auto-create cwd if it doesn't exist
     if not os.path.isdir(cwd):
@@ -2175,33 +2210,54 @@ async def spawn_agent(name: str, cwd: str, initial_prompt: str, resume: str | No
 
     channel = await ensure_agent_channel(name)
 
-    if resume:
+    if agent_type == "flowcoder":
+        await send_system(channel, f"Spawning flowcoder agent **{name}** — command `{command}` in `{cwd}`...")
+    elif resume:
         await send_system(channel, f"Resuming agent **{name}** (session `{resume[:8]}…`) in `{cwd}`...")
     else:
         await send_system(channel, f"Spawning agent **{name}** in `{cwd}`...")
 
-    # Create agent as sleeping — _run_initial_prompt will wake it if needed
-    session = AgentSession(
-        name=name,
-        cwd=cwd,
-        system_prompt=_make_spawned_agent_system_prompt(cwd),
-        client=None,
-        session_id=resume,
-        discord_channel_id=channel.id,
-        mcp_servers={
-            "utils": _utils_mcp_server,
-            "schedule": make_schedule_mcp_server(name, SCHEDULES_PATH),
-        },
-    )
+    if agent_type == "flowcoder":
+        session = AgentSession(
+            name=name,
+            agent_type="flowcoder",
+            cwd=cwd,
+            system_prompt=None,
+            client=None,
+            session_id=None,
+            discord_channel_id=channel.id,
+            mcp_servers=None,
+            flowcoder_command=command,
+            flowcoder_args=command_args,
+        )
+    else:
+        # Create agent as sleeping — _run_initial_prompt will wake it if needed
+        session = AgentSession(
+            name=name,
+            cwd=cwd,
+            system_prompt=_make_spawned_agent_system_prompt(cwd),
+            client=None,
+            session_id=resume,
+            discord_channel_id=channel.id,
+            mcp_servers={
+                "utils": _utils_mcp_server,
+                "schedule": make_schedule_mcp_server(name, SCHEDULES_PATH),
+            },
+        )
+
     agents[name] = session
     channel_to_agent[channel.id] = name
-    log.info("Agent '%s' registered (sleeping, cwd=%s, resume=%s)", name, cwd, resume)
+    log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)
 
     # Set initial topic with cwd (session_id will be added when agent sleeps)
     desired_topic = _format_channel_topic(cwd, resume)
     if channel.topic != desired_topic:
         log.info("Updating topic on #%s: %r -> %r", channel.name, channel.topic, desired_topic)
         await channel.edit(topic=desired_topic)
+
+    if agent_type == "flowcoder":
+        asyncio.create_task(_run_flowcoder(session, channel))
+        return
 
     if not initial_prompt:
         await send_system(channel, f"Agent **{name}** is ready (sleeping).")
@@ -2232,6 +2288,145 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
     prompt = ts_prefix + prompt
 
     asyncio.create_task(_run_initial_prompt(session, prompt, channel))
+
+
+async def _run_flowcoder(session: AgentSession, channel: TextChannel) -> None:
+    """Run a flowcoder agent to completion, streaming output to Discord."""
+    try:
+        async with session.query_lock:
+            session.last_activity = datetime.now(timezone.utc)
+            session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+
+            cmd_display = session.flowcoder_command
+            if session.flowcoder_args:
+                cmd_display += f" {session.flowcoder_args}"
+            await channel.send(f"*System:* Running flowcoder command: `{cmd_display}`")
+
+            proc = FlowcoderProcess(
+                command=session.flowcoder_command,
+                args=session.flowcoder_args,
+                cwd=session.cwd,
+            )
+            await proc.start()
+            session.flowcoder_process = proc
+
+            try:
+                await _stream_flowcoder_to_channel(session, channel)
+            except Exception:
+                log.exception("Error streaming flowcoder output for '%s'", session.name)
+                await send_system(channel, f"Flowcoder agent **{session.name}** encountered a streaming error.")
+            finally:
+                await proc.stop()
+                session.flowcoder_process = None
+                session.activity = ActivityState(phase="idle")
+
+        log.info("Flowcoder agent '%s' finished", session.name)
+
+    except Exception:
+        log.exception("Error running flowcoder agent '%s'", session.name)
+        await send_system(channel, f"Flowcoder agent **{session.name}** encountered an error.")
+
+
+async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChannel) -> None:
+    """Read flowcoder messages and translate to Discord output."""
+    proc = session.flowcoder_process
+    assert proc is not None
+
+    text_buffer: list[str] = []
+    current_block = ""
+    block_count = 0
+    start_time = time.monotonic()
+
+    async def _flush_buffer() -> None:
+        if text_buffer:
+            text = "".join(text_buffer)
+            text_buffer.clear()
+            if text.strip():
+                await send_long(channel, text)
+
+    async for msg in proc.messages():
+        session.last_activity = datetime.now(timezone.utc)
+        msg_type = msg.get("type", "")
+        msg_subtype = msg.get("subtype", "")
+
+        if msg_type == "system" and msg_subtype == "block_start":
+            await _flush_buffer()
+            data = msg.get("data", {})
+            block_count += 1
+            block_name = data.get("block_name", "?")
+            block_type = data.get("block_type", "?")
+            current_block = block_name
+            session.activity = ActivityState(
+                phase="tool_use",
+                tool_name=f"flowcoder:{block_type}",
+                query_started=session.activity.query_started,
+            )
+            await channel.send(f"> **[{block_count}]** {block_name} ({block_type})...")
+
+        elif msg_type == "system" and msg_subtype == "block_complete":
+            await _flush_buffer()
+            data = msg.get("data", {})
+            success = data.get("success", True)
+            block_name = data.get("block_name", current_block)
+            if not success:
+                await channel.send(f"> {block_name} **FAILED**")
+
+        elif msg_type == "system" and msg_subtype == "session_message":
+            data = msg.get("data", {})
+            inner = data.get("message", {})
+            inner_type = inner.get("type", "")
+
+            if inner_type == "assistant":
+                # Turn complete — flush any accumulated stream text.
+                await _flush_buffer()
+
+            elif inner_type == "stream_event":
+                event = inner.get("event", {})
+                event_type = event.get("type", "")
+                # claude stream-json: content_block_delta with delta.text
+                if event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text_buffer.append(delta.get("text", ""))
+                        buf_len = sum(len(t) for t in text_buffer)
+                        if buf_len >= 1800:
+                            await _flush_buffer()
+
+        elif msg_type == "result":
+            await _flush_buffer()
+            elapsed = time.monotonic() - start_time
+            is_error = msg.get("is_error", False)
+            status = "**failed**" if is_error else "**completed**"
+            cost = msg.get("total_cost_usd", 0)
+            result_text = msg.get("result", "")
+
+            summary = f"Flowchart {status} in {elapsed:.0f}s | Cost: ${cost:.4f} | Blocks: {block_count}"
+            await send_system(channel, summary)
+
+            if result_text and len(result_text) <= 1900:
+                await channel.send(f"```\n{result_text}\n```")
+            elif result_text:
+                await channel.send(f"```\n{result_text[:1900]}…\n```")
+
+            # Reset for potential follow-up commands via the message loop
+            block_count = 0
+            start_time = time.monotonic()
+
+        elif msg_type == "control_request":
+            # Auto-allow control requests
+            request = msg.get("request", msg)
+            request_id = request.get("request_id", "")
+            response = {
+                "type": "control_response",
+                "response": {
+                    "request_id": request_id,
+                    "allowed": True,
+                },
+            }
+            await proc.send(response)
+
+    # Final flush in case stream ended without a result message
+    await _flush_buffer()
 
 
 async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel: TextChannel) -> None:
@@ -2635,6 +2830,16 @@ async def on_message(message):
         return
 
     log.debug("Routing message to agent '%s' (locked=%s, client=%s)", agent_name, session.query_lock.locked(), session.client is not None)
+
+    # Flowcoder agents: forward messages to stdin or report finished
+    if session.agent_type == "flowcoder":
+        if session.flowcoder_process and session.flowcoder_process.is_running:
+            user_msg = {"type": "user", "message": {"role": "user", "content": content if isinstance(content, str) else str(content)}}
+            await session.flowcoder_process.send(user_msg)
+            await _add_reaction(message, "✅")
+        else:
+            await send_system(message.channel, f"Flowcoder agent **{agent_name}** has finished.")
+        return
 
     # Queue messages while rate limited (don't waste API calls)
     if _is_rate_limited() and not session.query_lock.locked():
@@ -3137,6 +3342,27 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
     """Format a detailed status message for a single agent."""
     now = datetime.now(timezone.utc)
     lines = [f"**{name}**"]
+
+    # Flowcoder-specific status
+    if session.agent_type == "flowcoder":
+        lines.append("Type: flowcoder")
+        lines.append(f"Command: `{session.flowcoder_command}`")
+        if session.flowcoder_args:
+            lines.append(f"Args: `{session.flowcoder_args}`")
+        if session.flowcoder_process and session.flowcoder_process.is_running:
+            lines.append("State: **running**")
+            activity = session.activity
+            if activity.tool_name:
+                lines.append(f"Current block: {activity.tool_name}")
+            if activity.query_started:
+                elapsed = int((now - activity.query_started).total_seconds())
+                lines.append(f"Elapsed: {_format_time_remaining(elapsed)}")
+        else:
+            lines.append("State: finished")
+            idle = int((now - session.last_activity).total_seconds())
+            lines.append(f"Finished: {_format_time_remaining(idle)} ago")
+        lines.append(f"cwd: `{session.cwd}`")
+        return "\n".join(lines)
 
     # Basic state
     if session.client is None:
