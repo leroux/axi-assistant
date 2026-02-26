@@ -5,9 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=ubuntu
 WorkingDirectory=/home/ubuntu/axi-tests/%i
 ExecStart=/home/ubuntu/.local/bin/uv run python supervisor.py
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=15
+Environment="HOME=/home/ubuntu"
 Environment="PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

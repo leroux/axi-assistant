@@ -10,7 +10,13 @@ dependencies = [
     "httpx",
     "tzdata>=2025.3",
     "arrow",
+    "flowcoder-engine",
+    "flowcoder-flowchart",
 ]
+
+[tool.uv.sources]
+flowcoder-engine = { path = "/home/ubuntu/flowcoder-rewrite/packages/flowcoder-engine" }
+flowcoder-flowchart = { path = "/home/ubuntu/flowcoder-rewrite/packages/flowcoder-flowchart" }
 
 [dependency-groups]
 dev = [

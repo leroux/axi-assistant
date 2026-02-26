@@ -708,6 +708,7 @@ async def axi_spawn_agent(args):
                 agent_type=agent_type, command=fc_command, command_args=fc_command_args,
             )
         except Exception:
+            _bot_creating_channels.discard(_normalize_channel_name(agent_name))
             log.exception("Error in background spawn of agent '%s'", agent_name)
             try:
                 channel = await get_agent_channel(agent_name)
@@ -717,6 +718,10 @@ async def axi_spawn_agent(args):
                 pass
 
     log.info("Spawning agent '%s' via MCP tool (type=%s, cwd=%s, resume=%s)", agent_name, agent_type, agent_cwd, agent_resume)
+    # Guard against on_guild_channel_create race: mark channel as bot-created
+    # BEFORE the background task runs, so the guard is already set when the
+    # gateway event fires.  spawn_agent will discard it after agents[name] is set.
+    _bot_creating_channels.add(_normalize_channel_name(agent_name))
     asyncio.create_task(_do_spawn())
     return {"content": [{"type": "text", "text": f"Agent '{agent_name}' ({agent_type}) spawn initiated in {agent_cwd}. The agent's channel will be notified when it's ready."}]}
 
@@ -1514,11 +1519,13 @@ async def ensure_agent_channel(agent_name: str) -> TextChannel:
                 return ch
 
     # Create new channel in Active category
+    already_guarded = normalized in _bot_creating_channels
     _bot_creating_channels.add(normalized)
     try:
         channel = await target_guild.create_text_channel(normalized, category=active_category)
     finally:
-        _bot_creating_channels.discard(normalized)
+        if not already_guarded:
+            _bot_creating_channels.discard(normalized)
     channel_to_agent[channel.id] = agent_name
     log.info("Created channel #%s in Active category", normalized)
     return channel
@@ -2208,6 +2215,11 @@ async def spawn_agent(
         os.makedirs(cwd, exist_ok=True)
         log.info("Auto-created working directory: %s", cwd)
 
+    # Hold the guard until agents[name] is set — prevents on_guild_channel_create
+    # from auto-registering a plain session over the real one (race: gateway event
+    # arrives after channel creation but before agents dict is populated).
+    normalized = _normalize_channel_name(name)
+    _bot_creating_channels.add(normalized)
     channel = await ensure_agent_channel(name)
 
     if agent_type == "flowcoder":
@@ -2247,6 +2259,7 @@ async def spawn_agent(
 
     agents[name] = session
     channel_to_agent[channel.id] = name
+    _bot_creating_channels.discard(normalized)
     log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)
 
     # Set initial topic with cwd (session_id will be added when agent sleeps)
@@ -2292,6 +2305,7 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
 
 async def _run_flowcoder(session: AgentSession, channel: TextChannel) -> None:
     """Run a flowcoder agent to completion, streaming output to Discord."""
+    log.info("Starting flowcoder agent '%s' (channel=%s)", session.name, channel.id)
     try:
         async with session.query_lock:
             session.last_activity = datetime.now(timezone.utc)

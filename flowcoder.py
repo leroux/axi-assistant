@@ -38,22 +38,31 @@ class FlowcoderProcess:
 
     async def start(self) -> None:
         """Spawn the flowcoder-engine subprocess."""
-        # Engine lives under the real user data dir, not a test instance's data dir
+        import shutil
+
+        # Prefer the installed flowcoder-engine from PATH (pip-installed),
+        # fall back to a standalone install at FLOWCODER_HOME
+        engine_bin = shutil.which("flowcoder-engine")
+        if not engine_bin:
+            flowcoder_home = os.environ.get(
+                "FLOWCODER_HOME",
+                os.path.expanduser("~/flowcoder-rewrite"),
+            )
+            engine_bin = os.path.join(
+                flowcoder_home,
+                "packages", "flowcoder-engine", ".venv", "bin", "flowcoder-engine",
+            )
+
+        # Default search path for built-in commands
         flowcoder_home = os.environ.get(
             "FLOWCODER_HOME",
-            os.path.join(os.path.expanduser("~/axi-user-data"),
-                         "agents", "flowcoder", "flowcoder-rewrite"),
-        )
-        engine_bin = os.path.join(
-            flowcoder_home,
-            "packages", "flowcoder-engine", ".venv", "bin", "flowcoder-engine",
+            os.path.expanduser("~/flowcoder-rewrite"),
         )
         default_search = os.path.join(flowcoder_home, "examples", "commands")
 
         cmd: list[str] = [engine_bin, "--command", self.command]
         if self.args:
             cmd += ["--args", self.args]
-        # Always include the default examples/commands search path
         for sp in [default_search] + self.search_paths:
             cmd += ["--search-path", sp]
 
