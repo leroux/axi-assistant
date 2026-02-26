@@ -319,9 +319,26 @@ async def _extract_message_content(message: discord.Message) -> str | list:
     content blocks ``[{"type": "text", ...}, {"type": "image", ...}, ...]``
     when images are present.
 
+    Handles Discord's long-message behavior: when a message exceeds the
+    character limit without Nitro, Discord sends it as a blank message with
+    an attached ``message.txt``. We read that file as the message text.
+
     A UTC timestamp from the Discord message is prepended to give the LLM
     temporal awareness.
     """
+    # Discord long-message: blank content with an attached message.txt
+    if not message.content.strip() and message.attachments:
+        for a in message.attachments:
+            if a.filename == "message.txt" and a.size <= 100_000:
+                try:
+                    data = await a.read()
+                    text = data.decode("utf-8")
+                    log.debug("Read long message from message.txt (%d chars)", len(text))
+                    message.content = text
+                    break
+                except Exception:
+                    log.warning("Failed to read message.txt attachment", exc_info=True)
+
     ts_prefix = message.created_at.strftime("[%Y-%m-%d %H:%M:%S UTC] ")
 
     image_attachments = [
