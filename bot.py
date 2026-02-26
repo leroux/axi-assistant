@@ -902,6 +902,103 @@ async def _discord_request(method: str, path: str, **kwargs) -> httpx.Response:
 
 
 @tool(
+    "discord_send_file",
+    "Send a file as a Discord message attachment to your own channel or another channel. "
+    "If channel_id is omitted, the file is sent to your own agent channel.",
+    {
+        "type": "object",
+        "properties": {
+            "channel_id": {"type": "string", "description": "The Discord channel ID. Omit to send to your own channel."},
+            "file_path": {"type": "string", "description": "Absolute path to the file to upload"},
+            "content": {"type": "string", "description": "Optional text message to include with the file"},
+        },
+        "required": ["file_path"],
+    },
+)
+async def discord_send_file(args):
+    file_path = args["file_path"]
+    content = args.get("content", "")
+    channel_id = args.get("channel_id")
+    if not channel_id:
+        # Auto-resolve: find calling agent's channel
+        for ch_id, name in channel_to_agent.items():
+            session = agents.get(name)
+            if session and session.client is not None:
+                # Heuristic: the agent currently awake and calling this tool
+                channel_id = str(ch_id)
+                break
+    if not channel_id:
+        return {"content": [{"type": "text", "text": "Error: could not determine channel. Provide channel_id explicitly."}], "is_error": True}
+    if not os.path.isfile(file_path):
+        return {"content": [{"type": "text", "text": f"Error: file not found: {file_path}"}], "is_error": True}
+    filename = os.path.basename(file_path)
+    try:
+        with open(file_path, "rb") as f:
+            file_data = f.read()
+        data = {}
+        if content:
+            data["content"] = content
+        files = {"files[0]": (filename, file_data)}
+        resp = await _discord_request(
+            "POST", f"/channels/{channel_id}/messages",
+            data=data, files=files,
+        )
+        msg = resp.json()
+        return {"content": [{"type": "text", "text": f"File '{filename}' sent (msg id: {msg['id']})"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
+
+
+_utils_mcp_server = create_sdk_mcp_server(
+    name="utils",
+    version="1.0.0",
+    tools=[get_date_and_time, discord_send_file],
+)
+
+@tool(
+    "axi_restart",
+    "Restart the Axi bot. Waits for busy agents to finish first (graceful). "
+    "Only use when the user explicitly asks you to restart.",
+    {"type": "object", "properties": {}, "required": []},
+)
+async def axi_restart(args):
+    log.info("Restart requested via MCP tool")
+    if shutdown_coordinator is None:
+        return {"content": [{"type": "text", "text": "Bot is not fully initialized yet."}]}
+    asyncio.create_task(shutdown_coordinator.graceful_shutdown("MCP tool", skip_agent=MASTER_AGENT_NAME))
+    return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
+
+
+_axi_mcp_server = create_sdk_mcp_server(
+    name="axi",
+    version="1.0.0",
+    tools=[axi_spawn_agent, axi_kill_agent, axi_restart],
+)
+
+
+def _sdk_mcp_servers_for_cwd(cwd: str, agent_name: str | None = None) -> dict:
+    """Return the appropriate SDK MCP servers for a given working directory.
+
+    Agents whose cwd is BOT_DIR or a subdirectory get the full axi MCP server
+    (spawn/kill/restart) instead of just utils+schedule.  This lets crash-handler
+    and similar agents spawn other agents.  Admin agents also see all schedules.
+    """
+    servers: dict = {"utils": _utils_mcp_server}
+    resolved = os.path.realpath(cwd)
+    bot_dir_resolved = os.path.realpath(BOT_DIR)
+    is_admin = resolved == bot_dir_resolved or resolved.startswith(bot_dir_resolved + os.sep)
+    if agent_name:
+        servers["schedule"] = make_schedule_mcp_server(
+            agent_name, SCHEDULES_PATH, is_master=is_admin,
+        )
+    if is_admin:
+        servers["axi"] = _axi_mcp_server
+    return servers
+
+
+# --- Discord REST MCP tools (for cross-server messaging) ---
+
+@tool(
     "discord_list_channels",
     "List text channels in a Discord guild/server. Returns channel id, name, and category.",
     {
@@ -1924,7 +2021,80 @@ def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
     return None
 
 
-async def stream_response_to_channel(session: AgentSession, channel) -> str | None:
+def _is_flowcoder_command(content: str | list, session: AgentSession) -> bool:
+    """Check if a message is a FlowCoder slash command (not a Discord slash command).
+
+    Returns True if the message starts with / and matches an available FlowCoder command.
+    """
+    if not isinstance(content, str) or not content.startswith("/"):
+        return False
+    if session.flowcoder is None:
+        return False
+    # Extract command name (first word after /)
+    stripped = content[1:].strip()
+    parts = stripped.split(None, 1)
+    if not parts:
+        return False
+    command_name = parts[0]
+    # Check if this command exists in the FlowCoder commands directory
+    return session.flowcoder.storage_service.command_exists(command_name)
+
+
+async def _execute_flowcoder_command(session: AgentSession, content: str, channel) -> None:
+    """Execute a FlowCoder slash command and stream results to Discord."""
+
+    log.info("Executing FlowCoder command for '%s': %s", session.name, content[:100])
+    session._fc_channel = channel
+    session._fc_text_buf = ""
+    try:
+        async with channel.typing():
+            context = await session.flowcoder.execute_command(content)
+        # Post execution summary
+        status = context.status.value if hasattr(context.status, 'value') else str(context.status)
+        summary = f"*FlowCoder:* Command `{content.split()[0]}` finished — **{status}**"
+        await send_long(channel, summary)
+    except _FCCommandNotFound as e:
+        await send_long(channel, f"*FlowCoder:* Command not found: {e}")
+    except Exception as e:
+        log.exception("FlowCoder command failed for '%s'", session.name)
+        await send_long(channel, f"*FlowCoder:* Command failed: {e}")
+    finally:
+        session._fc_channel = None
+        session._fc_text_buf = ""
+
+
+async def _query_agent(session: AgentSession, content: str | list, channel, *, show_awaiting_input: bool = True) -> None:
+    """Send a message to an agent, routing through FlowCoder if applicable.
+
+    For FlowCoder slash commands: executes the flowchart.
+    For regular messages: sends to Claude via the SDK and streams the response.
+    Appends record-tracking instruction for eligible agents and enqueues updates.
+    """
+    if _is_flowcoder_command(content, session):
+        await _execute_flowcoder_command(session, content, channel)
+        return
+
+    # Append record-tracking instruction for eligible agents
+    query_content = content
+    if session.name != "record-updater":
+        query_content = _append_record_tracking(content)
+
+    await session.client.query(_as_stream(query_content))
+    response_text = await stream_response_to_channel(session, channel, show_awaiting_input=show_awaiting_input)
+
+    # Check for record tracking in response
+    if session.name != "record-updater" and response_text:
+        tracking = _extract_record_tracking(response_text)
+        if tracking and tracking.get("records_changed"):
+            summary = tracking.get("summary", "No summary provided")
+            log.info("Agent '%s' reported records changed: %s", session.name, summary[:100])
+            try:
+                await _enqueue_record_update(session.name, session.cwd, summary)
+            except Exception:
+                log.exception("Failed to enqueue record update for '%s'", session.name)
+
+
+async def stream_response_to_channel(session: AgentSession, channel, show_awaiting_input: bool = True) -> str:
     """Stream Claude's response from a specific agent session to a Discord channel.
 
     Message flow:
@@ -3245,8 +3415,6 @@ async def check_schedules():
     # --- Idle agent detection (Active-category agents only) ---
     idle_agents = []
     for agent_name, session in agents.items():
-        if agent_name == MASTER_AGENT_NAME:
-            continue
         if session.client is None:
             continue  # Sleeping agents don't need idle reminders
         if session.query_lock.locked():
@@ -3292,8 +3460,6 @@ async def check_schedules():
     # Only attempt if there's an awake slot available to avoid re-queuing loops.
     if _count_awake_agents() < MAX_AWAKE_AGENTS:
         for agent_name, session in agents.items():
-            if agent_name == MASTER_AGENT_NAME:
-                continue
             if (session.client is None
                     and not session.message_queue.empty()
                     and not session.query_lock.locked()):
