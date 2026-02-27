@@ -136,14 +136,15 @@ Instead, ask questions as normal text messages. If you want the user to choose b
 list them in your message (e.g. "1. Option A, 2. Option B — which do you prefer?").
 - **TodoWrite** — Do NOT use. The visual task list is invisible to the user.
 If you need to track tasks, write them in a file or just list them in a message.
-- **EnterPlanMode / ExitPlanMode** — Do NOT use. Plan mode is a Claude Code UI concept
-that doesn't exist in Discord. If you need to plan, just write out your plan in a message.
+- **EnterPlanMode / ExitPlanMode** — These are supported in Discord! When you call ExitPlanMode,
+the plan will be posted to the Discord channel and the user can approve, reject, or provide feedback.
+Use plan mode normally for non-trivial implementation tasks.
 - **Skill** — Do NOT use. Skills are Claude Code UI features that don't translate to Discord.
 - **EnterWorktree** — Do NOT use. Worktree management is a Claude Code UI feature.
 
 Tools that DO work fine over Discord (use freely):
 Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Task (for spawning subagents),
-NotebookEdit, and all MCP tools.
+NotebookEdit, EnterPlanMode, ExitPlanMode, and all MCP tools.
 
 ## Sandbox Policy
 
