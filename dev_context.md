@@ -91,7 +91,7 @@ The parent (Axi master) prepares the environment, then spawns an agent in the co
 5. **Commit**: `git add -A && git commit -m "description"`
 6. **Merge to main**: `uv run python axi_test.py merge` — auto-detects worktree vs main, no-op if already in main
 7. **Tear down**: `uv run python axi_test.py down <name>` — always clean up your own instances
-8. **Restart**: Use `axi_restart` to pick up the merged changes (or tell the parent to restart)
+8. **Restart**: Tell the parent to restart so it picks up the merged changes (spawned agents do NOT have `axi_restart` — only the master can restart itself)
 
 ### Fast Message Polling
 

@@ -1057,33 +1057,6 @@ async def discord_send_file(args):
         return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
 
 
-_utils_mcp_server = create_sdk_mcp_server(
-    name="utils",
-    version="1.0.0",
-    tools=[get_date_and_time, discord_send_file],
-)
-
-@tool(
-    "axi_restart",
-    "Restart the Axi bot. Waits for busy agents to finish first (graceful). "
-    "Only use when the user explicitly asks you to restart.",
-    {"type": "object", "properties": {}, "required": []},
-)
-async def axi_restart(args):
-    log.info("Restart requested via MCP tool")
-    if shutdown_coordinator is None:
-        return {"content": [{"type": "text", "text": "Bot is not fully initialized yet."}]}
-    asyncio.create_task(shutdown_coordinator.graceful_shutdown("MCP tool", skip_agent=MASTER_AGENT_NAME))
-    return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
-
-
-_axi_mcp_server = create_sdk_mcp_server(
-    name="axi",
-    version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent, axi_restart],
-)
-
-
 # --- Discord REST MCP tools (for cross-server messaging) ---
 
 @tool(
@@ -1154,7 +1127,15 @@ async def axi_restart(args):
     return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
 
 
+# Spawned agents get spawn+kill only (no restart — they tell the parent to restart)
 _axi_mcp_server = create_sdk_mcp_server(
+    name="axi",
+    version="1.0.0",
+    tools=[axi_spawn_agent, axi_kill_agent],
+)
+
+# Master agent gets the full set including restart
+_axi_master_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
     tools=[axi_spawn_agent, axi_kill_agent, axi_restart],
@@ -4881,7 +4862,7 @@ async def on_ready():
         log.warning("Failed to read master session_id", exc_info=True)
 
     # Register master agent as sleeping — it will wake on first message
-    master_mcp = {"axi": _axi_mcp_server}
+    master_mcp = {"axi": _axi_master_mcp_server}
     if os.path.isdir(BOT_WORKTREES_DIR):
         master_mcp["discord"] = _discord_mcp_server
     master_session = AgentSession(
