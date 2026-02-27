@@ -576,11 +576,7 @@ def make_cwd_permission_callback(allowed_cwd: str, session: "AgentSession | None
         tool_name: str, tool_input: dict, ctx: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
         # Forbidden tools in Discord mode (rendered as invisible/broken in Discord channel UI)
-        forbidden_tools = {"AskUserQuestion", "TodoWrite", "Skill", "EnterWorktree"}
-        # Spawned agents must not use Task (subagent spawning) — it creates hard-to-interrupt
-        # subprocesses that compete for resources. Only the master agent may use it.
-        if session and session.name != MASTER_AGENT_NAME:
-            forbidden_tools.add("Task")
+        forbidden_tools = {"AskUserQuestion", "TodoWrite", "Skill", "EnterWorktree", "Task"}
         if tool_name in forbidden_tools:
             return PermissionResultDeny(
                 message=f"{tool_name} is not compatible with Discord-based agent mode. Use text messages to communicate instead."
@@ -2046,6 +2042,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> 
         resume=resume_id,
         sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
         mcp_servers=session.mcp_servers or {},
+        disallowed_tools=["Task"],
     )
 
 
@@ -3829,6 +3826,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
                 cwd=session.cwd,
                 include_partial_messages=True,
                 stderr=make_stderr_callback(session),
+                disallowed_tools=["Task"],
             )
 
             # Create SDK client with our bridge transport
