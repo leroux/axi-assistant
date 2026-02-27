@@ -1297,34 +1297,6 @@ def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> 
     )
 
 
-async def _wake_agent_via_bridge(session: AgentSession, options: ClaudeAgentOptions) -> ClaudeSDKClient:
-    """Wake an agent using the bridge transport.
-
-    Creates a BridgeTransport, spawns the CLI via bridge, then creates
-    a ClaudeSDKClient using that transport.
-    """
-    transport = BridgeTransport(
-        session.name, bridge_conn,
-        stderr_callback=make_stderr_callback(session),
-    )
-    await transport.connect()
-
-    # Build CLI args and spawn via bridge
-    cli_args, env, cwd = build_cli_spawn_args(options)
-    spawn_result = await transport.spawn(cli_args, env, cwd)
-
-    if spawn_result.already_running:
-        log.info("CLI for '%s' already running in bridge (pid=%s)", session.name, spawn_result.pid)
-
-    # Subscribe to start receiving output
-    await transport.subscribe()
-
-    # Create SDK client with our bridge transport
-    client = ClaudeSDKClient(options=options, transport=transport)
-    await client.__aenter__()
-    return client
-
-
 async def wake_agent(session: AgentSession) -> None:
     """Wake a sleeping agent by delegating to its handler.
 
