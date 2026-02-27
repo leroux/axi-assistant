@@ -4404,6 +4404,94 @@ async def clear_context(interaction, agent_name: str | None = None):
     await _run_agent_sdk_command(interaction, agent_name, "/clear", "Context cleared")
 
 
+async def _run_telos_interview(session: AgentSession, channel) -> None:
+    """Inject telos_interview.md into the agent so Claude conducts the TELOS interview."""
+    interview_path = os.path.join(BOT_DIR, ".claude", "commands", "telos_interview.md")
+    telos_path = os.path.join(BOT_DIR, "TELOS.md")
+
+    try:
+        with open(interview_path) as f:
+            interview_instructions = f.read()
+    except FileNotFoundError:
+        await channel.send(
+            f"*System:* Could not find `telos_interview.md`. Cannot start TELOS interview."
+        )
+        return
+    except OSError as e:
+        await channel.send(f"*System:* Error reading telos_interview.md: {e}")
+        return
+
+    query = (
+        "The user has triggered the TELOS interview via Discord. "
+        "Please conduct the interview now, following the instructions below exactly. "
+        f"Write completed sections to `{telos_path}` as you go.\n\n"
+        "--- TELOS INTERVIEW INSTRUCTIONS ---\n\n"
+        f"{interview_instructions}"
+    )
+
+    log.info("Starting TELOS interview for agent '%s'", session.name)
+    await session.client.query(_as_stream(query))
+    await _stream_with_retry(session, channel)
+
+
+@bot.tree.command(name="telos", description="Start a TELOS identity interview to build your user profile. Infers agent from current channel.")
+@app_commands.autocomplete(agent_name=agent_autocomplete)
+async def telos_interview_cmd(interaction: discord.Interaction, agent_name: str | None = None):
+    log.info("Slash command /telos agent=%s from %s", agent_name, interaction.user)
+
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    if agent_name is None:
+        agent_name = channel_to_agent.get(interaction.channel_id)
+        if agent_name is None:
+            await interaction.response.send_message(
+                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
+            )
+            return
+
+    session = agents.get(agent_name)
+    if session is None:
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+        return
+
+    if session.query_lock.locked():
+        await interaction.response.send_message(
+            f"Agent **{agent_name}** is busy. Wait for it to finish.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer()
+
+    async with session.query_lock:
+        if session.client is None:
+            try:
+                await wake_agent(session)
+            except Exception:
+                log.exception("Failed to wake agent '%s'", agent_name)
+                await interaction.followup.send(f"Failed to wake agent **{agent_name}**.")
+                return
+
+        session.last_activity = datetime.now(timezone.utc)
+        drain_stderr(session)
+        drain_sdk_buffer(session)
+        session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+
+        try:
+            async with asyncio.timeout(QUERY_TIMEOUT):
+                channel = bot.get_channel(session.discord_channel_id) or interaction.channel
+                await _run_telos_interview(session, channel)
+            await interaction.followup.send(f"*System:* TELOS interview complete for **{agent_name}**.")
+        except TimeoutError:
+            await interaction.followup.send(f"*System:* TELOS interview timed out for **{agent_name}**.")
+        except Exception as e:
+            log.exception("Failed to run TELOS interview for agent '%s'", agent_name)
+            await interaction.followup.send(f"Failed to start TELOS interview for **{agent_name}**: {e}")
+        finally:
+            session.activity = ActivityState(phase="idle")
+
+
 def _list_flowchart_commands() -> list[dict]:
     """Return available flowchart commands as [{name, description}, ...]."""
     flowcoder_home = os.environ.get("FLOWCODER_HOME", os.path.expanduser("~/flowcoder-rewrite"))
