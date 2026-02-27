@@ -38,16 +38,22 @@ class BridgeConnection:
                 line = await self._reader.readline()
                 if not line:
                     break  # Socket closed
+                log.debug("[demux] raw line (%d bytes): %.200s", len(line), line.decode(errors="replace").rstrip())
                 try:
                     msg = parse_server_msg(line)
                 except Exception:
+                    log.debug("[demux] parse FAILED on: %.200s", line.decode(errors="replace").rstrip())
                     continue
 
                 if isinstance(msg, ResultMsg):
+                    log.debug("[demux] routed ResultMsg (ok=%s)", msg.ok)
                     await self._cmd_response.put(msg)
                 elif isinstance(msg, (StdoutMsg, StderrMsg, ExitMsg)):
                     if msg.name in self._agent_queues:
+                        log.debug("[demux] routed %s -> agent queue '%s'", type(msg).__name__, msg.name)
                         await self._agent_queues[msg.name].put(msg)
+                    else:
+                        log.debug("[demux] dropped %s for unregistered agent '%s'", type(msg).__name__, msg.name)
                     # Messages for unregistered agents are dropped (bridge still buffers them)
         except (ConnectionError, OSError):
             log.info("Bridge connection lost")
@@ -192,11 +198,15 @@ class BridgeTransport:
             if msg is None:
                 raise ConnectionError("Bridge connection lost during read")
             if isinstance(msg, StdoutMsg):
+                msg_type = msg.data.get("type", "?") if isinstance(msg.data, dict) else "non-dict"
+                log.debug("[read][%s] yielding StdoutMsg type=%s", self._name, msg_type)
                 yield msg.data
             elif isinstance(msg, StderrMsg):
+                log.debug("[read][%s] stderr: %.200s", self._name, msg.text)
                 if self._stderr_callback:
                     self._stderr_callback(msg.text)
             elif isinstance(msg, ExitMsg):
+                log.debug("[read][%s] ExitMsg code=%s", self._name, msg.code)
                 self._cli_exited = True
                 self._exit_code = msg.code
                 return

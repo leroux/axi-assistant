@@ -223,6 +223,7 @@ class BridgeServer:
 
         cp.subscribed = True
         buffered_count = len(cp.buffer)
+        log.debug("[subscribe][%s] replaying %d buffered messages", name, buffered_count)
 
         # Replay buffer
         for msg in cp.buffer:
@@ -267,6 +268,7 @@ class BridgeServer:
             return
         try:
             line = json.dumps(msg.data) + "\n"
+            log.debug("[stdin][%s] forwarding %d bytes: %.200s", msg.name, len(line), line.rstrip())
             cp.proc.stdin.write(line.encode())
             await cp.proc.stdin.drain()
             cp.last_stdin_at = asyncio.get_event_loop().time()
@@ -278,9 +280,11 @@ class BridgeServer:
     async def _relay_or_buffer(self, cp: CliProcess, msg: StdoutMsg | StderrMsg | ExitMsg):
         """Send to client if subscribed, otherwise buffer."""
         if cp.subscribed:
+            log.debug("[relay][%s] relaying %s to client", cp.name, type(msg).__name__)
             await self._send_to_client(msg)
         else:
             cp.buffer.append(msg)
+            log.debug("[relay][%s] buffering %s (buffer_size=%d)", cp.name, type(msg).__name__, len(cp.buffer))
 
     async def _relay_stdout(self, cp: CliProcess):
         """Read JSON lines from CLI stdout, relay or buffer."""
@@ -291,15 +295,19 @@ class BridgeServer:
                 if not line:
                     normal_eof = True
                     break  # EOF
+                raw = line.decode().strip()
+                log.debug("[stdout][%s] raw line (%d bytes): %.200s", cp.name, len(line), raw)
                 try:
-                    data = json.loads(line.decode().strip())
+                    data = json.loads(raw)
                 except json.JSONDecodeError:
+                    log.debug("[stdout][%s] json.loads FAILED on: %.200s", cp.name, raw)
                     # Non-JSON output — treat as stderr
-                    text = line.decode().strip()
-                    if text:
-                        await self._relay_or_buffer(cp, StderrMsg(name=cp.name, text=text))
+                    if raw:
+                        await self._relay_or_buffer(cp, StderrMsg(name=cp.name, text=raw))
                     continue
 
+                msg_type = data.get("type", "?") if isinstance(data, dict) else "non-dict"
+                log.debug("[stdout][%s] parsed msg type=%s", cp.name, msg_type)
                 cp.last_stdout_at = asyncio.get_event_loop().time()
                 await self._relay_or_buffer(cp, StdoutMsg(name=cp.name, data=data))
         except Exception:
@@ -371,7 +379,10 @@ class BridgeServer:
         if writer is None:
             return False
         try:
-            writer.write(msg.model_dump_json().encode() + b"\n")
+            payload = msg.model_dump_json().encode() + b"\n"
+            name = getattr(msg, "name", None)
+            log.debug("[send][%s] %s (%d bytes)", name or "cmd", type(msg).__name__, len(payload))
+            writer.write(payload)
             await writer.drain()
             return True
         except (ConnectionError, BrokenPipeError, OSError):
