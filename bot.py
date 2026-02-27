@@ -529,6 +529,9 @@ def drain_sdk_buffer(session: AgentSession) -> int:
                 "Drained stale SDK message from '%s': type=%s role=%s",
                 session.name, msg_type, msg_role,
             )
+            # Still capture rate limit events even when drained stale
+            if msg_type == "rate_limit_event":
+                _update_rate_limit_quota(msg)
         log.warning("Total drained from '%s': %d stale messages", session.name, len(drained))
 
     return len(drained)
@@ -2199,14 +2202,11 @@ def _update_rate_limit_quota(data: dict) -> None:
         utilization=new_utilization,
     )
 
-    # Append to persistent history log
+    # Append to persistent history log (full raw JSON for future analysis)
     try:
         record = {
             "ts": datetime.now(timezone.utc).isoformat(),
-            "type": rl_type,
-            "status": new_status,
-            "utilization": new_utilization,
-            "resets_at": new_resets_at.isoformat(),
+            "raw": data,
         }
         with open(RATE_LIMIT_HISTORY_PATH, "a") as f:
             f.write(json.dumps(record) + "\n")
