@@ -156,6 +156,20 @@ def get_running_instances() -> list[str]:
     return running
 
 
+def get_allocated_instances() -> list[str]:
+    """Get names of all instances with a .env reservation (running or stopped)."""
+    allocated = []
+    if not os.path.isdir(TESTS_DIR):
+        return allocated
+    for entry in os.listdir(TESTS_DIR):
+        path = os.path.join(TESTS_DIR, entry)
+        if os.path.isdir(path) and not entry.endswith("-data"):
+            env_path = os.path.join(path, ".env")
+            if os.path.isfile(env_path):
+                allocated.append(entry)
+    return allocated
+
+
 def get_instance_env(name: str) -> dict:
     """Read a test instance's .env file."""
     env_path = os.path.join(TESTS_DIR, name, ".env")
@@ -171,9 +185,11 @@ def get_token_for_running_instance(name: str, config: dict) -> str | None:
 
 
 def pick_guild(config: dict, explicit_guild: str | None) -> str | None:
-    """Pick a guild, checking for token conflicts with running instances.
+    """Pick a guild, checking for token conflicts with allocated instances.
 
     Returns None if no guild slot is available (all tokens in use).
+    A slot is considered "in use" if any instance has a .env file with that
+    bot token — even if the instance is currently stopped.
     """
     if explicit_guild:
         if explicit_guild not in config["guilds"]:
@@ -182,28 +198,28 @@ def pick_guild(config: dict, explicit_guild: str | None) -> str | None:
             sys.exit(1)
         return explicit_guild
 
-    # Pick first guild whose bot has no running instance
-    running = get_running_instances()
-    running_tokens = set()
-    for inst in running:
+    # Pick first guild whose bot has no allocated instance
+    allocated = get_allocated_instances()
+    allocated_tokens = set()
+    for inst in allocated:
         token = get_token_for_running_instance(inst, config)
         if token:
-            running_tokens.add(token)
+            allocated_tokens.add(token)
 
     for guild_name, guild_info in config["guilds"].items():
         bot_name = guild_info.get("bot")
         token = config["bots"].get(bot_name, {}).get("token")
-        if token and token not in running_tokens:
+        if token and token not in allocated_tokens:
             return guild_name
 
     return None
 
 
 def has_token_conflict(config: dict, guild_name: str, instance_name: str) -> bool:
-    """Check if another running instance uses the same bot token."""
+    """Check if another allocated instance uses the same bot token."""
     token = resolve_bot_token(config, guild_name)
-    running = get_running_instances()
-    for inst in running:
+    allocated = get_allocated_instances()
+    for inst in allocated:
         if inst == instance_name:
             continue
         inst_token = get_token_for_running_instance(inst, config)
@@ -213,19 +229,19 @@ def has_token_conflict(config: dict, guild_name: str, instance_name: str) -> boo
 
 
 def check_token_conflict(config: dict, guild_name: str, instance_name: str) -> None:
-    """Error if another running instance uses the same bot token."""
+    """Error if another allocated instance uses the same bot token."""
     if not has_token_conflict(config, guild_name, instance_name):
         return
     token = resolve_bot_token(config, guild_name)
-    running = get_running_instances()
-    for inst in running:
+    allocated = get_allocated_instances()
+    for inst in allocated:
         if inst == instance_name:
             continue
         inst_token = get_token_for_running_instance(inst, config)
         if inst_token == token:
             bot_name = config["guilds"][guild_name].get("bot")
-            print(f"Error: Bot '{bot_name}' is already in use by running instance '{inst}'", file=sys.stderr)
-            print(f"Stop it first: axi-test down {inst}", file=sys.stderr)
+            print(f"Error: Bot '{bot_name}' is already allocated to instance '{inst}'", file=sys.stderr)
+            print(f"Release it first: axi-test down {inst}", file=sys.stderr)
             sys.exit(1)
 
 
