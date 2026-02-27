@@ -3570,6 +3570,12 @@ async def on_message(message):
             )
             return
 
+    # --- Text command handling (// prefix) ---
+    if message.content.strip().startswith("//"):
+        handled = await _handle_text_command(message, session, agent_name)
+        if handled:
+            return
+
     # --- Backpressure conditions (queue if any apply) ---
 
     # 1. Reconnecting: queue messages
@@ -4457,6 +4463,80 @@ async def reset_context(interaction, agent_name: str | None = None, working_dir:
     )
 
 
+async def _handle_text_command(message, session, agent_name):
+    """Handle // text commands from Discord messages. Returns True if handled."""
+    text = message.content.strip()
+    if not text.startswith("//"):
+        return False
+
+    parts = text[2:].split(None, 1)
+    if not parts:
+        return False
+
+    cmd = parts[0].lower()
+    args = parts[1].strip() if len(parts) > 1 else None
+    channel = message.channel
+
+    if cmd == "debug":
+        if args is not None:
+            mode_lower = args.lower()
+            if mode_lower == "on":
+                session.debug = True
+            elif mode_lower == "off":
+                session.debug = False
+            else:
+                await send_system(channel, "Usage: `//debug` (toggle), `//debug on`, `//debug off`")
+                return True
+        else:
+            session.debug = not session.debug
+        state = "on" if session.debug else "off"
+        await send_system(channel, f"Debug output **{state}** for **{agent_name}**.")
+        return True
+
+    if cmd == "status":
+        status_text = _format_agent_status(agent_name, session)
+        await send_long(channel, status_text)
+        return True
+
+    if cmd in ("clear", "compact"):
+        label = "Context cleared" if cmd == "clear" else "Context compacted"
+        command = f"/{cmd}"
+
+        if session.query_lock.locked():
+            await send_system(channel, f"Agent **{agent_name}** is busy.")
+            return True
+
+        async with session.query_lock:
+            if not session.is_awake():
+                try:
+                    await session.wake()
+                except Exception:
+                    log.exception("Failed to wake agent '%s'", agent_name)
+                    await send_system(channel, f"Failed to wake agent **{agent_name}**.")
+                    return True
+
+            session.last_activity = datetime.now(timezone.utc)
+            drain_stderr(session)
+            drain_sdk_buffer(session)
+
+            session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+            try:
+                async with asyncio.timeout(QUERY_TIMEOUT):
+                    await session.client.query(_as_stream(command))
+                    await _stream_with_retry(session, channel)
+                await send_system(channel, f"{label} for **{agent_name}**.")
+            except TimeoutError:
+                await send_system(channel, f"{label} timed out for **{agent_name}**.")
+            except Exception as e:
+                log.exception("Failed to %s agent '%s'", label.lower(), agent_name)
+                await send_system(channel, f"Failed to {label.lower()} **{agent_name}**: {e}")
+            finally:
+                session.activity = ActivityState(phase="idle")
+        return True
+
+    return False
+
+
 async def _run_agent_sdk_command(interaction, agent_name: str | None, command: str, label: str):
     """Run a Claude Code CLI slash command (e.g. /compact, /clear) on an agent via the SDK."""
     if interaction.user.id not in ALLOWED_USER_IDS:
@@ -4484,9 +4564,9 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
     await interaction.response.defer()
 
     async with session.query_lock:
-        if session.client is None:
+        if not session.is_awake():
             try:
-                await wake_agent(session)
+                await session.wake()
             except Exception:
                 log.exception("Failed to wake agent '%s'", agent_name)
                 await interaction.followup.send(f"Failed to wake agent **{agent_name}**.")
@@ -4500,6 +4580,7 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
                 channel = bot.get_channel(session.discord_channel_id) or interaction.channel
+                await session.client.query(_as_stream(command))
                 await _stream_with_retry(session, channel)
             await interaction.followup.send(f"*System:* {label} for **{agent_name}**.")
         except TimeoutError:
