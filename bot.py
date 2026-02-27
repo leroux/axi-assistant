@@ -2562,14 +2562,18 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
 
 
 async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel: TextChannel) -> None:
-    """Run the initial prompt for a spawned agent. Notifies when done."""
+    """Run the initial prompt for a spawned agent. Notifies when done.
+
+    Uses handler delegation for wake/process patterns.
+    If concurrency limit hit, queues the prompt for later processing.
+    """
     try:
         timed_out = False
         async with session.query_lock:
-            # Wake agent if sleeping
-            if session.client is None:
+            # Wake agent if sleeping using handler delegation
+            if not session.is_awake():
                 try:
-                    await wake_agent(session)
+                    await session.wake()
                 except ConcurrencyLimitError:
                     log.info("Concurrency limit hit for '%s' initial prompt — queuing", session.name)
                     await session.message_queue.put((prompt, channel, None))
@@ -2601,13 +2605,13 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             log.debug("Running initial prompt for '%s': %s", session.name, _content_summary(prompt))
             session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
             try:
-                async with asyncio.timeout(QUERY_TIMEOUT):
-                    await session.client.query(_as_stream(prompt))
-                    await _stream_with_retry(session, channel)
-                    session.last_activity = datetime.now(timezone.utc)
-            except TimeoutError:
-                timed_out = True
-                await _handle_query_timeout(session, channel)
+                # Handler's process_message already handles timeout and streaming
+                await session.process_message(prompt, channel)
+                session.last_activity = datetime.now(timezone.utc)
+            except RuntimeError as e:
+                # Agent-specific error from handler
+                log.warning("Handler error for '%s' initial prompt: %s", session.name, e)
+                await send_system(channel, f"Error: {e}")
             finally:
                 session.activity = ActivityState(phase="idle")
 
@@ -2624,7 +2628,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
 
     # Sleep agent after completing initial prompt and draining the queue
     try:
-        await sleep_agent(session)
+        await session.sleep()
     except Exception:
         log.exception("Error sleeping agent '%s' after initial prompt", session.name)
 
