@@ -81,6 +81,7 @@ DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
 ENABLE_CRASH_HANDLER = os.environ.get("ENABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
 SHOW_AWAITING_INPUT = os.environ.get("SHOW_AWAITING_INPUT", "").lower() in ("1", "true", "yes")
+RECORD_UPDATER_ENABLED = os.environ.get("RECORD_UPDATER_ENABLED", "").lower() in ("1", "true", "yes")
 README_CONTENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "readme_content.md")
 
 # --- Discord bot setup ---
@@ -2984,7 +2985,8 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             await send_system(channel, f"Agent **{session.name}** finished initial task.")
             # Spawn record-updater to process this agent's output
             try:
-                await _maybe_spawn_record_updater(session.name, session.cwd)
+                if RECORD_UPDATER_ENABLED:
+                    await _maybe_spawn_record_updater(session.name, session.cwd)
             except Exception:
                 log.exception("Error spawning record-updater for '%s'", session.name)
 
