@@ -1490,9 +1490,6 @@ async def sleep_agent(session: AgentSession) -> None:
     Delegates to the handler's sleep() method.
     Keep the AgentSession in the agents dict (it's only removed by end_session).
     """
-<<<<<<< HEAD
-    await session.sleep()
-=======
     # Handle flowcoder process (both dedicated flowcoder agents and inline flowcharts)
     if session.flowcoder_process:
         proc = session.flowcoder_process
@@ -1516,7 +1513,6 @@ async def sleep_agent(session: AgentSession) -> None:
     session.client = None
     session.flowcoder = None
     log.info("Agent '%s' is now sleeping", session.name)
->>>>>>> sync-pride
 
 
 def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> ClaudeAgentOptions:
@@ -1583,22 +1579,6 @@ async def wake_agent(session: AgentSession) -> None:
 
         # Delegate to handler (both Claude Code and flowcoder)
         resume_id = session.session_id
-<<<<<<< HEAD
-        try:
-            await session.wake()
-        except Exception:
-            if resume_id and session.agent_type == "claude_code":
-                log.warning("Failed to resume '%s', retrying fresh", session.name)
-                session.session_id = None
-                try:
-                    await session.wake()
-                except Exception:
-                    log.exception("Failed to wake '%s' even fresh", session.name)
-                    raise
-            else:
-                log.exception("Failed to wake '%s'", session.name)
-                raise
-=======
 
         options = _make_agent_options(session, resume_id)
 
@@ -1654,7 +1634,6 @@ async def wake_agent(session: AgentSession) -> None:
                 log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
                 if session._log:
                     session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
->>>>>>> sync-pride
 
         # Post system prompt to Discord on first wake (once per session lifecycle)
         if not session._system_prompt_posted and session.discord_channel_id:
