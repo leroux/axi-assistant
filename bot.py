@@ -266,6 +266,7 @@ class AgentSession:
     flowcoder_args: str = ""
     debug: bool = field(default_factory=lambda: os.environ.get("DISCORD_DEBUG", "").strip().lower() in ("1", "true", "on"))  # Post tool calls and thinking phases to Discord
     plan_approval_future: asyncio.Future | None = None  # Set when waiting for user to approve/reject a plan
+    plan_mode: bool = False  # When True, agent is in plan mode (read-only, plan before implement)
     _log: logging.Logger | None = None
 
     def __post_init__(self):
@@ -692,10 +693,20 @@ async def _handle_exit_plan_mode(
 
     if result.get("approved"):
         log.info("Agent '%s' plan approved by user", session.name)
+        # Exit plan mode: restore default permission mode so the agent can implement
+        if session.plan_mode:
+            session.plan_mode = False
+            if session.client:
+                try:
+                    await session.client.set_permission_mode("default")
+                    log.info("Agent '%s' permission mode reset to default after plan approval", session.name)
+                except Exception:
+                    log.exception("Failed to reset permission mode for '%s'", session.name)
         return PermissionResultAllow()
     else:
         message = result.get("message", "User rejected the plan.")
         log.info("Agent '%s' plan rejected: %s", session.name, message)
+        # Stay in plan mode — agent will revise the plan
         return PermissionResultDeny(message=message)
 
 
@@ -2033,7 +2044,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> 
         thinking={"type": "enabled", "budget_tokens": 128000},
         #betas=["context-1m-2025-08-07"],
         setting_sources=["local"],
-        permission_mode="default",
+        permission_mode="plan" if session.plan_mode else "default",
         can_use_tool=make_cwd_permission_callback(session.cwd, session),
         cwd=session.cwd,
         system_prompt=session.system_prompt,
@@ -3822,7 +3833,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
             options = ClaudeAgentOptions(
                 can_use_tool=make_cwd_permission_callback(session.cwd, session),
                 mcp_servers=session.mcp_servers or {},
-                permission_mode="default",
+                permission_mode="plan" if session.plan_mode else "default",
                 cwd=session.cwd,
                 include_partial_messages=True,
                 stderr=make_stderr_callback(session),
@@ -4744,6 +4755,10 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
         remaining = _format_time_remaining(_rate_limit_remaining_seconds())
         lines.append(f"Rate limited: ~{remaining} remaining")
 
+    # Plan mode
+    if session.plan_mode:
+        lines.append("📋 **Plan mode active**")
+
     # Session info
     if session.session_id:
         lines.append(f"Session: `{session.session_id[:8]}...`")
@@ -4936,6 +4951,19 @@ async def stop_agent(interaction, agent_name: str | None = None):
         except Exception:
             pass  # may fail if SIGINT already ended the query
 
+        # Reset plan mode if active — /stop is a full reset
+        plan_was_active = session.plan_mode
+        if plan_was_active:
+            session.plan_mode = False
+            try:
+                await session.client.set_permission_mode("default")
+            except Exception:
+                log.exception("Failed to reset permission mode for '%s' during /stop", agent_name)
+
+        # Cancel pending plan approval if waiting
+        if session.plan_approval_future and not session.plan_approval_future.done():
+            session.plan_approval_future.set_result({"approved": False, "message": "Interrupted by /stop."})
+
         # Drain queued messages so nothing gets processed after the interrupt
         cleared = 0
         while session.message_queue:
@@ -4943,12 +4971,12 @@ async def stop_agent(interaction, agent_name: str | None = None):
             await _remove_reaction(dropped_msg, "📨")
             cleared += 1
 
+        parts = [f"*System:* Interrupt signal sent to **{agent_name}**."]
         if cleared:
-            await interaction.followup.send(
-                f"*System:* Interrupt signal sent to **{agent_name}** and cleared {cleared} queued message{'s' if cleared != 1 else ''}."
-            )
-        else:
-            await interaction.followup.send(f"*System:* Interrupt signal sent to **{agent_name}**.")
+            parts.append(f"Cleared {cleared} queued message{'s' if cleared != 1 else ''}.")
+        if plan_was_active:
+            parts.append("Plan mode deactivated.")
+        await interaction.followup.send(" ".join(parts))
     except Exception as e:
         log.exception("Failed to interrupt agent '%s'", agent_name)
         await interaction.followup.send(f"Failed to interrupt **{agent_name}**: {e}")
@@ -5006,6 +5034,57 @@ async def skip_agent(interaction, agent_name: str | None = None):
     except Exception as e:
         log.exception("Failed to interrupt agent '%s'", agent_name)
         await interaction.followup.send(f"Failed to skip **{agent_name}**: {e}")
+
+
+@bot.tree.command(name="plan", description="Toggle plan mode — agent will plan before implementing. Infers agent from current channel.")
+@app_commands.autocomplete(agent_name=agent_autocomplete)
+async def toggle_plan_mode(interaction, agent_name: str | None = None):
+    log.info("Slash command /plan agent=%s from %s", agent_name, interaction.user)
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    # Infer agent from channel if not specified
+    if agent_name is None:
+        agent_name = channel_to_agent.get(interaction.channel_id)
+        if agent_name is None:
+            await interaction.response.send_message(
+                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
+            )
+            return
+
+    session = agents.get(agent_name)
+    if session is None:
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+        return
+
+    # Toggle plan mode
+    new_mode = not session.plan_mode
+    session.plan_mode = new_mode
+
+    # If agent is awake, switch permission mode dynamically
+    if session.client is not None:
+        try:
+            mode_str = "plan" if new_mode else "default"
+            await session.client.set_permission_mode(mode_str)
+            log.info("Agent '%s' permission mode set to '%s'", agent_name, mode_str)
+        except Exception as e:
+            log.exception("Failed to set permission mode for '%s'", agent_name)
+            # Revert flag on failure
+            session.plan_mode = not new_mode
+            await interaction.response.send_message(
+                f"Failed to set plan mode for **{agent_name}**: {e}", ephemeral=True
+            )
+            return
+
+    if new_mode:
+        await interaction.response.send_message(
+            f"📋 **Plan mode ON** for **{agent_name}** — next query will plan before implementing."
+        )
+    else:
+        await interaction.response.send_message(
+            f"🔧 **Plan mode OFF** for **{agent_name}** — back to normal execution."
+        )
 
 
 @bot.tree.command(name="reset-context", description="Reset an agent's context. Infers agent from current channel, or specify by name.")
