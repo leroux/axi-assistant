@@ -9,6 +9,7 @@ Usage:
     axi-test down <name>
     axi-test restart <name>
     axi-test list
+    axi-test merge
     axi-test msg <name> <message> [--timeout SECS]
     axi-test logs <name>
 """
@@ -511,6 +512,39 @@ def cmd_msg(args):
         sys.exit(1)
 
 
+def cmd_merge(args):
+    """Merge current worktree branch into main repo."""
+    # Find main repo via git's common dir
+    result = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print("Error: Not inside a git repository", file=sys.stderr)
+        sys.exit(1)
+
+    main_repo = os.path.dirname(result.stdout.strip())
+    cwd = os.path.realpath(os.getcwd())
+
+    if os.path.realpath(main_repo) == cwd:
+        print("Already in main repo — nothing to merge")
+        return
+
+    branch = get_worktree_branch(cwd)
+    if not branch or branch == "unknown":
+        print("Error: Could not determine current branch", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Merging branch '{branch}' into main repo at {main_repo}")
+    result = subprocess.run(
+        ["git", "-C", main_repo, "merge", branch],
+    )
+    if result.returncode != 0:
+        print("Merge failed — resolve conflicts manually", file=sys.stderr)
+        sys.exit(1)
+    print("Done")
+
+
 def cmd_logs(args):
     os.execvp("journalctl", [
         "journalctl", "--user", "-u", f"axi-test@{args.name}", "-f",
@@ -554,6 +588,10 @@ def main():
     p_msg.add_argument("message", help="Message to send")
     p_msg.add_argument("--timeout", type=float, default=120, help="Timeout in seconds (default: 120)")
     p_msg.set_defaults(func=cmd_msg)
+
+    # merge
+    p_merge = sub.add_parser("merge", help="Merge current worktree branch into main repo")
+    p_merge.set_defaults(func=cmd_merge)
 
     # logs
     p_logs = sub.add_parser("logs", help="Follow instance logs")
