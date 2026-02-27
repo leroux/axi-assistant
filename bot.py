@@ -532,6 +532,13 @@ def make_cwd_permission_callback(allowed_cwd: str):
     async def _check_permission(
         tool_name: str, tool_input: dict, ctx: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
+        # Forbidden tools in Discord mode (rendered as invisible/broken in Discord channel UI)
+        forbidden_tools = {"AskUserQuestion", "TodoWrite", "EnterPlanMode", "ExitPlanMode", "Skill", "EnterWorktree"}
+        if tool_name in forbidden_tools:
+            return PermissionResultDeny(
+                message=f"{tool_name} is not compatible with Discord-based agent mode. Use text messages to communicate instead."
+            )
+        
         # File-writing tools — check path is within allowed bases
         if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
