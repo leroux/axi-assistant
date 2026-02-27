@@ -38,6 +38,7 @@ from bridge import (
 )
 from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
 from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
+from handlers import get_handler, AgentHandler
 
 load_dotenv()
 
@@ -205,6 +206,35 @@ class AgentSession:
             for handler in self._log.handlers[:]:
                 handler.close()
                 self._log.removeHandler(handler)
+
+    @property
+    def handler(self) -> AgentHandler:
+        """Get the handler for this agent's type."""
+        return get_handler(self.agent_type)
+
+    def is_awake(self) -> bool:
+        """Check if agent is ready to process messages."""
+        return self.handler.is_awake(self)
+
+    def is_processing(self) -> bool:
+        """Check if agent has active work."""
+        return self.handler.is_processing(self)
+
+    async def wake(self) -> None:
+        """Activate/initialize the agent. Delegates to handler."""
+        await self.handler.wake(self)
+
+    async def sleep(self) -> None:
+        """Deactivate/cleanup the agent. Delegates to handler."""
+        await self.handler.sleep(self)
+
+    async def process_message(
+        self,
+        content: str | list,
+        channel: TextChannel,
+    ) -> None:
+        """Process a user message. Delegates to handler."""
+        await self.handler.process_message(self, content, channel)
 
 
 agents: dict[str, AgentSession] = {}
@@ -1031,6 +1061,69 @@ def _ensure_process_dead(pid: int | None, label: str) -> None:
         pass
 
 
+async def _create_transport(session: AgentSession):
+    """Create a transport for Claude Code agent (bridge or direct).
+
+    Returns:
+        BridgeTransport or SubprocessCLITransport depending on bridge availability.
+
+    Raises:
+        RuntimeError: If bridge is required but unavailable.
+    """
+    if bridge_conn and bridge_conn.is_alive:
+        transport = BridgeTransport(
+            session.name,
+            bridge_conn,
+            stderr_callback=make_stderr_callback(session),
+        )
+        await transport.connect()
+        return transport
+    else:
+        # Direct subprocess mode - no explicit transport creation needed
+        return None  # ClaudeSDKClient creates its own transport
+
+
+async def wake_or_queue(
+    session: AgentSession,
+    content: str | list,
+    channel: discord.TextChannel,
+    orig_message: discord.Message | None,
+) -> bool:
+    """Try to wake agent, return True if successful, False if queued.
+
+    Args:
+        session: The agent session
+        content: Message content
+        channel: Discord channel for responses
+        orig_message: Original message (for reactions), or None
+
+    Returns:
+        True if agent was woken and can process, False if message was queued
+    """
+    try:
+        await session.wake()
+        return True
+    except ConcurrencyLimitError:
+        await session.message_queue.put((content, channel, orig_message))
+        position = session.message_queue.qsize()
+        awake = _count_awake_agents()
+        log.debug("Concurrency limit hit for '%s', queuing message (position %d)", session.name, position)
+        await _add_reaction(orig_message, "📨")
+        await send_system(
+            channel,
+            f"⏳ All {awake} agent slots busy. Message queued (position {position})."
+        )
+        return False
+    except Exception:
+        log.exception("Failed to wake agent '%s'", session.name)
+        await _add_reaction(orig_message, "❌")
+        await send_system(
+            channel,
+            f"Failed to wake agent **{session.name}**. Try `/kill-agent {session.name}` and respawn."
+        )
+        return False
+
+
 async def _disconnect_client(client: ClaudeSDKClient, label: str) -> None:
     """Disconnect a ClaudeSDKClient and ensure its subprocess is terminated.
 
@@ -1169,34 +1262,12 @@ class ConcurrencyLimitError(Exception):
 
 
 async def sleep_agent(session: AgentSession) -> None:
-    """Shut down a session's ClaudeSDKClient but keep the AgentSession in the agents dict.
+    """Shut down an agent by delegating to its handler.
 
-    No-op if the session is already sleeping (client is None).
-    For flowcoder agents: stops the process if running, then returns.
-    Bridge-backed flowcoder processes are detached (not killed) if mid-execution.
+    Delegates to the handler's sleep() method.
+    Keep the AgentSession in the agents dict (it's only removed by end_session).
     """
-    # Handle flowcoder process (both dedicated flowcoder agents and inline flowcharts)
-    if session.flowcoder_process:
-        proc = session.flowcoder_process
-        if getattr(proc, 'is_bridge_backed', False) and session.query_lock.locked():
-            await proc.detach()  # mid-execution: bridge buffers
-        else:
-            await proc.stop()  # idle or direct: kill
-        session.flowcoder_process = None
-
-    if session.agent_type == "flowcoder":
-        return
-
-    if session.client is None:
-        return
-
-    log.info("Sleeping agent '%s'", session.name)
-    if session._log:
-        session._log.info("SESSION_SLEEP")
-    session._bridge_busy = False
-    await _disconnect_client(session.client, session.name)
-    session.client = None
-    log.info("Agent '%s' is now sleeping", session.name)
+    await session.sleep()
 
 
 def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> ClaudeAgentOptions:
@@ -1250,29 +1321,33 @@ async def _wake_agent_via_bridge(session: AgentSession, options: ClaudeAgentOpti
 
 
 async def wake_agent(session: AgentSession) -> None:
-    """Wake a sleeping agent by creating a new ClaudeSDKClient.
+    """Wake a sleeping agent by delegating to its handler.
 
-    Uses the bridge process to manage the CLI subprocess when bridge_conn
-    is available, otherwise falls back to direct subprocess management.
-
-    No-op for flowcoder agents (they don't use wake/sleep).
-    No-op if the session is already awake (client is not None).
-    Falls back to a fresh session if resume fails.
     Enforces the awake-agent concurrency limit by evicting idle agents if needed.
     Uses _wake_lock to prevent TOCTOU races when multiple agents try to wake concurrently.
-    """
-    if session.agent_type == "flowcoder":
-        return  # Flowcoder agents don't use wake/sleep
+    Posts system prompt to Discord on first wake.
 
-    if session.client is not None:
+    May raise:
+        ConcurrencyLimitError: If all awake slots are in use
+        Exception: If agent wake fails
+    """
+    # For flowcoder: this is a no-op at the handler level, but we still want to spawn
+    # Flowcoder handler's wake() method handles the actual spawning
+
+    if session.is_awake():
         return
 
     # Serialize concurrency check + wake to prevent races
     async with _wake_lock:
-        if session.client is not None:
+        if session.is_awake():
             return  # Re-check after acquiring lock
 
-        log.debug("Wake lock acquired for '%s', awake_count=%d/%d", session.name, _count_awake_agents(), MAX_AWAKE_AGENTS)
+        log.debug(
+            "Wake lock acquired for '%s', awake_count=%d/%d",
+            session.name,
+            _count_awake_agents(),
+            MAX_AWAKE_AGENTS,
+        )
 
         # Enforce concurrency limit before waking
         slot_available = await _ensure_awake_slot(session.name)
@@ -1283,58 +1358,24 @@ async def wake_agent(session: AgentSession) -> None:
             )
 
         log.debug("Awake slot secured for '%s'", session.name)
-
         log.info("Waking agent '%s' (session_id=%s)", session.name, session.session_id)
+
+        # Delegate to handler (both Claude Code and flowcoder)
         resume_id = session.session_id
-
-        options = _make_agent_options(session, resume_id)
-
-        if bridge_conn and bridge_conn.is_alive:
-            # Bridge mode: spawn CLI via bridge
-            log.debug("Waking '%s' via bridge (resume=%s)", session.name, resume_id)
-            try:
-                client = await _wake_agent_via_bridge(session, options)
-                session.client = client
-                log.info("Agent '%s' is now awake via bridge (resumed=%s)", session.name, resume_id)
-                if session._log:
-                    session._log.info("SESSION_WAKE via bridge (resumed=%s)", bool(resume_id))
-            except Exception:
-                if resume_id:
-                    log.warning("Failed to resume '%s' via bridge, retrying fresh", session.name)
-                    options = _make_agent_options(session, resume_id=None)
-                    try:
-                        client = await _wake_agent_via_bridge(session, options)
-                        session.client = client
-                        session.session_id = None
-                        log.warning("Agent '%s' woke fresh via bridge (previous context lost)", session.name)
-                        if session._log:
-                            session._log.info("SESSION_WAKE via bridge (resumed=False, fresh after resume failure)")
-                    except Exception:
-                        log.exception("Failed to wake '%s' via bridge (even fresh)", session.name)
-                        raise
-                else:
-                    log.exception("Failed to wake '%s' via bridge", session.name)
-                    raise
-        else:
-            # Direct mode: original behavior (no bridge)
-            log.debug("Waking '%s' directly (no bridge, resume=%s)", session.name, resume_id)
-            try:
-                client = ClaudeSDKClient(options=options)
-                await client.__aenter__()
-                session.client = client
-                log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
-                if session._log:
-                    session._log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
-            except Exception:
-                log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
-                options = _make_agent_options(session, resume_id=None)
-                client = ClaudeSDKClient(options=options)
-                await client.__aenter__()
-                session.client = client
+        try:
+            await session.wake()
+        except Exception:
+            if resume_id and session.agent_type == "claude_code":
+                log.warning("Failed to resume '%s', retrying fresh", session.name)
                 session.session_id = None
-                log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
-                if session._log:
-                    session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
+                try:
+                    await session.wake()
+                except Exception:
+                    log.exception("Failed to wake '%s' even fresh", session.name)
+                    raise
+            else:
+                log.exception("Failed to wake '%s'", session.name)
+                raise
 
         # Post system prompt to Discord on first wake (once per session lifecycle)
         if not session._system_prompt_posted and session.discord_channel_id:
@@ -1349,7 +1390,11 @@ async def wake_agent(session: AgentSession) -> None:
                         session_id=resume_id,
                     )
                 except Exception:
-                    log.warning("Failed to post system prompt to Discord for '%s'", session.name, exc_info=True)
+                    log.warning(
+                        "Failed to post system prompt to Discord for '%s'",
+                        session.name,
+                        exc_info=True,
+                    )
 
 
 def get_master_session() -> AgentSession | None:
@@ -2631,37 +2676,53 @@ async def _process_message_queue(session: AgentSession) -> None:
 
         async with session.query_lock:
             # Wake agent if it was sleeping (e.g. after timeout recovery)
-            if session.client is None:
+            if not session.is_awake():
                 try:
-                    await wake_agent(session)
+                    await session.wake()
                 except Exception:
-                    log.exception("Failed to wake agent '%s' for queued message", session.name)
+                    log.exception(
+                        "Failed to wake agent '%s' for queued message", session.name
+                    )
                     await _add_reaction(orig_message, "❌")
-                    await send_system(channel, f"Failed to wake agent **{session.name}** — dropping queued message.")
+                    await send_system(
+                        channel,
+                        f"Failed to wake agent **{session.name}** — dropping queued message.",
+                    )
                     # Clear remaining queue
                     while not session.message_queue.empty():
                         _, ch, dropped_msg = session.message_queue.get_nowait()
                         await _remove_reaction(dropped_msg, "📨")
                         await _add_reaction(dropped_msg, "❌")
-                        await send_system(ch, f"Failed to wake agent **{session.name}** — dropping queued message.")
+                        await send_system(
+                            ch,
+                            f"Failed to wake agent **{session.name}** — dropping queued message.",
+                        )
                     return
 
             session.last_activity = datetime.now(timezone.utc)
             session.last_idle_notified = None
             session.idle_reminder_count = 0
-            drain_stderr(session)
-            drain_sdk_buffer(session)
-            session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+            session.activity = ActivityState(
+                phase="starting", query_started=datetime.now(timezone.utc)
+            )
             try:
-                async with asyncio.timeout(QUERY_TIMEOUT):
-                    await session.client.query(_as_stream(content))
-                    await _stream_with_retry(session, channel)
+                await session.process_message(content, channel)
                 await _add_reaction(orig_message, "✅")
             except TimeoutError:
                 await _add_reaction(orig_message, "⏳")
                 await _handle_query_timeout(session, channel)
+            except RuntimeError as e:
+                log.warning(
+                    "Runtime error processing queued message for '%s': %s",
+                    session.name,
+                    e,
+                )
+                await _add_reaction(orig_message, "❌")
+                await send_system(channel, str(e))
             except Exception:
-                log.exception("Error querying agent '%s' (queued message)", session.name)
+                log.exception(
+                    "Error processing queued message for '%s'", session.name
+                )
                 await _add_reaction(orig_message, "❌")
                 await send_system(
                     channel,
@@ -2956,6 +3017,11 @@ def _init_shutdown_coordinator() -> None:
 
 @bot.event
 async def on_message(message):
+    """Handle incoming Discord messages.
+
+    Simplified handler-based routing that delegates to AgentSession.process_message().
+    """
+    # --- Authorization and channel checks ---
     if message.author.id == bot.user.id:
         return
     if message.type not in (discord.MessageType.default, discord.MessageType.reply):
@@ -2983,37 +3049,53 @@ async def on_message(message):
     if message.author.id not in ALLOWED_USER_IDS:
         return
 
-    # Extract text + image content from the message (may be str or list of blocks)
+    # --- Get content and look up agent ---
     content = await _extract_message_content(message)
-    log.info("Message from %s in #%s: %s", message.author, message.channel.name, _content_summary(content))
+    log.info(
+        "Message from %s in #%s: %s",
+        message.author,
+        message.channel.name,
+        _content_summary(content),
+    )
 
     if shutdown_coordinator and shutdown_coordinator.requested:
         await send_system(message.channel, "Bot is restarting — not accepting new messages.")
         return
 
-    # Look up which agent owns this channel
     agent_name = channel_to_agent.get(message.channel.id)
     if agent_name is None:
         return  # Untracked channel, ignore
 
     session = agents.get(agent_name)
     if session is None:
-        # Check if this channel is in the Killed category
-        if killed_category and hasattr(message.channel, "category_id") and message.channel.category_id == killed_category.id:
-            await send_system(message.channel, "This agent has been killed. Use `/spawn` to create a new one.")
-            return
-        return  # Truly unknown channel
-
-    # Block interaction with killed agents
-    if killed_category and hasattr(message.channel, "category_id") and message.channel.category_id == killed_category.id:
-        await send_system(message.channel, "This agent has been killed. Use `/spawn` to create a new one.")
+        if killed_category and hasattr(message.channel, "category_id"):
+            if message.channel.category_id == killed_category.id:
+                await send_system(
+                    message.channel,
+                    "This agent has been killed. Use `/spawn` to create a new one.",
+                )
         return
 
-    # During bridge reconnect, queue messages instead of waking a new CLI
+    # Block killed agents
+    if killed_category and hasattr(message.channel, "category_id"):
+        if message.channel.category_id == killed_category.id:
+            await send_system(
+                message.channel,
+                "This agent has been killed. Use `/spawn` to create a new one.",
+            )
+            return
+
+    # --- Backpressure conditions (queue if any apply) ---
+
+    # 1. Reconnecting: queue messages
     if session._reconnecting:
         await session.message_queue.put((content, message.channel, message))
         position = session.message_queue.qsize()
-        log.debug("Agent '%s' reconnecting after restart, queuing message (queue_size=%d)", agent_name, position)
+        log.debug(
+            "Agent '%s' reconnecting after restart, queuing message (queue_size=%d)",
+            agent_name,
+            position,
+        )
         await _add_reaction(message, "📨")
         await send_system(
             message.channel,
@@ -3021,27 +3103,23 @@ async def on_message(message):
         )
         return
 
-    log.debug("Routing message to agent '%s' (locked=%s, client=%s)", agent_name, session.query_lock.locked(), session.client is not None)
+    # 2. Flowcoder running: send to stdin (handler will handle)
+    if session.is_processing():
+        try:
+            await session.process_message(content, message.channel)
+            await _add_reaction(message, "✅")
+            return
+        except RuntimeError as e:
+            # Flowcoder finished or other runtime error
+            await send_system(message.channel, str(e))
+            return
 
-    # Inline flowchart or dedicated flowcoder agent — forward messages to stdin
-    if session.flowcoder_process and session.flowcoder_process.is_running:
-        user_msg = {"type": "user", "message": {"role": "user", "content": content if isinstance(content, str) else str(content)}}
-        await session.flowcoder_process.send(user_msg)
-        await _add_reaction(message, "✅")
-        return
-
-    # Dedicated flowcoder agent that has finished
-    if session.agent_type == "flowcoder":
-        await send_system(message.channel, f"Flowcoder agent **{agent_name}** has finished.")
-        return
-
-    # Queue messages while rate limited (don't waste API calls)
-    if _is_rate_limited() and not session.query_lock.locked():
+    # 3. Rate limited: queue messages
+    if _is_rate_limited() and not session.is_processing():
         await session.message_queue.put((content, message.channel, message))
         position = session.message_queue.qsize()
-        log.debug("Rate-limited, queuing for '%s' (queue_size=%d)", agent_name, position)
-        await _add_reaction(message, "📨")
         remaining = _format_time_remaining(_rate_limit_remaining_seconds())
+        await _add_reaction(message, "📨")
         await send_system(
             message.channel,
             f"⏳ Currently rate limited — ~**{remaining}** remaining. "
@@ -3049,10 +3127,13 @@ async def on_message(message):
         )
         return
 
-    if session.query_lock.locked():
+    # 4. Agent busy: queue messages
+    if session.is_processing():
         await session.message_queue.put((content, message.channel, message))
         position = session.message_queue.qsize()
-        log.debug("Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position)
+        log.debug(
+            "Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position
+        )
         await _add_reaction(message, "📨")
         await send_system(
             message.channel,
@@ -3061,56 +3142,38 @@ async def on_message(message):
         )
         return
 
+    # --- Normal processing path ---
     async with session.query_lock:
-        # Wake agent if sleeping
-        if session.client is None:
+        # Wake if needed
+        if not session.is_awake():
             log.debug("Waking agent '%s' for user message", agent_name)
-            try:
-                await wake_agent(session)
-            except ConcurrencyLimitError:
-                log.info("Concurrency limit hit for '%s' — queuing message", agent_name)
-                await session.message_queue.put((content, message.channel, message))
-                position = session.message_queue.qsize()
-                awake = _count_awake_agents()
-                await _add_reaction(message, "📨")
-                await send_system(
-                    message.channel,
-                    f"⏳ All {awake} agent slots are busy. "
-                    f"Message queued (position {position}) — will process when a slot opens.",
-                )
-                return
-            except Exception:
-                log.exception("Failed to wake agent '%s'", agent_name)
-                await _add_reaction(message, "❌")
-                await send_system(
-                    message.channel,
-                    f"Failed to wake agent **{agent_name}**. Try `/kill-agent {agent_name}` and respawn.",
-                )
+            if not await wake_or_queue(session, content, message.channel, message):
                 return
 
-        session.last_activity = datetime.now(timezone.utc)
-        session.last_idle_notified = None
-        session.idle_reminder_count = 0
-        session._bridge_busy = False
-        drain_stderr(session)
-        drain_sdk_buffer(session)
-        if session._log:
-            session._log.info("USER: %s", _content_summary(content))
-        log.debug("Starting query for '%s'", agent_name)
-        session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+        # Process the message
+        log.debug("Processing message for agent '%s'", agent_name)
+        session.activity = ActivityState(
+            phase="starting", query_started=datetime.now(timezone.utc)
+        )
+
         try:
-            async with asyncio.timeout(QUERY_TIMEOUT):
-                await session.client.query(_as_stream(content))
-                await _stream_with_retry(session, message.channel)
+            await session.process_message(content, message.channel)
+            await _add_reaction(message, "✅")
         except TimeoutError:
+            log.warning("Query timeout for agent '%s'", agent_name)
             await _add_reaction(message, "⏳")
             await _handle_query_timeout(session, message.channel)
+        except RuntimeError as e:
+            # Agent-specific runtime error (not awake, etc.)
+            log.warning("Runtime error for agent '%s': %s", agent_name, e)
+            await _add_reaction(message, "❌")
+            await send_system(message.channel, str(e))
         except Exception:
-            log.exception("Error querying agent '%s'", agent_name)
+            log.exception("Error processing message for agent '%s'", agent_name)
             await _add_reaction(message, "❌")
             await send_system(
                 message.channel,
-                f"Error communicating with agent **{agent_name}**. The session may have crashed. "
+                f"Error communicating with agent **{agent_name}**. "
                 f"Try `/kill-agent {agent_name}` and respawn.",
             )
         finally:
@@ -3118,7 +3181,7 @@ async def on_message(message):
 
     log.debug("Query completed for '%s'", agent_name)
 
-    # Process any messages that were queued while the agent was busy
+    # Process any queued messages
     await _process_message_queue(session)
 
     await bot.process_commands(message)
