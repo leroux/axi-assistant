@@ -1086,6 +1086,57 @@ async def _discord_request(method: str, path: str, **kwargs) -> httpx.Response:
     return resp
 
 
+# --- #exceptions channel (REST-based, works in any context) ---
+
+_exceptions_channel_id: str | None = None
+
+
+async def _get_or_create_exceptions_channel() -> str | None:
+    """Get or create the #exceptions channel via REST API.
+
+    Uses the httpx client directly so it works in contexts where discord.py
+    state (target_guild, bot.guilds) is unavailable (e.g. inside
+    _receive_response_safe which runs in the bridge subprocess context).
+    """
+    global _exceptions_channel_id
+    if _exceptions_channel_id is not None:
+        return _exceptions_channel_id
+    try:
+        guild_id = str(DISCORD_GUILD_ID)
+        resp = await _discord_request("GET", f"/guilds/{guild_id}/channels")
+        for ch in resp.json():
+            if ch.get("name") == "exceptions" and ch.get("type") == 0:
+                _exceptions_channel_id = ch["id"]
+                return _exceptions_channel_id
+        # Create it (type 0 = text channel, no category)
+        resp = await _discord_request(
+            "POST", f"/guilds/{guild_id}/channels",
+            json={"name": "exceptions", "type": 0},
+        )
+        _exceptions_channel_id = resp.json()["id"]
+        log.info("Created #exceptions channel (id=%s)", _exceptions_channel_id)
+        return _exceptions_channel_id
+    except Exception:
+        log.warning("Failed to get/create #exceptions channel", exc_info=True)
+        return None
+
+
+async def send_to_exceptions(message: str) -> bool:
+    """Send a message to the #exceptions channel. Returns True on success."""
+    try:
+        ch_id = await _get_or_create_exceptions_channel()
+        if ch_id is None:
+            return False
+        await _discord_request(
+            "POST", f"/channels/{ch_id}/messages",
+            json={"content": message[:2000]},
+        )
+        return True
+    except Exception:
+        log.warning("Failed to send to #exceptions", exc_info=True)
+        return False
+
+
 @tool(
     "discord_send_file",
     "Send a file as a Discord message attachment to your own channel or another channel. "
@@ -2257,6 +2308,10 @@ async def _receive_response_safe(session: AgentSession):
                             session.name, msg_type, json.dumps(data)[:500])
                 if session._log:
                     session._log.warning("UNKNOWN_MSG: type=%s data=%s", msg_type, json.dumps(data)[:500])
+                preview = json.dumps(data)[:400]
+                await send_to_exceptions(
+                    f"⚠️ Unknown SDK message type `{msg_type}` from **{session.name}**:\n```json\n{preview}\n```"
+                )
             continue
         yield parsed
         if isinstance(parsed, ResultMessage):
@@ -5315,6 +5370,11 @@ def _handle_task_exception(loop, context):
             log.debug("Suppressed expected ProcessError from SIGTERM'd subprocess")
             return
         log.error("Unhandled exception in async task: %s", context.get("message", ""), exc_info=exception)
+        msg_text = context.get("message", "")
+        exc_str = f"{type(exception).__name__}: {exception}"
+        loop.create_task(send_to_exceptions(
+            f"🔥 Unhandled exception in async task:\n**{msg_text}**\n```\n{exc_str[:1500]}\n```"
+        ))
     else:
         log.error("Unhandled async error: %s", context.get("message", ""))
 
