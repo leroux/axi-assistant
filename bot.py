@@ -109,6 +109,7 @@ CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
 MASTER_SESSION_PATH = os.path.join(BOT_DIR, ".master_session_id")
 CONFIG_PATH = os.path.join(BOT_DIR, "config.json")
+RATE_LIMIT_HISTORY_PATH = os.path.join(_log_dir, "rate_limit_history.jsonl")
 schedule_last_fired: dict[str, datetime] = {}
 _bot_start_time: datetime | None = None
 
@@ -2130,12 +2131,36 @@ def _update_rate_limit_quota(data: dict) -> None:
     if resets_at_unix is None:
         return
     rl_type = info.get("rateLimitType", "unknown")
+    new_status = info.get("status", "unknown")
+    new_resets_at = datetime.fromtimestamp(resets_at_unix, tz=timezone.utc)
+    new_utilization = info.get("utilization")
+
+    # Preserve existing utilization when the new event lacks it and the window hasn't rolled over
+    existing = _rate_limit_quotas.get(rl_type)
+    if existing is not None and new_utilization is None and existing.resets_at == new_resets_at:
+        # Same window, no utilization in new event — keep the old value
+        new_utilization = existing.utilization
+
     _rate_limit_quotas[rl_type] = RateLimitQuota(
-        status=info.get("status", "unknown"),
-        resets_at=datetime.fromtimestamp(resets_at_unix, tz=timezone.utc),
+        status=new_status,
+        resets_at=new_resets_at,
         rate_limit_type=rl_type,
-        utilization=info.get("utilization"),
+        utilization=new_utilization,
     )
+
+    # Append to persistent history log
+    try:
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": rl_type,
+            "status": new_status,
+            "utilization": new_utilization,
+            "resets_at": new_resets_at.isoformat(),
+        }
+        with open(RATE_LIMIT_HISTORY_PATH, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        log.warning("Failed to write rate limit history", exc_info=True)
 
 
 async def _handle_rate_limit(error_text: str, session: AgentSession, channel) -> None:
@@ -3918,10 +3943,45 @@ async def ping_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="claude-usage", description="Show Claude API usage for current sessions and rate limit status.")
-async def claude_usage_command(interaction: discord.Interaction):
-    log.info("Slash command /claude-usage from %s", interaction.user)
+@app_commands.describe(history="Number of recent rate limit events to show (omit for current status)")
+async def claude_usage_command(interaction: discord.Interaction, history: int | None = None):
+    log.info("Slash command /claude-usage history=%s from %s", history, interaction.user)
     if interaction.user.id not in ALLOWED_USER_IDS:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    # History mode: show recent rate limit events from the JSONL log
+    if history is not None:
+        count = max(1, min(history, 50))  # clamp 1-50
+        lines = [f"**Rate Limit History** (last {count} events)", ""]
+        try:
+            with open(RATE_LIMIT_HISTORY_PATH, "r") as f:
+                all_lines = f.readlines()
+            recent = all_lines[-count:]
+            if not recent:
+                lines.append("No history recorded yet.")
+            else:
+                for raw in recent:
+                    try:
+                        r = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = datetime.fromisoformat(r["ts"]).astimezone(SCHEDULE_TIMEZONE)
+                    ts_str = ts.strftime("%-m/%-d %-I:%M %p")
+                    rl_type = r.get("type", "?").replace("_", " ")
+                    status = r.get("status", "?")
+                    util = r.get("utilization")
+                    if status == "rejected":
+                        icon = "\U0001f6ab"
+                    elif status == "allowed_warning":
+                        icon = "\u26a0\ufe0f"
+                    else:
+                        icon = "\u2705"
+                    util_str = f" ({int(util * 100)}%)" if util is not None else ""
+                    lines.append(f"`{ts_str}` {icon} {rl_type}: {status}{util_str}")
+        except FileNotFoundError:
+            lines.append("No history file yet — events are recorded on API calls.")
+        await interaction.response.send_message("\n".join(lines))
         return
 
     lines = ["**Claude Usage — Current Sessions**", ""]
