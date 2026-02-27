@@ -58,6 +58,7 @@ To spawn an agent, use the axi_spawn_agent MCP tool with these parameters:
 - cwd (string, required): absolute path to the working directory for the agent
 - prompt (string, required): initial task instructions — be specific and detailed since the agent works independently
 - resume (string, optional): session ID from a previously killed agent to resume with full conversation context
+- packs (list of strings, optional): pack names to load into the agent's system prompt. Defaults to the standard set. Pass [] to disable packs. Available packs are in the packs/ directory.
 
 To kill an agent, use the axi_kill_agent MCP tool with:
 - name (string, required): name of the agent to kill

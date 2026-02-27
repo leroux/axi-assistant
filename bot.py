@@ -708,6 +708,53 @@ _PROMPT_VARS = {"axi_user_data": AXI_USER_DATA, "bot_dir": BOT_DIR}
 _SOUL = _load_prompt_file(os.path.join(BOT_DIR, "SOUL.md"), _PROMPT_VARS)
 _DEV_CONTEXT = _load_prompt_file(os.path.join(BOT_DIR, "dev_context.md"), _PROMPT_VARS)
 
+
+# --- Packs: modular prompt fragments loaded from packs/<name>/prompt.md ---
+# Each pack is a directory under packs/ containing at minimum a prompt.md file.
+# Pack prompts are appended to agent system prompts based on the lists below.
+# No manifests, no dependency resolution — just files in directories.
+
+PACKS_DIR = os.path.join(BOT_DIR, "packs")
+
+# Which packs each agent type gets by default. Override per-spawn via axi_spawn_agent.
+MASTER_PACKS: list[str] = ["algorithm"]
+DEFAULT_SPAWNED_PACKS: list[str] = ["algorithm"]
+
+
+def _load_packs() -> dict[str, str]:
+    """Scan packs/ and load each pack's prompt.md content.
+
+    Returns {pack_name: prompt_text} for every valid pack found.
+    Packs without a prompt.md are silently skipped.
+    """
+    packs = {}
+    if not os.path.isdir(PACKS_DIR):
+        return packs
+    for name in sorted(os.listdir(PACKS_DIR)):
+        prompt_path = os.path.join(PACKS_DIR, name, "prompt.md")
+        if os.path.isfile(prompt_path):
+            try:
+                packs[name] = _load_prompt_file(prompt_path, _PROMPT_VARS)
+                log.info("Loaded pack '%s' (%d chars)", name, len(packs[name]))
+            except Exception:
+                log.exception("Failed to load pack '%s'", name)
+    return packs
+
+
+_PACKS: dict[str, str] = _load_packs()
+
+
+def _pack_prompt_text(pack_names: list[str]) -> str:
+    """Concatenate prompt text for the given pack names. Unknown names are skipped with a warning."""
+    parts = []
+    for name in pack_names:
+        text = _PACKS.get(name)
+        if text:
+            parts.append(text)
+        else:
+            log.warning("Pack '%s' not found (available: %s)", name, list(_PACKS.keys()))
+    return "\n\n".join(parts)
+
 # Mini system prompt for non-admin spawned agents (keeps context small)
 _AGENT_CONTEXT_PROMPT = """\
 You are an agent session in the Axi system — a Discord-based personal assistant for a single user. \
@@ -738,22 +785,32 @@ def _is_axi_dev_cwd(cwd: str) -> bool:
     )
 
 
-# Master agent: soul + dev context (master is always an admin agent)
+# Master agent: soul + dev context + master packs
+_master_packs_text = _pack_prompt_text(MASTER_PACKS)
 MASTER_SYSTEM_PROMPT: dict = {
     "type": "preset",
     "preset": "claude_code",
-    "append": _SOUL + "\n\n" + _DEV_CONTEXT,
+    "append": _SOUL + "\n\n" + _DEV_CONTEXT
+    + ("\n\n" + _master_packs_text if _master_packs_text else ""),
 }
 
 
-def _make_spawned_agent_system_prompt(cwd: str) -> dict:
-    """Build system prompt for a spawned agent based on its working directory."""
+def _make_spawned_agent_system_prompt(cwd: str, packs: list[str] | None = None) -> dict:
+    """Build system prompt for a spawned agent based on its working directory.
+
+    packs: explicit list of pack names to include, or None for DEFAULT_SPAWNED_PACKS.
+           Pass [] to disable packs entirely.
+    """
     if _is_axi_dev_cwd(cwd):
         # Admin agent — full soul + dev context
         append = _SOUL + "\n\n" + _DEV_CONTEXT
     else:
         # Non-admin agent — mini context prompt
         append = _AGENT_CONTEXT_PROMPT
+    pack_names = packs if packs is not None else DEFAULT_SPAWNED_PACKS
+    packs_text = _pack_prompt_text(pack_names)
+    if packs_text:
+        append += "\n\n" + packs_text
     return {
         "type": "preset",
         "preset": "claude_code",
@@ -817,6 +874,7 @@ async def _post_system_prompt_to_channel(
             "agent_type": {"type": "string", "enum": ["claude_code", "flowcoder"], "description": "Agent type. 'claude_code' (default) for interactive Claude, 'flowcoder' for flowchart executor."},
             "command": {"type": "string", "description": "Flowcoder command name (required when agent_type='flowcoder')"},
             "command_args": {"type": "string", "description": "Arguments for the flowcoder command (shell-style string)"},
+            "packs": {"type": "array", "items": {"type": "string"}, "description": "Optional list of pack names to load into this agent's system prompt. Defaults to the standard set. Pass [] to disable packs."},
         },
         "required": ["name", "prompt"],
     },
@@ -830,6 +888,7 @@ async def axi_spawn_agent(args):
     agent_type = args.get("agent_type", "claude_code")
     fc_command = args.get("command", "")
     fc_command_args = args.get("command_args", "")
+    agent_packs = args.get("packs")  # None = use defaults, [] = no packs
 
     # Flowcoder-specific validation
     if agent_type == "flowcoder":
@@ -858,6 +917,7 @@ async def axi_spawn_agent(args):
             await spawn_agent(
                 agent_name, agent_cwd, agent_prompt, resume=agent_resume,
                 agent_type=agent_type, command=fc_command, command_args=fc_command_args,
+                packs=agent_packs,
             )
         except Exception:
             _bot_creating_channels.discard(_normalize_channel_name(agent_name))
@@ -869,7 +929,7 @@ async def axi_spawn_agent(args):
             except Exception:
                 pass
 
-    log.info("Spawning agent '%s' via MCP tool (type=%s, cwd=%s, resume=%s)", agent_name, agent_type, agent_cwd, agent_resume)
+    log.info("Spawning agent '%s' via MCP tool (type=%s, cwd=%s, resume=%s, packs=%s)", agent_name, agent_type, agent_cwd, agent_resume, agent_packs)
     # Guard against on_guild_channel_create race: mark channel as bot-created
     # BEFORE the background task runs, so the guard is already set when the
     # gateway event fires.  spawn_agent will discard it after agents[name] is set.
@@ -2660,6 +2720,7 @@ async def reclaim_agent_name(name: str) -> None:
 async def spawn_agent(
     name: str, cwd: str, initial_prompt: str, resume: str | None = None,
     agent_type: str = "claude_code", command: str = "", command_args: str = "",
+    packs: list[str] | None = None,
 ) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
     # Auto-create cwd if it doesn't exist
@@ -2699,7 +2760,7 @@ async def spawn_agent(
         session = AgentSession(
             name=name,
             cwd=cwd,
-            system_prompt=_make_spawned_agent_system_prompt(cwd),
+            system_prompt=_make_spawned_agent_system_prompt(cwd, packs=packs),
             client=None,
             session_id=resume,
             discord_channel_id=channel.id,
