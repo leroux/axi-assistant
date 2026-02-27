@@ -2259,6 +2259,23 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel) ->
                 except Exception:
                     log.warning("Failed to notify channel %s about rate limit", ch.id)
 
+        # Schedule expiry notification to master channel
+        asyncio.create_task(_notify_rate_limit_expired(wait_seconds))
+
+
+async def _notify_rate_limit_expired(delay: float) -> None:
+    """Sleep until rate limit expires, then notify master channel."""
+    try:
+        await asyncio.sleep(delay)
+        if not _is_rate_limited():
+            ch = await get_master_channel()
+            if ch:
+                await send_system(ch, "✅ Rate limit expired — usage available again.")
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        log.warning("Failed to send rate limit expiry notification", exc_info=True)
+
 
 # --- Streaming response ---
 
