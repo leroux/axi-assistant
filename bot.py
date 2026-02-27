@@ -133,7 +133,7 @@ VALID_MODELS = {"haiku", "sonnet", "opus"}
 _config_lock = threading.Lock()
 
 def _load_config() -> dict:
-    """Load user configuration from file."""
+    """Load user configuration from file. Caller must hold _config_lock if consistency matters."""
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r") as f:
@@ -143,26 +143,27 @@ def _load_config() -> dict:
     return {}
 
 def _save_config(config: dict) -> None:
-    """Save user configuration to file."""
+    """Save user configuration to file. Caller must hold _config_lock."""
     try:
-        with _config_lock:
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(config, f, indent=2)
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(config, f, indent=2)
     except Exception as e:
         log.error("Failed to save config: %s", e)
 
 def _get_model() -> str:
     """Get the current model preference."""
-    config = _load_config()
-    return config.get("model", "haiku")
+    with _config_lock:
+        config = _load_config()
+    return config.get("model", "opus")
 
 def _set_model(model: str) -> str:
     """Set the model preference. Returns validation error string or empty string on success."""
     if model.lower() not in VALID_MODELS:
         return f"Invalid model '{model}'. Valid options: {', '.join(sorted(VALID_MODELS))}"
-    config = _load_config()
-    config["model"] = model.lower()
-    _save_config(config)
+    with _config_lock:
+        config = _load_config()
+        config["model"] = model.lower()
+        _save_config(config)
     return ""
 
 # --- Agent session management ---
@@ -1565,11 +1566,9 @@ async def sleep_agent(session: AgentSession) -> None:
 def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions for a session."""
     return ClaudeAgentOptions(
-        # model="opus",
         model=_get_model(),
-        #effort="high",
+        effort="high",
         thinking={"type": "enabled", "budget_tokens": 128000},
-        # thinking={"type": "adaptive"},
         #betas=["context-1m-2025-08-07"],
         setting_sources=["local"],
         permission_mode="default",

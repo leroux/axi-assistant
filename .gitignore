@@ -45,3 +45,4 @@ test_instructions.md
 .bridge.log
 .bot.lock
 logs/
+config.json
