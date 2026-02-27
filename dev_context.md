@@ -17,10 +17,13 @@ This file is appended to the system prompt for agents working on the axi-assista
 - `axi_test.py` — CLI for test instances (up/down/restart/list/msg/logs)
 - `axi-test@.service` — Systemd template unit for test instances
 - `SOUL.md` — Shared personality prompt for all agents (loaded at startup)
-- `CODE-PHILOSOPHY.md` — Software development philosophy, principles, and design guidelines for this codebase (data-oriented, explicit, performance-aware)
 - `dev_context.md` — This file; axi dev context appended for agents working on the codebase
 - `.env` — Instance-specific config (gitignored)
 - `schedules.json` — Scheduled events config
+
+## Development Philosophy
+
+Read `/home/ubuntu/axi-user-data/CODE-PHILOSOPHY.md` for the principles guiding this codebase: data-oriented design, mechanical sympathy (hardware awareness), explicit over convention, performance-aware, pragmatic functional programming, clear data flow, and no over-abstraction. This philosophy should inform all architectural decisions.
 
 ## Important Patterns
 
