@@ -43,15 +43,9 @@ FLOWCODER_ENABLED = os.environ.get("FLOWCODER_ENABLED", "").lower() in ("1", "tr
 
 if FLOWCODER_ENABLED:
     from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
-    import sys as _sys
-    _sys.path.insert(0, os.path.expanduser("~/coding-projects/flowcoder"))
-    from src.embedding import FlowCoderSession
-    from src.services.storage_service import CommandNotFoundError as _FCCommandNotFound
 else:
     FlowcoderProcess = None
     BridgeFlowcoderProcess = None
-    FlowCoderSession = None
-    _FCCommandNotFound = Exception
 
 load_dotenv()
 
@@ -249,8 +243,6 @@ class AgentSession:
     flowcoder_command: str = ""
     flowcoder_args: str = ""
     _log: logging.Logger | None = None
-    flowcoder: "FlowCoderSession | None" = None
-    _fc_channel: object = None  # Discord channel set during FlowCoder command execution
 
     def __post_init__(self):
         """Set up per-agent logger writing to <assistant_dir>/logs/<name>.log."""
@@ -1560,7 +1552,6 @@ async def sleep_agent(session: AgentSession) -> None:
     session._bridge_busy = False
     await _disconnect_client(session.client, session.name)
     session.client = None
-    session.flowcoder = None
     log.info("Agent '%s' is now sleeping", session.name)
 
 
@@ -1702,42 +1693,6 @@ async def wake_agent(session: AgentSession) -> None:
                         session.name,
                         exc_info=True,
                     )
-
-        # Create FlowCoderSession wrapping the SDK client
-        # Callbacks reference session._fc_channel which is set by _execute_flowcoder_command.
-        def _fc_on_prompt_stream(prompt_text: str, chunk_str: str) -> None:
-            """Buffer text from prompt streaming chunks for Discord."""
-            if not chunk_str or session._fc_channel is None:
-                return
-            # Extract text_delta content from StreamEvent string representation
-            if "content_block_delta" in chunk_str and "text_delta" in chunk_str:
-                import re
-                m = re.search(r"'text':\s*'((?:[^'\\]|\\.)*)'", chunk_str)
-                if not m:
-                    m = re.search(r'"text":\s*"((?:[^"\\]|\\.)*)"', chunk_str)
-                if m:
-                    text = m.group(1).encode().decode("unicode_escape", errors="replace")
-                    if not hasattr(session, "_fc_text_buf"):
-                        session._fc_text_buf = ""
-                    session._fc_text_buf += text
-
-        async def _fc_on_block_complete(block, result, context) -> None:
-            """Flush buffered prompt text to Discord after each block."""
-            ch = session._fc_channel
-            if ch is None:
-                return
-            buf = getattr(session, "_fc_text_buf", "")
-            if buf.strip():
-                await send_long(ch, buf.lstrip())
-            session._fc_text_buf = ""
-
-        session.flowcoder = FlowCoderSession.create(
-            client=session.client,
-            cwd=session.cwd,
-            commands_dir="/home/pride/coding-projects/flowcoder/commands",
-            on_prompt_stream=_fc_on_prompt_stream,
-            on_block_complete_async=_fc_on_block_complete,
-        )
 
 
 def get_master_session() -> AgentSession | None:
@@ -2295,59 +2250,11 @@ def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
     return None
 
 
-def _is_flowcoder_command(content: str | list, session: AgentSession) -> bool:
-    """Check if a message is a FlowCoder slash command (not a Discord slash command).
-
-    Returns True if the message starts with / and matches an available FlowCoder command.
-    """
-    if not isinstance(content, str) or not content.startswith("/"):
-        return False
-    if session.flowcoder is None:
-        return False
-    # Extract command name (first word after /)
-    stripped = content[1:].strip()
-    parts = stripped.split(None, 1)
-    if not parts:
-        return False
-    command_name = parts[0]
-    # Check if this command exists in the FlowCoder commands directory
-    return session.flowcoder.storage_service.command_exists(command_name)
-
-
-async def _execute_flowcoder_command(session: AgentSession, content: str, channel) -> None:
-    """Execute a FlowCoder slash command and stream results to Discord."""
-
-    log.info("Executing FlowCoder command for '%s': %s", session.name, content[:100])
-    session._fc_channel = channel
-    session._fc_text_buf = ""
-    try:
-        async with channel.typing():
-            context = await session.flowcoder.execute_command(content)
-        # Post execution summary
-        status = context.status.value if hasattr(context.status, 'value') else str(context.status)
-        summary = f"*FlowCoder:* Command `{content.split()[0]}` finished — **{status}**"
-        await send_long(channel, summary)
-    except _FCCommandNotFound as e:
-        await send_long(channel, f"*FlowCoder:* Command not found: {e}")
-    except Exception as e:
-        log.exception("FlowCoder command failed for '%s'", session.name)
-        await send_long(channel, f"*FlowCoder:* Command failed: {e}")
-    finally:
-        session._fc_channel = None
-        session._fc_text_buf = ""
-
-
 async def _query_agent(session: AgentSession, content: str | list, channel, *, show_awaiting_input: bool = True) -> None:
-    """Send a message to an agent, routing through FlowCoder if applicable.
+    """Send a message to an agent and stream the response.
 
-    For FlowCoder slash commands: executes the flowchart.
-    For regular messages: sends to Claude via the SDK and streams the response.
     Appends record-tracking instruction for eligible agents and enqueues updates.
     """
-    if _is_flowcoder_command(content, session):
-        await _execute_flowcoder_command(session, content, channel)
-        return
-
     # Append record-tracking instruction for eligible agents
     query_content = content
     if session.name != "record-updater":
