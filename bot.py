@@ -837,9 +837,9 @@ async def axi_spawn_agent(args):
         if agent_resume:
             return {"content": [{"type": "text", "text": "Error: 'resume' is not supported for flowcoder agents."}], "is_error": True}
 
-    ALLOWED_CWDS = (os.path.realpath(AXI_USER_DATA), os.path.realpath(BOT_DIR), os.path.realpath(BOT_WORKTREES_DIR))
+    # Use global ALLOWED_CWDS (which includes ALLOWED_CWDS and ADMIN_ALLOWED_CWDS from .env)
     if not any(agent_cwd == d or agent_cwd.startswith(d + os.sep) for d in ALLOWED_CWDS):
-        return {"content": [{"type": "text", "text": f"Error: cwd must be under {AXI_USER_DATA}, {BOT_DIR}, or {BOT_WORKTREES_DIR}."}], "is_error": True}
+        return {"content": [{"type": "text", "text": "Error: cwd is not in allowed directories. Check ALLOWED_CWDS or ADMIN_ALLOWED_CWDS in .env."}], "is_error": True}
 
     if not agent_name:
         return {"content": [{"type": "text", "text": "Error: 'name' is required and cannot be empty."}], "is_error": True}
