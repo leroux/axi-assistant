@@ -186,7 +186,7 @@ async def _post_model_warning(session) -> None:
 # --- Agent session management ---
 
 MASTER_AGENT_NAME = "axi-master"
-MAX_AWAKE_AGENTS = 5  # max concurrent awake agents (each ~280MB); set based on available RAM
+MAX_AWAKE_AGENTS = 3  # max concurrent awake agents (each ~280MB); MemoryMax=2G on service
 IDLE_REMINDER_THRESHOLDS = [timedelta(minutes=30), timedelta(hours=3), timedelta(hours=48)]
 QUERY_TIMEOUT = 43200  # 12 hours
 INTERRUPT_TIMEOUT = 15  # seconds to wait after interrupt
@@ -261,7 +261,7 @@ class AgentSession:
     flowcoder_process: "FlowcoderProcess | None" = None
     flowcoder_command: str = ""
     flowcoder_args: str = ""
-    debug: bool = False  # When True, post tool calls and thinking phases to Discord
+    debug: bool = field(default_factory=lambda: os.environ.get("DISCORD_DEBUG", "").strip().lower() in ("1", "true", "on"))  # Post tool calls and thinking phases to Discord
     _log: logging.Logger | None = None
 
     def __post_init__(self):
@@ -1990,7 +1990,11 @@ async def ensure_agent_channel(agent_name: str) -> TextChannel:
     if killed_category:
         for ch in killed_category.text_channels:
             if ch.name == normalized:
-                await ch.move(category=active_category, beginning=True, sync_permissions=True)
+                try:
+                    await ch.move(category=active_category, beginning=True, sync_permissions=True)
+                except discord.HTTPException as e:
+                    log.warning("Failed to move channel #%s from Killed to Active: %s", normalized, e)
+                    await send_to_exceptions(f"Failed to move #**{normalized}** from Killed → Active: `{e}`")
                 channel_to_agent[ch.id] = agent_name
                 log.info("Moved channel #%s from Killed to Active", normalized)
                 return ch
@@ -2000,6 +2004,10 @@ async def ensure_agent_channel(agent_name: str) -> TextChannel:
     _bot_creating_channels.add(normalized)
     try:
         channel = await target_guild.create_text_channel(normalized, category=active_category)
+    except discord.HTTPException as e:
+        log.warning("Failed to create channel #%s: %s", normalized, e)
+        await send_to_exceptions(f"Failed to create channel #**{normalized}**: `{e}`")
+        raise
     finally:
         if not already_guarded:
             _bot_creating_channels.discard(normalized)
@@ -2022,6 +2030,7 @@ async def move_channel_to_killed(agent_name: str) -> None:
                     log.info("Moved channel #%s to Killed category", normalized)
                 except discord.HTTPException as e:
                     log.warning("Failed to move channel #%s to Killed: %s", normalized, e)
+                    await send_to_exceptions(f"Failed to move #**{normalized}** to Killed category: `{e}`")
                 break
 
 
@@ -4463,6 +4472,9 @@ async def stop_agent(interaction, agent_name: str | None = None):
         await interaction.response.send_message(f"Agent **{agent_name}** is not busy.", ephemeral=True)
         return
 
+    # Defer immediately so Discord doesn't time out while we interrupt via bridge
+    await interaction.response.defer()
+
     try:
         # interrupt via bridge (SIGINT process group) to kill Task subagents too
         if bridge_conn and bridge_conn.is_alive:
@@ -4478,14 +4490,14 @@ async def stop_agent(interaction, agent_name: str | None = None):
             cleared += 1
 
         if cleared:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"*System:* Interrupt signal sent to **{agent_name}** and cleared {cleared} queued message{'s' if cleared != 1 else ''}."
             )
         else:
-            await interaction.response.send_message(f"*System:* Interrupt signal sent to **{agent_name}**.")
+            await interaction.followup.send(f"*System:* Interrupt signal sent to **{agent_name}**.")
     except Exception as e:
         log.exception("Failed to interrupt agent '%s'", agent_name)
-        await interaction.response.send_message(f"Failed to interrupt **{agent_name}**: {e}", ephemeral=True)
+        await interaction.followup.send(f"Failed to interrupt **{agent_name}**: {e}")
 
 
 @bot.tree.command(name="skip", description="Interrupt the current query but keep processing queued messages.")
@@ -4514,6 +4526,9 @@ async def skip_agent(interaction, agent_name: str | None = None):
         await interaction.response.send_message(f"Agent **{agent_name}** is not busy.", ephemeral=True)
         return
 
+    # Defer immediately so Discord doesn't time out while we interrupt via bridge
+    await interaction.response.defer()
+
     queued = session.message_queue.qsize()
     try:
         # Interrupt current query only — queued messages will continue processing;
@@ -4523,16 +4538,16 @@ async def skip_agent(interaction, agent_name: str | None = None):
         else:
             await session.client.interrupt()
         if queued:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"*System:* Skipped current query for **{agent_name}**. {queued} queued message{'s' if queued != 1 else ''} will continue processing."
             )
         else:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"*System:* Skipped current query for **{agent_name}**. No queued messages."
             )
     except Exception as e:
         log.exception("Failed to interrupt agent '%s'", agent_name)
-        await interaction.response.send_message(f"Failed to skip **{agent_name}**: {e}", ephemeral=True)
+        await interaction.followup.send(f"Failed to skip **{agent_name}**: {e}")
 
 
 @bot.tree.command(name="reset-context", description="Reset an agent's context. Infers agent from current channel, or specify by name.")
