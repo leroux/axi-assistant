@@ -9,16 +9,20 @@ Usage:
     axi-test down <name>
     axi-test restart <name>
     axi-test list
-    axi-test merge
+    axi-test merge [-m MSG] [--timeout SECS]
+    axi-test queue [show|drop] [--all]
     axi-test msg <name> <message> [--timeout SECS]
     axi-test logs <name>
 """
 import argparse
+import fcntl
 import json
 import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import httpx
 from dotenv import dotenv_values
@@ -70,6 +74,51 @@ def is_instance_running(name: str) -> bool:
         capture_output=True, text=True,
     )
     return result.stdout.strip() == "active"
+
+
+def cleanup_orphan_services() -> int:
+    """Stop and reset orphaned axi-test@ services.
+
+    Finds user-level axi-test@ units that are crash-looping or failed
+    because their worktree directory or .env is missing. Returns count
+    of services cleaned up.
+    """
+    # List all axi-test@ units (any state)
+    result = subprocess.run(
+        ["systemctl", "--user", "list-units", "--all", "--plain",
+         "--no-legend", "axi-test@*"],
+        capture_output=True, text=True,
+    )
+    cleaned = 0
+    for line in result.stdout.strip().splitlines():
+        if not line.strip():
+            continue
+        unit = line.split()[0]
+        # Extract instance name: "axi-test@foo.service" -> "foo"
+        if not unit.startswith("axi-test@") or not unit.endswith(".service"):
+            continue
+        name = unit[len("axi-test@"):-len(".service")]
+
+        instance_path = os.path.join(TESTS_DIR, name)
+        env_path = os.path.join(instance_path, ".env")
+
+        # Orphan if: directory missing, or .env missing (no reservation)
+        if os.path.isdir(instance_path) and os.path.isfile(env_path):
+            continue  # Looks legitimate, skip
+
+        # Stop and reset
+        subprocess.run(
+            ["systemctl", "--user", "stop", unit],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["systemctl", "--user", "reset-failed", unit],
+            capture_output=True,
+        )
+        print(f"Cleaned up orphan service: {unit}")
+        cleaned += 1
+
+    return cleaned
 
 
 def get_running_instances() -> list[str]:
@@ -175,6 +224,172 @@ def get_worktree_branch(worktree_path: str) -> str:
     return result.stdout.strip() or "unknown"
 
 
+# --- Merge Queue ---
+
+
+def _find_main_repo() -> str:
+    """Find the main repo path via git's common dir."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print("Error: Not inside a git repository", file=sys.stderr)
+        sys.exit(1)
+    return os.path.dirname(result.stdout.strip())
+
+
+def _queue_file(main_repo: str) -> str:
+    return os.path.join(main_repo, ".merge-queue.json")
+
+
+def _queue_lock(main_repo: str) -> str:
+    return os.path.join(main_repo, ".merge-queue.lock")
+
+
+def _merge_lock_file(main_repo: str) -> str:
+    return os.path.join(main_repo, ".merge-exec.lock")
+
+
+@contextmanager
+def _flock(path: str):
+    """Acquire exclusive file lock, release on exit."""
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _read_queue(main_repo: str) -> list[dict]:
+    """Read queue file. Caller must hold queue lock."""
+    path = _queue_file(main_repo)
+    if not os.path.isfile(path):
+        return []
+    with open(path) as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return []
+
+
+def _write_queue(main_repo: str, entries: list[dict]) -> None:
+    """Write queue file. Caller must hold queue lock."""
+    with open(_queue_file(main_repo), "w") as f:
+        json.dump(entries, f, indent=2)
+
+
+def _cleanup_stale(entries: list[dict]) -> None:
+    """Remove entries with dead processes. Modifies list in place."""
+    now = datetime.now(timezone.utc)
+    to_remove = []
+    for i, entry in enumerate(entries):
+        pid = entry.get("pid")
+        if not pid:
+            continue
+        try:
+            os.kill(pid, 0)
+            # Process alive — check heartbeat staleness as backup
+            heartbeat_s = entry.get("heartbeat", "")
+            submitted_s = entry.get("submitted_at", "")
+            if heartbeat_s and submitted_s:
+                heartbeat = datetime.fromisoformat(heartbeat_s)
+                submitted = datetime.fromisoformat(submitted_s)
+                if (now - heartbeat).total_seconds() > 60 and (now - submitted).total_seconds() > 600:
+                    to_remove.append(i)
+        except ProcessLookupError:
+            to_remove.append(i)
+        except PermissionError:
+            pass  # Process exists but we can't signal it
+    for i in reversed(to_remove):
+        removed = entries.pop(i)
+        print(f"Removed stale queue entry: {removed.get('branch', '?')} (pid {removed.get('pid', '?')})")
+
+
+def _remove_from_queue(main_repo: str, branch: str) -> None:
+    """Remove a branch from the queue."""
+    with _flock(_queue_lock(main_repo)):
+        entries = _read_queue(main_repo)
+        entries = [e for e in entries if e["branch"] != branch]
+        _write_queue(main_repo, entries)
+
+
+def _git(main_repo: str, *args: str) -> subprocess.CompletedProcess:
+    """Run a git command in the main repo."""
+    return subprocess.run(
+        ["git", "-C", main_repo, *args],
+        capture_output=True, text=True,
+    )
+
+
+def _execute_merge(main_repo: str, branch: str, message: str | None = None) -> tuple[str, str]:
+    """Execute squash merge. Returns (status, detail).
+
+    status: "merged", "needs_rebase", or "error"
+    detail: commit SHA on success, or error message on failure.
+    """
+    # Verify main repo is on 'main' branch
+    current = _git(main_repo, "branch", "--show-current")
+    if current.stdout.strip() != "main":
+        return ("error", f"main repo is on branch '{current.stdout.strip()}', expected 'main'")
+
+    # Pre-merge cleanup: if index is dirty from interrupted merge, reset
+    if _git(main_repo, "diff", "--cached", "--quiet").returncode != 0:
+        print("Cleaning up dirty index from interrupted merge...")
+        r = _git(main_repo, "reset", "--hard", "HEAD")
+        if r.returncode != 0:
+            return ("error", f"failed to clean dirty index: {r.stderr.strip()}")
+
+    # Fast-forward check: merge-base must equal main HEAD
+    merge_base_r = _git(main_repo, "merge-base", "main", branch)
+    if merge_base_r.returncode != 0:
+        return ("error", f"failed to compute merge-base: {merge_base_r.stderr.strip()}")
+
+    main_head_r = _git(main_repo, "rev-parse", "main")
+    if main_head_r.returncode != 0:
+        return ("error", f"failed to get main HEAD: {main_head_r.stderr.strip()}")
+
+    merge_base = merge_base_r.stdout.strip()
+    main_head = main_head_r.stdout.strip()
+
+    if merge_base != main_head:
+        return ("needs_rebase", f"merge-base {merge_base[:8]} != main HEAD {main_head[:8]}")
+
+    # Check branch has commits beyond main
+    log_r = _git(main_repo, "log", "--oneline", f"main..{branch}")
+    if not log_r.stdout.strip():
+        return ("error", "no commits to merge — branch is identical to main")
+
+    # Collect commit messages before squashing
+    msg_r = _git(main_repo, "log", "--format=- %s", f"main..{branch}")
+    commit_log = msg_r.stdout.strip()
+
+    # Squash merge
+    merge_r = _git(main_repo, "merge", "--squash", branch)
+    if merge_r.returncode != 0:
+        _git(main_repo, "reset", "--hard", "HEAD")
+        return ("error", f"squash merge failed: {merge_r.stderr.strip()}")
+
+    # Build commit message
+    if message:
+        commit_msg = message
+    else:
+        commit_msg = branch
+        if commit_log:
+            commit_msg += f"\n\n{commit_log}"
+
+    # Commit
+    commit_r = _git(main_repo, "commit", "-m", commit_msg)
+    if commit_r.returncode != 0:
+        _git(main_repo, "reset", "--hard", "HEAD")
+        return ("error", f"commit failed: {commit_r.stderr.strip()}")
+
+    sha_r = _git(main_repo, "rev-parse", "--short", "HEAD")
+    return ("merged", sha_r.stdout.strip())
+
+
 # --- Subcommands ---
 
 def wait_for_slot(config, explicit_guild, instance_name, timeout, poll_interval=10):
@@ -211,6 +426,9 @@ def wait_for_slot(config, explicit_guild, instance_name, timeout, poll_interval=
 
 
 def cmd_up(args):
+    # Clean up orphaned services before reserving a slot
+    cleanup_orphan_services()
+
     config = load_config()
     name = args.name
     instance_path = os.path.join(TESTS_DIR, name)
@@ -529,17 +747,8 @@ def cmd_msg(args):
 
 
 def cmd_merge(args):
-    """Merge current worktree branch into main repo."""
-    # Find main repo via git's common dir
-    result = subprocess.run(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print("Error: Not inside a git repository", file=sys.stderr)
-        sys.exit(1)
-
-    main_repo = os.path.dirname(result.stdout.strip())
+    """Queue a squash merge of the current worktree branch into main."""
+    main_repo = _find_main_repo()
     cwd = os.path.realpath(os.getcwd())
 
     if os.path.realpath(main_repo) == cwd:
@@ -551,14 +760,140 @@ def cmd_merge(args):
         print("Error: Could not determine current branch", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Merging branch '{branch}' into main repo at {main_repo}")
-    result = subprocess.run(
-        ["git", "-C", main_repo, "merge", branch],
-    )
-    if result.returncode != 0:
-        print("Merge failed — resolve conflicts manually", file=sys.stderr)
-        sys.exit(1)
-    print("Done")
+    # Submit to queue
+    entry = {
+        "branch": branch,
+        "worktree": cwd,
+        "pid": os.getpid(),
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+        "heartbeat": datetime.now(timezone.utc).isoformat(),
+        "status": "queued",
+    }
+
+    with _flock(_queue_lock(main_repo)):
+        entries = _read_queue(main_repo)
+        _cleanup_stale(entries)
+        for e in entries:
+            if e["branch"] == branch:
+                print(f"Error: branch '{branch}' is already in the merge queue", file=sys.stderr)
+                sys.exit(1)
+        entries.append(entry)
+        _write_queue(main_repo, entries)
+        position = len(entries)
+
+    print(f"Queued for merge (position {position})")
+
+    timeout = getattr(args, "timeout", 300)
+    deadline = time.monotonic() + timeout
+
+    try:
+        # Wait for turn
+        while True:
+            if time.monotonic() > deadline:
+                _remove_from_queue(main_repo, branch)
+                print(f"Error: timed out waiting in merge queue ({timeout}s)", file=sys.stderr)
+                sys.exit(2)
+
+            with _flock(_queue_lock(main_repo)):
+                entries = _read_queue(main_repo)
+                _cleanup_stale(entries)
+                # Update heartbeat
+                for e in entries:
+                    if e["branch"] == branch:
+                        e["heartbeat"] = datetime.now(timezone.utc).isoformat()
+                        break
+                # Check if first
+                first = entries and entries[0]["branch"] == branch
+                if first:
+                    entries[0]["status"] = "merging"
+                _write_queue(main_repo, entries)
+
+            if first:
+                break
+
+            pos = next((i for i, e in enumerate(entries) if e["branch"] == branch), -1)
+            print(f"Waiting... (position {pos + 1} of {len(entries)})")
+            time.sleep(2)
+
+        # Execute merge
+        print(f"Merging {branch} into main...")
+        message = getattr(args, "message", None)
+
+        with _flock(_merge_lock_file(main_repo)):
+            status, detail = _execute_merge(main_repo, branch, message)
+
+        _remove_from_queue(main_repo, branch)
+
+        if status == "merged":
+            print(f"Squash-merged as {detail}: {branch}")
+        elif status == "needs_rebase":
+            print(f"Error: main has moved ahead — rebase '{branch}' onto main and resubmit", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(f"Error: {detail}", file=sys.stderr)
+            sys.exit(2)
+
+    except KeyboardInterrupt:
+        _remove_from_queue(main_repo, branch)
+        print("\nInterrupted — removed from queue", file=sys.stderr)
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception as e:
+        _remove_from_queue(main_repo, branch)
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_queue(args):
+    """Show or manage the merge queue."""
+    main_repo = _find_main_repo()
+
+    if args.action == "drop":
+        if args.all:
+            with _flock(_queue_lock(main_repo)):
+                _write_queue(main_repo, [])
+            print("Queue cleared")
+        else:
+            cwd = os.path.realpath(os.getcwd())
+            branch = get_worktree_branch(cwd)
+            with _flock(_queue_lock(main_repo)):
+                entries = _read_queue(main_repo)
+                before = len(entries)
+                entries = [e for e in entries if e["branch"] != branch]
+                _write_queue(main_repo, entries)
+            if len(entries) < before:
+                print(f"Removed '{branch}' from queue")
+            else:
+                print(f"Branch '{branch}' not found in queue")
+        return
+
+    # Default: show queue
+    with _flock(_queue_lock(main_repo)):
+        entries = _read_queue(main_repo)
+        _cleanup_stale(entries)
+        _write_queue(main_repo, entries)
+
+    if not entries:
+        print("Merge queue is empty")
+        return
+
+    print(f"Merge queue ({len(entries)} entries):")
+    for i, entry in enumerate(entries):
+        status = entry.get("status", "queued")
+        branch = entry.get("branch", "?")
+        pid = entry.get("pid", "?")
+        submitted = entry.get("submitted_at", "?")[:19]
+        print(f"  {i + 1}. [{status}] {branch} (pid {pid}, submitted {submitted})")
+
+
+def cmd_cleanup(args):
+    """Stop orphaned axi-test@ services that have no worktree or .env."""
+    cleaned = cleanup_orphan_services()
+    if cleaned == 0:
+        print("No orphan services found")
+    else:
+        print(f"Cleaned up {cleaned} orphan service(s)")
 
 
 def cmd_logs(args):
@@ -606,8 +941,21 @@ def main():
     p_msg.set_defaults(func=cmd_msg)
 
     # merge
-    p_merge = sub.add_parser("merge", help="Merge current worktree branch into main repo")
+    p_merge = sub.add_parser("merge", help="Squash-merge current branch into main via queue")
+    p_merge.add_argument("-m", "--message", help="Custom commit message (default: branch name + commit list)")
+    p_merge.add_argument("--timeout", type=int, default=300, help="Max seconds to wait in queue (default: 300)")
     p_merge.set_defaults(func=cmd_merge)
+
+    # queue
+    p_queue = sub.add_parser("queue", help="Show or manage merge queue")
+    p_queue.add_argument("action", nargs="?", default="show", choices=["show", "drop"],
+                          help="Action: show (default) or drop")
+    p_queue.add_argument("--all", action="store_true", help="Drop all entries (with 'drop')")
+    p_queue.set_defaults(func=cmd_queue)
+
+    # cleanup
+    p_cleanup = sub.add_parser("cleanup", help="Stop orphaned test instance services")
+    p_cleanup.set_defaults(func=cmd_cleanup)
 
     # logs
     p_logs = sub.add_parser("logs", help="Follow instance logs")
