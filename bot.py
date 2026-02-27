@@ -1452,8 +1452,11 @@ async def _deliver_inter_agent_message(
         try:
             if bridge_conn and bridge_conn.is_alive:
                 await bridge_conn.send_command("interrupt", name=target_session.name)
-            elif target_session.client:
-                await target_session.client.interrupt()
+            if target_session.client:
+                try:
+                    await target_session.client.interrupt()
+                except Exception:
+                    pass  # may fail if SIGINT already ended the query
         except Exception:
             log.exception(
                 "Failed to interrupt '%s' for inter-agent message (message still queued)",
@@ -3072,11 +3075,16 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
 
     # Step 1: Try graceful interrupt
     try:
-        # interrupt via bridge (SIGINT process group) to kill Task subagents too
+        # SIGINT the process group to kill Task subagents, then send SDK
+        # interrupt to cleanly abort the CLI query.
         if bridge_conn and bridge_conn.is_alive:
-            await bridge_conn.send_command("interrupt", name=session.name)
-        else:
+            result = await bridge_conn.send_command("interrupt", name=session.name)
+            if not result.ok:
+                log.warning("Bridge SIGINT for '%s' failed: %s", session.name, result.error)
+        try:
             await session.client.interrupt()
+        except Exception:
+            pass  # may fail if SIGINT already ended the query
         async with asyncio.timeout(INTERRUPT_TIMEOUT):
             async for msg in _receive_response_safe(session):
                 if isinstance(msg, ResultMessage):
@@ -4875,11 +4883,17 @@ async def stop_agent(interaction, agent_name: str | None = None):
     await interaction.response.defer()
 
     try:
-        # interrupt via bridge (SIGINT process group) to kill Task subagents too
+        # SIGINT the process group to kill Task subagents, then send SDK
+        # interrupt to cleanly abort the CLI query (SIGINT alone only
+        # cancels the current tool/API step, not the multi-turn query).
         if bridge_conn and bridge_conn.is_alive:
-            await bridge_conn.send_command("interrupt", name=session.name)
-        else:
+            result = await bridge_conn.send_command("interrupt", name=session.name)
+            if not result.ok:
+                log.warning("Bridge SIGINT for '%s' failed: %s", session.name, result.error)
+        try:
             await session.client.interrupt()
+        except Exception:
+            pass  # may fail if SIGINT already ended the query
 
         # Drain queued messages so nothing gets processed after the interrupt
         cleared = 0
@@ -4930,12 +4944,16 @@ async def skip_agent(interaction, agent_name: str | None = None):
 
     queued = session.message_queue.qsize()
     try:
-        # Interrupt current query only — queued messages will continue processing;
-        # use bridge (SIGINT process group) to kill Task subagents too
+        # SIGINT the process group to kill Task subagents, then send SDK
+        # interrupt to cleanly abort the CLI query.
         if bridge_conn and bridge_conn.is_alive:
-            await bridge_conn.send_command("interrupt", name=session.name)
-        else:
+            result = await bridge_conn.send_command("interrupt", name=session.name)
+            if not result.ok:
+                log.warning("Bridge SIGINT for '%s' failed: %s", session.name, result.error)
+        try:
             await session.client.interrupt()
+        except Exception:
+            pass  # may fail if SIGINT already ended the query
         if queued:
             await interaction.followup.send(
                 f"*System:* Skipped current query for **{agent_name}**. {queued} queued message{'s' if queued != 1 else ''} will continue processing."
