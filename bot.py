@@ -263,6 +263,7 @@ class AgentSession:
     flowcoder_command: str = ""
     flowcoder_args: str = ""
     debug: bool = field(default_factory=lambda: os.environ.get("DISCORD_DEBUG", "").strip().lower() in ("1", "true", "on"))  # Post tool calls and thinking phases to Discord
+    plan_approval_future: asyncio.Future | None = None  # Set when waiting for user to approve/reject a plan
     _log: logging.Logger | None = None
 
     def __post_init__(self):
@@ -539,8 +540,13 @@ def drain_sdk_buffer(session: AgentSession) -> int:
     return len(drained)
 
 
-def make_cwd_permission_callback(allowed_cwd: str):
-    """Create a can_use_tool callback that restricts file writes to allowed_cwd and AXI_USER_DATA."""
+def make_cwd_permission_callback(allowed_cwd: str, session: "AgentSession | None" = None):
+    """Create a can_use_tool callback that restricts file writes to allowed_cwd and AXI_USER_DATA.
+
+    If session is provided, enables plan mode support: EnterPlanMode/ExitPlanMode are
+    intercepted instead of denied, and ExitPlanMode pauses the agent until the user
+    approves or rejects the plan via Discord.
+    """
     allowed = os.path.realpath(allowed_cwd)
     user_data = os.path.realpath(AXI_USER_DATA)
     worktrees = os.path.realpath(BOT_WORKTREES_DIR)
@@ -558,12 +564,20 @@ def make_cwd_permission_callback(allowed_cwd: str):
         tool_name: str, tool_input: dict, ctx: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
         # Forbidden tools in Discord mode (rendered as invisible/broken in Discord channel UI)
-        forbidden_tools = {"AskUserQuestion", "TodoWrite", "EnterPlanMode", "ExitPlanMode", "Skill", "EnterWorktree"}
+        forbidden_tools = {"AskUserQuestion", "TodoWrite", "Skill", "EnterWorktree"}
         if tool_name in forbidden_tools:
             return PermissionResultDeny(
                 message=f"{tool_name} is not compatible with Discord-based agent mode. Use text messages to communicate instead."
             )
-        
+
+        # --- Plan mode tools ---
+        if tool_name == "EnterPlanMode":
+            # Allow — the CLI handles the mode switch internally
+            return PermissionResultAllow()
+
+        if tool_name == "ExitPlanMode":
+            return await _handle_exit_plan_mode(session, tool_input)
+
         # File-writing tools — check path is within allowed bases
         if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
@@ -578,6 +592,99 @@ def make_cwd_permission_callback(allowed_cwd: str):
         return PermissionResultAllow()
 
     return _check_permission
+
+
+async def _handle_exit_plan_mode(
+    session: "AgentSession | None",
+    tool_input: dict,
+) -> PermissionResultAllow | PermissionResultDeny:
+    """Handle ExitPlanMode by posting the plan to Discord and waiting for user approval.
+
+    The agent is paused (the can_use_tool callback blocks) until the user responds
+    with 'approve', 'reject', or a modification message in the Discord channel.
+    """
+    if session is None or session.discord_channel_id is None:
+        return PermissionResultAllow()
+
+    channel_id = session.discord_channel_id
+
+    # Helper to send a message via the REST API (bypasses broken bot.get_channel cache)
+    async def _send_plan_msg(content: str) -> None:
+        await _discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
+
+    # Try to find and read the plan file.
+    # Claude Code writes the plan to a file specified in the plan mode system message.
+    plan_content = None
+    plan_paths = [
+        os.path.join(session.cwd, ".claude", "plan.md"),
+        os.path.join(session.cwd, "plan.md"),
+    ]
+    for plan_path in plan_paths:
+        if os.path.exists(plan_path):
+            try:
+                with open(plan_path) as f:
+                    plan_content = f.read().strip()
+                break
+            except Exception:
+                pass
+
+    # Post the plan to Discord
+    header = f"📋 **Plan from {session.name}** — waiting for approval"
+    try:
+        if plan_content:
+            if len(plan_content) > 1800:
+                # Upload as file attachment
+                await _send_plan_msg(header)
+                # Use multipart form for file upload
+                boundary = "----PlanFileBoundary"
+                body = (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="content"\r\n\r\n'
+                    f"{header}\r\n"
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="files[0]"; filename="plan.md"\r\n'
+                    f"Content-Type: text/markdown\r\n\r\n"
+                    f"{plan_content}\r\n"
+                    f"--{boundary}--\r\n"
+                )
+                await _discord_api.request(
+                    "POST", f"/channels/{channel_id}/messages",
+                    content=body.encode(),
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                )
+            else:
+                await _send_plan_msg(f"{header}\n\n{plan_content}")
+        else:
+            await _send_plan_msg(f"{header}\n\n*(Plan file not found — the agent should have described the plan in its messages above.)*")
+
+        await _send_plan_msg(
+            "Reply with **approve** to proceed, **reject** to cancel, "
+            "or type feedback to revise the plan."
+        )
+    except Exception:
+        log.exception("_handle_exit_plan_mode: failed to post plan to Discord — auto-approving")
+        return PermissionResultAllow()
+
+    # Create a future and wait for user response
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    session.plan_approval_future = future
+
+    log.info("Agent '%s' paused waiting for plan approval", session.name)
+
+    try:
+        # Wait for user response (no timeout — user takes as long as they need)
+        result = await future
+    finally:
+        session.plan_approval_future = None
+
+    if result.get("approved"):
+        log.info("Agent '%s' plan approved by user", session.name)
+        return PermissionResultAllow()
+    else:
+        message = result.get("message", "User rejected the plan.")
+        log.info("Agent '%s' plan rejected: %s", session.name, message)
+        return PermissionResultDeny(message=message)
 
 
 # --- Schedule helpers ---
@@ -800,7 +907,8 @@ Sandbox policy:
 
 Communication rules:
 - Never guess or fabricate answers. If you lack context, say so and look it up.
-- Do NOT use AskUserQuestion, TodoWrite, EnterPlanMode, ExitPlanMode, Skill, or EnterWorktree tools — they are invisible in Discord.
+- Do NOT use AskUserQuestion, TodoWrite, Skill, or EnterWorktree tools — they are invisible in Discord.
+- EnterPlanMode and ExitPlanMode ARE supported — use plan mode normally for non-trivial implementation tasks. Your plan will be posted to Discord for user approval.
 - Ask questions as normal text messages. List options in your message if the user needs to choose.\
 """ % _PROMPT_VARS
 
@@ -1694,7 +1802,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> 
         #betas=["context-1m-2025-08-07"],
         setting_sources=["local"],
         permission_mode="default",
-        can_use_tool=make_cwd_permission_callback(session.cwd),
+        can_use_tool=make_cwd_permission_callback(session.cwd, session),
         cwd=session.cwd,
         system_prompt=session.system_prompt,
         include_partial_messages=True,
@@ -3459,7 +3567,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
 
             # Build minimal options for reconnecting (no model/thinking needed — CLI already running)
             options = ClaudeAgentOptions(
-                can_use_tool=make_cwd_permission_callback(session.cwd),
+                can_use_tool=make_cwd_permission_callback(session.cwd, session),
                 mcp_servers=session.mcp_servers or {},
                 permission_mode="default",
                 cwd=session.cwd,
@@ -3690,6 +3798,31 @@ async def on_message(message):
                 "This agent has been killed. Use `/spawn` to create a new one.",
             )
             return
+
+    # --- Plan approval gate ---
+    # If the agent is paused waiting for plan approval, intercept the user's response
+    if session.plan_approval_future is not None and not session.plan_approval_future.done():
+        # Strip the timestamp prefix added by _extract_message_content (e.g. "[2026-02-27 20:00:08 UTC] ")
+        raw = content.strip() if isinstance(content, str) else ""
+        text = re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\]\s*", "", raw).strip().lower()
+        if text in ("approve", "approved", "yes", "y", "lgtm", "go", "proceed", "ok"):
+            session.plan_approval_future.set_result({"approved": True})
+            await _add_reaction(message, "✅")
+            await send_system(message.channel, "Plan approved — agent resuming implementation.")
+        elif text in ("reject", "rejected", "no", "n", "cancel", "stop"):
+            session.plan_approval_future.set_result({"approved": False, "message": "User rejected the plan. Please revise."})
+            await _add_reaction(message, "❌")
+            await send_system(message.channel, "Plan rejected — agent will revise.")
+        else:
+            # Treat any other message as feedback for revision
+            feedback = content if isinstance(content, str) else str(content)
+            session.plan_approval_future.set_result({
+                "approved": False,
+                "message": f"User wants changes to the plan: {feedback}",
+            })
+            await _add_reaction(message, "📝")
+            await send_system(message.channel, "Feedback received — agent will revise the plan.")
+        return
 
     # --- Text command handling (// prefix) ---
     if message.content.strip().startswith("//"):
