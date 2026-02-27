@@ -37,13 +37,21 @@ from bridge import (
     connect_to_bridge,
 )
 from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
-from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
 from handlers import get_handler, AgentHandler
 
-import sys as _sys
-_sys.path.insert(0, os.path.expanduser("~/coding-projects/flowcoder"))
-from src.embedding import FlowCoderSession
-from src.services.storage_service import CommandNotFoundError as _FCCommandNotFound
+FLOWCODER_ENABLED = os.environ.get("FLOWCODER_ENABLED", "").lower() in ("1", "true", "yes")
+
+if FLOWCODER_ENABLED:
+    from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
+    import sys as _sys
+    _sys.path.insert(0, os.path.expanduser("~/coding-projects/flowcoder"))
+    from src.embedding import FlowCoderSession
+    from src.services.storage_service import CommandNotFoundError as _FCCommandNotFound
+else:
+    FlowcoderProcess = None
+    BridgeFlowcoderProcess = None
+    FlowCoderSession = None
+    _FCCommandNotFound = Exception
 
 load_dotenv()
 
@@ -237,12 +245,12 @@ class AgentSession:
     _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
     _bridge_busy: bool = False   # True when reconnected to a mid-task CLI (bridge idle=False)
     activity: ActivityState = field(default_factory=ActivityState)
-    flowcoder_process: FlowcoderProcess | None = None
+    flowcoder_process: "FlowcoderProcess | None" = None
     flowcoder_command: str = ""
     flowcoder_args: str = ""
     _log: logging.Logger | None = None
     flowcoder: "FlowCoderSession | None" = None
-    _fc_channel: Any = None  # Discord channel set during FlowCoder command execution
+    _fc_channel: object = None  # Discord channel set during FlowCoder command execution
 
     def __post_init__(self):
         """Set up per-agent logger writing to <assistant_dir>/logs/<name>.log."""
@@ -823,6 +831,8 @@ async def axi_spawn_agent(args):
 
     # Flowcoder-specific validation
     if agent_type == "flowcoder":
+        if not FLOWCODER_ENABLED:
+            return {"content": [{"type": "text", "text": "Error: flowcoder integration is disabled."}], "is_error": True}
         if not fc_command:
             return {"content": [{"type": "text", "text": "Error: 'command' is required when agent_type='flowcoder'."}], "is_error": True}
         if agent_resume:
@@ -2312,7 +2322,7 @@ async def _execute_flowcoder_command(session: AgentSession, content: str, channe
     session._fc_text_buf = ""
     try:
         async with channel.typing():
-            context = await session.flowcoder.execute_command(content) (Add record-updater, FlowCoder integration, admin agent model, discord_send_file)
+            context = await session.flowcoder.execute_command(content)
         # Post execution summary
         status = context.status.value if hasattr(context.status, 'value') else str(context.status)
         summary = f"*FlowCoder:* Command `{content.split()[0]}` finished — **{status}**"
@@ -3243,6 +3253,13 @@ async def _connect_bridge() -> None:
     for agent_name, info in bridge_agents.items():
         # Handle :flowcoder processes separately
         if agent_name.endswith(":flowcoder"):
+            if not FLOWCODER_ENABLED:
+                log.info("Flowcoder disabled — killing bridge agent '%s'", agent_name)
+                try:
+                    await bridge_conn.send_command("kill", name=agent_name)
+                except Exception:
+                    log.exception("Failed to kill bridge flowcoder '%s' (disabled)", agent_name)
+                continue
             base_name = agent_name.removesuffix(":flowcoder")
             session = agents.get(base_name)
             if session is None:
