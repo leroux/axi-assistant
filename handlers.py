@@ -93,7 +93,9 @@ class ClaudeCodeHandler(AgentHandler):
         options = _make_agent_options(session, session.session_id)
 
         # Create transport (bridge or direct)
-        transport = await _create_transport(session)
+        # If session_id is set, we're reconnecting/resuming an existing CLI
+        is_reconnecting = session.session_id is not None
+        transport = await _create_transport(session, reconnecting=is_reconnecting)
 
         # Create and connect client
         session.client = ClaudeSDKClient(options=options, transport=transport)
