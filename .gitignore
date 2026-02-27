@@ -44,5 +44,8 @@ test_instructions.md
 .bot_output.log
 .bridge.log
 .bot.lock
+.merge-queue.json
+.merge-queue.lock
+.merge-exec.lock
 logs/
 config.json

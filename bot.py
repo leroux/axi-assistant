@@ -4,6 +4,7 @@ import json
 import time
 import signal
 import asyncio
+import subprocess
 import threading
 import logging
 from collections import deque
@@ -854,6 +855,7 @@ PACKS_DIR = os.path.join(BOT_DIR, "packs")
 # Which packs each agent type gets by default. Override per-spawn via axi_spawn_agent.
 MASTER_PACKS: list[str] = ["algorithm"]
 DEFAULT_SPAWNED_PACKS: list[str] = ["algorithm"]
+AXI_DEV_PACKS: list[str] = ["axi-dev"]  # Auto-added for agents with axi-dev cwd
 
 
 def _load_packs() -> dict[str, str]:
@@ -943,7 +945,11 @@ def _make_spawned_agent_system_prompt(cwd: str, packs: list[str] | None = None) 
     else:
         # Non-admin agent — mini context prompt
         append = _AGENT_CONTEXT_PROMPT
-    pack_names = packs if packs is not None else DEFAULT_SPAWNED_PACKS
+    pack_names = list(packs if packs is not None else DEFAULT_SPAWNED_PACKS)
+    if _is_axi_dev_cwd(cwd):
+        for p in AXI_DEV_PACKS:
+            if p not in pack_names:
+                pack_names.append(p)
     packs_text = _pack_prompt_text(pack_names)
     if packs_text:
         append += "\n\n" + packs_text
@@ -1011,6 +1017,7 @@ async def _post_system_prompt_to_channel(
             "command": {"type": "string", "description": "Flowcoder command name (required when agent_type='flowcoder')"},
             "command_args": {"type": "string", "description": "Arguments for the flowcoder command (shell-style string)"},
             "packs": {"type": "array", "items": {"type": "string"}, "description": "Optional list of pack names to load into this agent's system prompt. Defaults to the standard set. Pass [] to disable packs."},
+            "no_worktree": {"type": "boolean", "description": "Skip auto-worktree creation and use cwd directly (default: false)"},
         },
         "required": ["name", "prompt"],
     },
@@ -1025,6 +1032,34 @@ async def axi_spawn_agent(args):
     fc_command = args.get("command", "")
     fc_command_args = args.get("command_args", "")
     agent_packs = args.get("packs")  # None = use defaults, [] = no packs
+    no_worktree = args.get("no_worktree", False)
+
+    # Auto-create worktree if cwd points to the main repo
+    if agent_cwd == os.path.realpath(BOT_DIR) and not no_worktree and agent_name:
+        worktree_path = os.path.join(BOT_WORKTREES_DIR, agent_name)
+        branch = f"feature/{agent_name}"
+        if not os.path.isdir(worktree_path):
+            result = subprocess.run(
+                ["git", "-C", BOT_DIR, "worktree", "add", worktree_path, "-b", branch],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                # Branch might already exist, try without -b
+                result = subprocess.run(
+                    ["git", "-C", BOT_DIR, "worktree", "add", worktree_path, branch],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    log.warning("Failed to create worktree for '%s': %s", agent_name, result.stderr.strip())
+                else:
+                    agent_cwd = worktree_path
+                    log.info("Auto-created worktree for '%s' at %s (existing branch)", agent_name, worktree_path)
+            else:
+                agent_cwd = worktree_path
+                log.info("Auto-created worktree for '%s' at %s", agent_name, worktree_path)
+        else:
+            agent_cwd = worktree_path
+            log.info("Reusing existing worktree for '%s' at %s", agent_name, worktree_path)
 
     # Flowcoder-specific validation
     if agent_type == "flowcoder":
