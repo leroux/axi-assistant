@@ -186,6 +186,7 @@ class ActivityState:
     phase: str = "idle"           # "thinking", "writing", "tool_use", "waiting", "starting", "idle"
     tool_name: str | None = None  # Current tool being called (e.g. "Bash", "Read")
     tool_input_preview: str = ""  # First ~200 chars of tool input JSON
+    thinking_text: str = ""       # Accumulated thinking content for debug display
     turn_count: int = 0           # Number of API turns in current query
     query_started: datetime | None = None  # When the current query began
     last_event: datetime | None = None     # When the last stream event arrived
@@ -2195,6 +2196,7 @@ def _update_activity(session: AgentSession, event: dict) -> None:
             activity.phase = "thinking"
             activity.tool_name = None
             activity.tool_input_preview = ""
+            activity.thinking_text = ""
         elif block_type == "text":
             activity.phase = "writing"
             activity.tool_name = None
@@ -2207,6 +2209,7 @@ def _update_activity(session: AgentSession, event: dict) -> None:
 
         if delta_type == "thinking_delta":
             activity.phase = "thinking"
+            activity.thinking_text += delta.get("thinking", "")
         elif delta_type == "text_delta":
             activity.phase = "writing"
             activity.text_chars += len(delta.get("text", ""))
@@ -2349,12 +2352,18 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
 
                 # Debug output — emit tool calls and thinking to Discord
                 if session.debug:
-                    if event_type == "content_block_start":
-                        block = event.get("content_block", {})
-                        if block.get("type") == "thinking":
-                            await channel.send("`💭 thinking...`")
-                    elif event_type == "content_block_stop":
-                        if session.activity.phase == "waiting" and session.activity.tool_name:
+                    if event_type == "content_block_stop":
+                        if session.activity.phase in ("thinking",) and session.activity.thinking_text:
+                            # Thinking block just finished — post as file attachment
+                            thinking = session.activity.thinking_text.strip()
+                            if thinking:
+                                file = discord.File(
+                                    _io.BytesIO(thinking.encode("utf-8")),
+                                    filename="thinking.md",
+                                )
+                                await channel.send("💭", file=file)
+                                session.activity.thinking_text = ""
+                        elif session.activity.phase == "waiting" and session.activity.tool_name:
                             # Tool call just completed — emit with preview
                             tool = session.activity.tool_name
                             preview = _extract_tool_preview(tool, session.activity.tool_input_preview)
