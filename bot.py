@@ -2619,8 +2619,11 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
 
     # Step 1: Try graceful interrupt
     try:
-        # interrupt cancels current query
-        await session.client.interrupt()
+        # interrupt via bridge (SIGINT process group) to kill Task subagents too
+        if bridge_conn and bridge_conn.is_alive:
+            await bridge_conn.send_command("interrupt", name=session.name)
+        else:
+            await session.client.interrupt()
         async with asyncio.timeout(INTERRUPT_TIMEOUT):
             async for msg in _receive_response_safe(session):
                 if isinstance(msg, ResultMessage):
@@ -4363,8 +4366,11 @@ async def stop_agent(interaction, agent_name: str | None = None):
         return
 
     try:
-        # interrupt cancels current query
-        await session.client.interrupt()
+        # interrupt via bridge (SIGINT process group) to kill Task subagents too
+        if bridge_conn and bridge_conn.is_alive:
+            await bridge_conn.send_command("interrupt", name=session.name)
+        else:
+            await session.client.interrupt()
 
         # Drain queued messages so nothing gets processed after the interrupt
         cleared = 0
@@ -4412,8 +4418,12 @@ async def skip_agent(interaction, agent_name: str | None = None):
 
     queued = session.message_queue.qsize()
     try:
-        # Interrupt current query only — queued messages will continue processing
-        await session.client.interrupt()
+        # Interrupt current query only — queued messages will continue processing;
+        # use bridge (SIGINT process group) to kill Task subagents too
+        if bridge_conn and bridge_conn.is_alive:
+            await bridge_conn.send_command("interrupt", name=session.name)
+        else:
+            await session.client.interrupt()
         if queued:
             await interaction.response.send_message(
                 f"*System:* Skipped current query for **{agent_name}**. {queued} queued message{'s' if queued != 1 else ''} will continue processing."

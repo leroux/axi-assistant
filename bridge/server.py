@@ -181,6 +181,7 @@ class BridgeServer:
                 cwd=msg.cwd,
                 env=msg.env,
                 limit=10 * 1024 * 1024,  # 10 MB — Claude SDK can emit large JSON lines
+                start_new_session=True,  # own process group so SIGINT reaches Task subagents
             )
         except Exception as e:
             await self._send_result(ResultMsg(ok=False, name=name, error=str(e)))
@@ -209,7 +210,7 @@ class BridgeServer:
             await self._send_result(ResultMsg(ok=False, name=name, error="not running"))
             return
         try:
-            cp.proc.send_signal(signal.SIGINT)
+            os.killpg(os.getpgid(cp.proc.pid), signal.SIGINT)
             await self._send_result(ResultMsg(ok=True, name=name))
         except Exception as e:
             await self._send_result(ResultMsg(ok=False, name=name, error=str(e)))
