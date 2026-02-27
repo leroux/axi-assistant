@@ -6,6 +6,7 @@ import signal
 import asyncio
 import threading
 import logging
+from collections import deque
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -254,7 +255,7 @@ class AgentSession:
     idle_reminder_count: int = 0
     session_id: str | None = None
     discord_channel_id: int | None = None
-    message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    message_queue: deque = field(default_factory=deque)
     mcp_servers: dict | None = None
     _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
     _bridge_busy: bool = False   # True when reconnected to a mid-task CLI (bridge idle=False)
@@ -1373,6 +1374,189 @@ async def axi_restart(args):
     return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
 
 
+async def _deliver_inter_agent_message(
+    sender_name: str,
+    target_session: "AgentSession",
+    content: str,
+) -> str:
+    """Deliver a message from one agent to another.
+
+    Posts the message to the target's Discord channel with sender attribution,
+    then either wakes the agent (if sleeping/idle) or interrupts (if busy) so
+    the message is processed next — ahead of any user-queued messages.
+
+    Returns a short status string for the MCP tool response.
+    """
+    channel = await get_agent_channel(target_session.name)
+    if channel is None:
+        return f"No Discord channel found for agent '{target_session.name}'"
+
+    # Post attributed message to Discord (visible to the user)
+    await send_system(
+        channel,
+        f"📨 **Message from {sender_name}:**\n> {content}",
+    )
+
+    # Build the prompt the target agent will receive
+    ts_prefix = datetime.now(timezone.utc).strftime("[%Y-%m-%d %H:%M:%S UTC] ")
+    prompt = ts_prefix + f"[Inter-agent message from {sender_name}] {content}"
+
+    if target_session.query_lock.locked():
+        # --- Busy: push to front of queue, interrupt current query ---
+        # When the interrupted stream finishes, _process_message_queue picks
+        # this up first (appendleft = front of deque), ahead of user messages.
+        target_session.message_queue.appendleft((prompt, channel, None))
+        log.info(
+            "Inter-agent message from '%s' to busy agent '%s' — interrupting",
+            sender_name, target_session.name,
+        )
+        try:
+            if bridge_conn and bridge_conn.is_alive:
+                await bridge_conn.send_command("interrupt", name=target_session.name)
+            elif target_session.client:
+                await target_session.client.interrupt()
+        except Exception:
+            log.exception(
+                "Failed to interrupt '%s' for inter-agent message (message still queued)",
+                target_session.name,
+            )
+        return f"delivered to busy agent '{target_session.name}' (interrupted, will process next)"
+    else:
+        # --- Sleeping or idle: process directly via background task ---
+        asyncio.create_task(_process_inter_agent_prompt(target_session, prompt, channel))
+        return f"delivered to agent '{target_session.name}'"
+
+
+async def _process_inter_agent_prompt(
+    session: "AgentSession",
+    content: str,
+    channel,
+) -> None:
+    """Background task to wake (if needed) and process an inter-agent message.
+
+    Follows the same pattern as on_message's normal path: acquire query_lock,
+    wake if sleeping, process, drain queue.
+    """
+    try:
+        async with session.query_lock:
+            if not session.is_awake():
+                try:
+                    await session.wake()
+                    await _post_model_warning(session)
+                except ConcurrencyLimitError:
+                    session.message_queue.append((content, channel, None))
+                    awake = _count_awake_agents()
+                    log.info(
+                        "Concurrency limit hit for '%s' inter-agent message — queuing",
+                        session.name,
+                    )
+                    await send_system(
+                        channel,
+                        f"⏳ All {awake} agent slots busy. Inter-agent message queued.",
+                    )
+                    return
+                except Exception:
+                    log.exception(
+                        "Failed to wake agent '%s' for inter-agent message",
+                        session.name,
+                    )
+                    await send_system(
+                        channel,
+                        f"Failed to wake agent **{session.name}** for inter-agent message.",
+                    )
+                    return
+
+            session.last_activity = datetime.now(timezone.utc)
+            session.last_idle_notified = None
+            session.idle_reminder_count = 0
+            session.activity = ActivityState(
+                phase="starting", query_started=datetime.now(timezone.utc),
+            )
+            try:
+                await session.process_message(content, channel)
+            except TimeoutError:
+                await _handle_query_timeout(session, channel)
+            except RuntimeError as e:
+                log.warning(
+                    "Runtime error processing inter-agent message for '%s': %s",
+                    session.name, e,
+                )
+                await send_system(channel, str(e))
+            except Exception:
+                log.exception(
+                    "Error processing inter-agent message for '%s'", session.name,
+                )
+                await send_system(
+                    channel,
+                    f"Error processing inter-agent message for **{session.name}**.",
+                )
+            finally:
+                session.activity = ActivityState(phase="idle")
+
+        # Drain any queued messages (user messages process after the inter-agent message)
+        await _process_message_queue(session)
+    except Exception:
+        log.exception(
+            "Unhandled error in _process_inter_agent_prompt for '%s'", session.name,
+        )
+
+
+@tool(
+    "axi_send_message",
+    "Send a message to a spawned agent. The message appears in the agent's Discord channel "
+    "(with your name as sender) and is processed like a user message. If the agent is busy, "
+    "its current query is interrupted and your message is processed next. If sleeping, the "
+    "agent wakes up. User-queued messages are preserved and process after yours.",
+    {
+        "type": "object",
+        "properties": {
+            "agent_name": {
+                "type": "string",
+                "description": "Name of the target agent to message",
+            },
+            "content": {
+                "type": "string",
+                "description": "The message content to send to the agent",
+            },
+        },
+        "required": ["agent_name", "content"],
+    },
+)
+async def axi_send_message(args):
+    target_name = args.get("agent_name", "").strip()
+    content = args.get("content", "").strip()
+
+    if not target_name:
+        return {
+            "content": [{"type": "text", "text": "Error: agent_name is required."}],
+            "is_error": True,
+        }
+    if not content:
+        return {
+            "content": [{"type": "text", "text": "Error: content is required."}],
+            "is_error": True,
+        }
+    if target_name == MASTER_AGENT_NAME:
+        return {
+            "content": [{"type": "text", "text": "Error: cannot send messages to yourself."}],
+            "is_error": True,
+        }
+
+    target_session = agents.get(target_name)
+    if target_session is None:
+        return {
+            "content": [{"type": "text", "text": f"Error: agent '{target_name}' not found."}],
+            "is_error": True,
+        }
+
+    # Identify the sender (the agent calling this tool — always master for now)
+    sender_name = MASTER_AGENT_NAME
+    log.info("Inter-agent message: '%s' -> '%s': %s", sender_name, target_name, content[:200])
+
+    result = await _deliver_inter_agent_message(sender_name, target_session, content)
+    return {"content": [{"type": "text", "text": result}]}
+
+
 # Spawned agents get spawn+kill only (no restart — they tell the parent to restart)
 _axi_mcp_server = create_sdk_mcp_server(
     name="axi",
@@ -1380,11 +1564,11 @@ _axi_mcp_server = create_sdk_mcp_server(
     tools=[axi_spawn_agent, axi_kill_agent],
 )
 
-# Master agent gets the full set including restart
+# Master agent gets the full set including restart + send_message
 _axi_master_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent, axi_restart],
+    tools=[axi_spawn_agent, axi_kill_agent, axi_restart, axi_send_message],
 )
 
 
@@ -1606,8 +1790,8 @@ async def wake_or_queue(
         await _post_model_warning(session)
         return True
     except ConcurrencyLimitError:
-        await session.message_queue.put((content, channel, orig_message))
-        position = session.message_queue.qsize()
+        session.message_queue.append((content, channel, orig_message))
+        position = len(session.message_queue)
         awake = _count_awake_agents()
         log.debug("Concurrency limit hit for '%s', queuing message (position %d)", session.name, position)
         await _add_reaction(orig_message, "📨")
@@ -3307,7 +3491,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
                     await session.wake()
                 except ConcurrencyLimitError:
                     log.info("Concurrency limit hit for '%s' initial prompt — queuing", session.name)
-                    await session.message_queue.put((prompt, channel, None))
+                    session.message_queue.append((prompt, channel, None))
                     awake = _count_awake_agents()
                     await send_system(
                         channel,
@@ -3369,13 +3553,13 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
 
 async def _process_message_queue(session: AgentSession) -> None:
     """Process any queued messages for an agent after the current query finishes."""
-    while not session.message_queue.empty():
+    while session.message_queue:
         if shutdown_coordinator and shutdown_coordinator.requested:
             log.info("Shutdown requested — not processing further queued messages for '%s'", session.name)
             break
-        content, channel, orig_message = session.message_queue.get_nowait()
+        content, channel, orig_message = session.message_queue.popleft()
 
-        remaining = session.message_queue.qsize()
+        remaining = len(session.message_queue)
         log.debug("Processing queued message for '%s' (%d remaining)", session.name, remaining)
         if session._log:
             session._log.info("QUEUED_MSG: %s", _content_summary(content))
@@ -3401,8 +3585,8 @@ async def _process_message_queue(session: AgentSession) -> None:
                         f"Failed to wake agent **{session.name}** — dropping queued message.",
                     )
                     # Clear remaining queue
-                    while not session.message_queue.empty():
-                        _, ch, dropped_msg = session.message_queue.get_nowait()
+                    while session.message_queue:
+                        _, ch, dropped_msg = session.message_queue.popleft()
                         await _remove_reaction(dropped_msg, "📨")
                         await _add_reaction(dropped_msg, "❌")
                         await send_system(
@@ -3834,8 +4018,8 @@ async def on_message(message):
 
     # 1. Reconnecting: queue messages
     if session._reconnecting:
-        await session.message_queue.put((content, message.channel, message))
-        position = session.message_queue.qsize()
+        session.message_queue.append((content, message.channel, message))
+        position = len(session.message_queue)
         log.debug(
             "Agent '%s' reconnecting after restart, queuing message (queue_size=%d)",
             agent_name,
@@ -3861,8 +4045,8 @@ async def on_message(message):
 
     # 3. Agent busy: queue messages
     if session.is_processing():
-        await session.message_queue.put((content, message.channel, message))
-        position = session.message_queue.qsize()
+        session.message_queue.append((content, message.channel, message))
+        position = len(session.message_queue)
         log.debug(
             "Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position
         )
@@ -4069,9 +4253,9 @@ async def check_schedules():
     if _count_awake_agents() < MAX_AWAKE_AGENTS:
         for agent_name, session in agents.items():
             if (session.client is None
-                    and not session.message_queue.empty()
+                    and session.message_queue
                     and not session.query_lock.locked()):
-                content, ch, stranded_msg = session.message_queue.get_nowait()
+                content, ch, stranded_msg = session.message_queue.popleft()
                 log.info("Stranded message found for sleeping agent '%s', waking", agent_name)
                 await _remove_reaction(stranded_msg, "📨")
                 asyncio.create_task(_run_initial_prompt(session, content, ch))
@@ -4463,7 +4647,7 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
                 lines.append(f"No stream events for {_format_time_remaining(since_last)} (may be running a long tool)")
 
     # Queue
-    queue_size = session.message_queue.qsize()
+    queue_size = len(session.message_queue)
     if queue_size > 0:
         lines.append(f"Queued messages: {queue_size}")
 
@@ -4514,7 +4698,7 @@ async def _show_all_agents_status(interaction):
                 elapsed = int((now - activity.query_started).total_seconds())
                 status += f" ({_format_time_remaining(elapsed)})"
 
-        queue = session.message_queue.qsize()
+        queue = len(session.message_queue)
         queue_str = f" | {queue} queued" if queue > 0 else ""
         lines.append(f"- **{name}**: {status}{queue_str}")
 
@@ -4660,8 +4844,8 @@ async def stop_agent(interaction, agent_name: str | None = None):
 
         # Drain queued messages so nothing gets processed after the interrupt
         cleared = 0
-        while not session.message_queue.empty():
-            _, ch, dropped_msg = session.message_queue.get_nowait()
+        while session.message_queue:
+            _, ch, dropped_msg = session.message_queue.popleft()
             await _remove_reaction(dropped_msg, "📨")
             cleared += 1
 
