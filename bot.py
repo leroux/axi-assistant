@@ -333,7 +333,6 @@ shutdown_coordinator: ShutdownCoordinator | None = None
 
 # Global rate limit state (all agents share the same API account)
 _rate_limited_until: datetime | None = None
-_rate_limit_retry_task: asyncio.Task | None = None
 
 @dataclass
 class SessionUsage:
@@ -2215,8 +2214,8 @@ def _update_rate_limit_quota(data: dict) -> None:
 
 
 async def _handle_rate_limit(error_text: str, session: AgentSession, channel) -> None:
-    """Handle a rate limit error: set global state, notify user, schedule retry."""
-    global _rate_limited_until, _rate_limit_retry_task
+    """Handle a rate limit error: set global state, notify all agent channels."""
+    global _rate_limited_until
 
     wait_seconds = _parse_rate_limit_seconds(error_text)
     new_limit = datetime.now(timezone.utc) + timedelta(seconds=wait_seconds)
@@ -2229,58 +2228,36 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel) ->
     log.warning("Rate limited — waiting %ds (until %s)", wait_seconds, _rate_limited_until.isoformat())
     log.debug("Rate limit set: duration=%ds, already_limited=%s, agent='%s'", wait_seconds, already_limited, session.name)
 
-    # Only notify user if this is a new rate limit (avoid spam during queue processing)
+    # Only notify if this is a new rate limit (avoid spam if already limited)
     if not already_limited:
         remaining = _format_time_remaining(wait_seconds)
-        await send_system(
-            channel,
-            f"⚠️ **Rate limited.** Usage will be available again in ~**{remaining}**. "
-            f"Messages sent during this time will be queued and processed automatically.",
+        reset_time = _rate_limited_until.strftime("%H:%M:%S UTC")
+
+        # Build quota info if available
+        quota_lines = ""
+        if _rate_limit_quotas:
+            parts = []
+            for rl_type, quota in _rate_limit_quotas.items():
+                pct = f"{quota.utilization:.0%}" if quota.utilization is not None else "?"
+                parts.append(f"{rl_type}: {pct}")
+            quota_lines = "\nUtilization: " + " · ".join(parts)
+
+        msg_text = (
+            f"⚠️ **Rate limited by Claude API.** Resets in ~**{remaining}** (at {reset_time}).{quota_lines}"
         )
 
-    # Schedule/reschedule retry worker if not already running
-    if _rate_limit_retry_task is None or _rate_limit_retry_task.done():
-        _rate_limit_retry_task = asyncio.create_task(_rate_limit_retry_worker())
-
-
-async def _rate_limit_retry_worker() -> None:
-    """Background task: waits for rate limit to expire, then drains all agent queues."""
-    global _rate_limited_until
-    try:
-        while True:
-            # Wait for rate limit to expire (poll every 30s to pick up extensions)
-            while _rate_limited_until and datetime.now(timezone.utc) < _rate_limited_until:
-                wait = (_rate_limited_until - datetime.now(timezone.utc)).total_seconds()
-                await asyncio.sleep(max(1, min(wait + 1, 30)))
-
-            _rate_limited_until = None
-            log.info("Rate limit expired — processing queued messages for all agents")
-
-            # Check if any agent has queued messages
-            has_queued = any(not s.message_queue.empty() for s in agents.values())
-            if not has_queued:
-                return
-
-            # Process queued messages for each agent
-            re_limited = False
-            for name, session in list(agents.items()):
-                if _is_rate_limited():
-                    re_limited = True
-                    break
-                if session.message_queue.empty():
-                    continue
-                channel = bot.get_channel(session.discord_channel_id) if session.discord_channel_id else None
-                if channel:
-                    await send_system(channel, "✅ Rate limit expired — processing queued messages…")
-                    await _process_message_queue(session)
-
-            if not re_limited:
-                return  # All done — exit worker
-            # Re-rate-limited during processing — loop back and wait again
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        log.exception("Error in rate limit retry worker")
+        # Notify ALL active agent channels, not just the one that triggered it
+        notified_channels = set()
+        for name, agent_session in agents.items():
+            if not agent_session.discord_channel_id:
+                continue
+            ch = bot.get_channel(agent_session.discord_channel_id)
+            if ch and ch.id not in notified_channels:
+                notified_channels.add(ch.id)
+                try:
+                    await send_system(ch, msg_text)
+                except Exception:
+                    log.warning("Failed to notify channel %s about rate limit", ch.id)
 
 
 # --- Streaming response ---
@@ -3223,10 +3200,6 @@ async def _process_message_queue(session: AgentSession) -> None:
         if shutdown_coordinator and shutdown_coordinator.requested:
             log.info("Shutdown requested — not processing further queued messages for '%s'", session.name)
             break
-        if _is_rate_limited():
-            log.info("Rate limited — pausing queue processing for '%s' (%d messages pending)",
-                     session.name, session.message_queue.qsize())
-            break  # Retry worker will resume processing when rate limit expires
         content, channel, orig_message = session.message_queue.get_nowait()
 
         remaining = session.message_queue.qsize()
@@ -3688,20 +3661,7 @@ async def on_message(message):
             await send_system(message.channel, str(e))
             return
 
-    # 3. Rate limited: queue messages
-    if _is_rate_limited() and not session.is_processing():
-        await session.message_queue.put((content, message.channel, message))
-        position = session.message_queue.qsize()
-        remaining = _format_time_remaining(_rate_limit_remaining_seconds())
-        await _add_reaction(message, "📨")
-        await send_system(
-            message.channel,
-            f"⏳ Currently rate limited — ~**{remaining}** remaining. "
-            f"Message queued (position {position}) and will be sent automatically.",
-        )
-        return
-
-    # 4. Agent busy: queue messages
+    # 3. Agent busy: queue messages
     if session.is_processing():
         await session.message_queue.put((content, message.channel, message))
         position = session.message_queue.qsize()
