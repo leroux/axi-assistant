@@ -33,6 +33,18 @@ API_BASE = "https://discord.com/api/v10"
 SENTINEL = "Bot has finished responding"
 
 
+def _systemctl_env() -> dict[str, str]:
+    """Return environment with XDG_RUNTIME_DIR set for systemctl --user.
+
+    Without this, systemctl --user silently fails when called from
+    environments that don't inherit the variable (e.g. sandboxed agents).
+    """
+    env = os.environ.copy()
+    if "XDG_RUNTIME_DIR" not in env:
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+    return env
+
+
 def load_config() -> dict:
     """Load and validate test-config.json."""
     try:
@@ -68,11 +80,20 @@ def resolve_bot_token(config: dict, guild_name: str) -> str:
 
 
 def is_instance_running(name: str) -> bool:
-    """Check if a test instance systemd service is active."""
+    """Check if a test instance systemd service is active.
+
+    Fails hard if systemctl can't reach the user bus — silently returning
+    False in that case would mask running instances and corrupt reservations.
+    """
     result = subprocess.run(
         ["systemctl", "--user", "is-active", f"axi-test@{name}"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=_systemctl_env(),
     )
+    stderr = result.stderr.strip()
+    if "Failed to connect to bus" in stderr or "No medium found" in stderr:
+        print(f"Error: Cannot reach systemd user bus: {stderr}", file=sys.stderr)
+        print("Cannot determine instance state — refusing to continue.", file=sys.stderr)
+        sys.exit(1)
     return result.stdout.strip() == "active"
 
 
@@ -84,10 +105,11 @@ def cleanup_orphan_services() -> int:
     of services cleaned up.
     """
     # List all axi-test@ units (any state)
+    env = _systemctl_env()
     result = subprocess.run(
         ["systemctl", "--user", "list-units", "--all", "--plain",
          "--no-legend", "axi-test@*"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=env,
     )
     cleaned = 0
     for line in result.stdout.strip().splitlines():
@@ -109,11 +131,11 @@ def cleanup_orphan_services() -> int:
         # Stop and reset
         subprocess.run(
             ["systemctl", "--user", "stop", unit],
-            capture_output=True,
+            capture_output=True, env=env,
         )
         subprocess.run(
             ["systemctl", "--user", "reset-failed", unit],
-            capture_output=True,
+            capture_output=True, env=env,
         )
         print(f"Cleaned up orphan service: {unit}")
         cleaned += 1
@@ -443,7 +465,7 @@ def cmd_up(args):
             print(f"Cleaning up stale reservation for '{name}' (not running, .env left behind)")
             subprocess.run(
                 ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                capture_output=True,
+                capture_output=True, env=_systemctl_env(),
             )
             os.remove(os.path.join(instance_path, ".env"))
 
@@ -517,7 +539,7 @@ def cmd_down(args):
         print(f"Stopping axi-test@{name}...")
         subprocess.run(
             ["systemctl", "--user", "stop", f"axi-test@{name}"],
-            check=True,
+            check=True, env=_systemctl_env(),
         )
 
     # Remove .env to release the reservation
@@ -531,7 +553,7 @@ def cmd_restart(args):
     print(f"Restarting axi-test@{name}...")
     subprocess.run(
         ["systemctl", "--user", "restart", f"axi-test@{name}"],
-        check=True,
+        check=True, env=_systemctl_env(),
     )
     print("Done")
 
