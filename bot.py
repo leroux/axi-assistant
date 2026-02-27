@@ -243,6 +243,7 @@ class AgentSession:
     flowcoder_process: "FlowcoderProcess | None" = None
     flowcoder_command: str = ""
     flowcoder_args: str = ""
+    debug: bool = False  # When True, post tool calls and thinking phases to Discord
     _log: logging.Logger | None = None
 
     def __post_init__(self):
@@ -2346,6 +2347,22 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 # Update activity state for /status command
                 _update_activity(session, event)
 
+                # Debug output — emit tool calls and thinking to Discord
+                if session.debug:
+                    if event_type == "content_block_start":
+                        block = event.get("content_block", {})
+                        if block.get("type") == "thinking":
+                            await channel.send("`💭 thinking...`")
+                    elif event_type == "content_block_stop":
+                        if session.activity.phase == "waiting" and session.activity.tool_name:
+                            # Tool call just completed — emit with preview
+                            tool = session.activity.tool_name
+                            preview = _extract_tool_preview(tool, session.activity.tool_input_preview)
+                            if preview:
+                                await channel.send(f"`🔧 {tool}: {preview[:120]}`")
+                            else:
+                                await channel.send(f"`🔧 {tool}`")
+
                 # Log all stream events to agent log
                 if session._log:
                     if event_type == "content_block_delta":
@@ -4153,6 +4170,40 @@ async def _show_all_agents_status(interaction):
     await interaction.response.send_message(
         f"*System:* {header}\n" + "\n".join(lines), ephemeral=True
     )
+
+
+@bot.tree.command(name="debug", description="Toggle debug output (tool calls, thinking) for an agent.")
+@app_commands.describe(mode="on / off / omit to toggle")
+async def debug_command(interaction: discord.Interaction, mode: str | None = None):
+    log.info("Slash command /debug mode=%s from %s", mode, interaction.user)
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    agent_name = channel_to_agent.get(interaction.channel_id)
+    if agent_name is None:
+        await interaction.response.send_message("Not in an agent channel.", ephemeral=True)
+        return
+
+    session = agents.get(agent_name)
+    if session is None:
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+        return
+
+    if mode is not None:
+        mode_lower = mode.strip().lower()
+        if mode_lower == "on":
+            session.debug = True
+        elif mode_lower == "off":
+            session.debug = False
+        else:
+            await interaction.response.send_message("Usage: `/debug` (toggle), `/debug on`, `/debug off`", ephemeral=True)
+            return
+    else:
+        session.debug = not session.debug
+
+    state = "on" if session.debug else "off"
+    await interaction.response.send_message(f"*System:* Debug output **{state}** for **{agent_name}**.")
 
 
 @bot.tree.command(name="kill-agent", description="Terminate an agent session.")
