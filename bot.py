@@ -683,9 +683,14 @@ def _parse_channel_topic(topic: str | None) -> tuple[str | None, str | None]:
     return cwd, session_id
 
 
-async def _set_session_id(session: AgentSession, msg: ResultMessage) -> None:
-    """Extract session_id from a ResultMessage. Updates channel topic on first change."""
-    sid = getattr(msg, "session_id", None)
+async def _set_session_id(session: AgentSession, msg_or_sid: ResultMessage | str, channel=None) -> None:
+    """Update session's session_id and persist it (topic or file). Accepts ResultMessage or raw sid.
+
+    Args:
+        channel: Optional Discord channel object. When provided, used directly for topic
+                 updates (avoids bot.get_channel() cache miss on newly created channels).
+    """
+    sid = msg_or_sid if isinstance(msg_or_sid, str) else getattr(msg_or_sid, "session_id", None)
     if sid and sid != session.session_id:
         session.session_id = sid
         if session.name == MASTER_AGENT_NAME:
@@ -697,7 +702,7 @@ async def _set_session_id(session: AgentSession, msg: ResultMessage) -> None:
             except OSError:
                 log.warning("Failed to save master session_id", exc_info=True)
         elif session.discord_channel_id:
-            ch = bot.get_channel(session.discord_channel_id)
+            ch = channel or bot.get_channel(session.discord_channel_id)
             if ch:
                 desired_topic = _format_channel_topic(session.cwd, sid)
                 if ch.topic != desired_topic:
@@ -2481,6 +2486,12 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 event = msg.event
                 event_type = event.get("type", "")
 
+                # Capture session_id from the first StreamEvent — this fires much
+                # earlier than ResultMessage, so the topic gets updated before a
+                # crash could lose the session_id.
+                if msg.session_id and msg.session_id != session.session_id:
+                    await _set_session_id(session, msg.session_id, channel=channel)
+
                 # Update activity state for /status command
                 _update_activity(session, event)
 
@@ -2588,7 +2599,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
 
             elif isinstance(msg, ResultMessage):
                 stop_typing()
-                await _set_session_id(session, msg)
+                await _set_session_id(session, msg, channel=channel)
                 if not hit_rate_limit:
                     await flush_text(text_buffer, "result_msg")
                 text_buffer = ""
@@ -2701,7 +2712,7 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
         async with asyncio.timeout(INTERRUPT_TIMEOUT):
             async for msg in _receive_response_safe(session):
                 if isinstance(msg, ResultMessage):
-                    await _set_session_id(session, msg)
+                    await _set_session_id(session, msg, channel=channel)
                     break
         session.last_activity = datetime.now(timezone.utc)
         await send_system(
@@ -2871,7 +2882,7 @@ async def spawn_agent(
     _bot_creating_channels.discard(normalized)
     log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)
 
-    # Set initial topic with cwd (session_id will be added when agent sleeps)
+    # Set initial topic with cwd (session_id added from first StreamEvent during query)
     desired_topic = _format_channel_topic(cwd, resume)
     if channel.topic != desired_topic:
         log.info("Updating topic on #%s: %r -> %r", channel.name, channel.topic, desired_topic)
