@@ -1061,8 +1061,12 @@ def _ensure_process_dead(pid: int | None, label: str) -> None:
         pass
 
 
-async def _create_transport(session: AgentSession):
+async def _create_transport(session: AgentSession, reconnecting: bool = False):
     """Create a transport for Claude Code agent (bridge or direct).
+
+    Args:
+        session: Agent session
+        reconnecting: If True, create transport in reconnecting mode (fakes initialize for replay)
 
     Returns:
         BridgeTransport or SubprocessCLITransport depending on bridge availability.
@@ -1074,6 +1078,7 @@ async def _create_transport(session: AgentSession):
         transport = BridgeTransport(
             session.name,
             bridge_conn,
+            reconnecting=reconnecting,
             stderr_callback=make_stderr_callback(session),
         )
         await transport.connect()
@@ -2833,13 +2838,8 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
                 session._reconnecting = False
                 return
 
-            # Create transport in reconnecting mode
-            transport = BridgeTransport(
-                session.name, bridge_conn,
-                reconnecting=True,
-                stderr_callback=make_stderr_callback(session),
-            )
-            await transport.connect()
+            # Create transport in reconnecting mode using the unified helper
+            transport = await _create_transport(session, reconnecting=True)
 
             # Subscribe to get buffered output + idle status
             sub_result = await transport.subscribe()
