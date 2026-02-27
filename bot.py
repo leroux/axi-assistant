@@ -40,6 +40,11 @@ from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_loc
 from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
 from handlers import get_handler, AgentHandler
 
+import sys as _sys
+_sys.path.insert(0, os.path.expanduser("~/coding-projects/flowcoder"))
+from src.embedding import FlowCoderSession
+from src.services.storage_service import CommandNotFoundError as _FCCommandNotFound
+
 load_dotenv()
 
 # --- Logging setup ---
@@ -77,6 +82,7 @@ DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
 ENABLE_CRASH_HANDLER = os.environ.get("ENABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
 SHOW_AWAITING_INPUT = os.environ.get("SHOW_AWAITING_INPUT", "").lower() in ("1", "true", "yes")
+RECORD_UPDATER_ENABLED = os.environ.get("RECORD_UPDATER_ENABLED", "").lower() in ("1", "true", "yes")
 README_CONTENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "readme_content.md")
 
 # --- Discord bot setup ---
@@ -99,8 +105,24 @@ SKIPS_PATH = os.path.join(BOT_DIR, "schedule_skips.json")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
+MASTER_SESSION_PATH = os.path.join(BOT_DIR, ".master_session_id")
 schedule_last_fired: dict[str, datetime] = {}
 _bot_start_time: datetime | None = None
+
+# Directories agents are allowed to use as cwd (configurable via .env)
+_allowed_cwds_env = os.environ.get("ALLOWED_CWDS", "")
+ALLOWED_CWDS: list[str] = [
+    os.path.realpath(os.path.expanduser(p))
+    for p in (_allowed_cwds_env.split(":") if _allowed_cwds_env else [])
+] + [os.path.realpath(AXI_USER_DATA), os.path.realpath(BOT_DIR), os.path.realpath(BOT_WORKTREES_DIR)]
+
+# Extra directories that admin agents (rooted in BOT_DIR) can spawn into and write to
+_admin_cwds_env = os.environ.get("ADMIN_ALLOWED_CWDS", "")
+ADMIN_ALLOWED_CWDS: list[str] = [
+    os.path.realpath(os.path.expanduser(p))
+    for p in (_admin_cwds_env.split(":") if _admin_cwds_env else [])
+]
+ALLOWED_CWDS += ADMIN_ALLOWED_CWDS
 
 # --- Agent session management ---
 
@@ -180,6 +202,8 @@ class AgentSession:
     flowcoder_command: str = ""
     flowcoder_args: str = ""
     _log: logging.Logger | None = None
+    flowcoder: "FlowCoderSession | None" = None
+    _fc_channel: Any = None  # Discord channel set during FlowCoder command execution
 
     def __post_init__(self):
         """Set up per-agent logger writing to <assistant_dir>/logs/<name>.log."""
@@ -349,9 +373,26 @@ async def _extract_message_content(message: discord.Message) -> str | list:
     content blocks ``[{"type": "text", ...}, {"type": "image", ...}, ...]``
     when images are present.
 
+    Handles Discord's long-message behavior: when a message exceeds the
+    character limit without Nitro, Discord sends it as a blank message with
+    an attached ``message.txt``. We read that file as the message text.
+
     A UTC timestamp from the Discord message is prepended to give the LLM
     temporal awareness.
     """
+    # Discord long-message: blank content with an attached message.txt
+    if not message.content.strip() and message.attachments:
+        for a in message.attachments:
+            if a.filename == "message.txt" and a.size <= 100_000:
+                try:
+                    data = await a.read()
+                    text = data.decode("utf-8")
+                    log.debug("Read long message from message.txt (%d chars)", len(text))
+                    message.content = text
+                    break
+                except Exception:
+                    log.warning("Failed to read message.txt attachment", exc_info=True)
+
     ts_prefix = message.created_at.strftime("[%Y-%m-%d %H:%M:%S UTC] ")
 
     image_attachments = [
@@ -441,12 +482,13 @@ def make_cwd_permission_callback(allowed_cwd: str):
     worktrees = os.path.realpath(BOT_WORKTREES_DIR)
     bot_dir = os.path.realpath(BOT_DIR)
 
-    # Agents rooted in bot code or worktree dirs also get worktree write access
+    # Agents rooted in bot code or worktree dirs also get worktree + admin write access
     is_code_agent = (allowed == bot_dir or allowed.startswith(bot_dir + os.sep) or
                      allowed == worktrees or allowed.startswith(worktrees + os.sep))
     bases = [allowed, user_data]
     if is_code_agent:
         bases.append(worktrees)
+        bases.extend(ADMIN_ALLOWED_CWDS)
 
     async def _check_permission(
         tool_name: str, tool_input: dict, ctx: ToolPermissionContext,
@@ -578,9 +620,15 @@ async def _set_session_id(session: AgentSession, msg: ResultMessage) -> None:
     sid = getattr(msg, "session_id", None)
     if sid and sid != session.session_id:
         session.session_id = sid
-        # Only persist session_id to channel topic for non-master agents
-        # (master gets a new session every restart so the topic would always churn)
-        if session.name != MASTER_AGENT_NAME and session.discord_channel_id:
+        if session.name == MASTER_AGENT_NAME:
+            # Persist master session_id to file so it survives restarts
+            try:
+                with open(MASTER_SESSION_PATH, "w") as f:
+                    f.write(sid)
+                log.info("Saved master session_id to %s", MASTER_SESSION_PATH)
+            except OSError:
+                log.warning("Failed to save master session_id", exc_info=True)
+        elif session.discord_channel_id:
             ch = bot.get_channel(session.discord_channel_id)
             if ch:
                 desired_topic = _format_channel_topic(session.cwd, sid)
@@ -592,7 +640,7 @@ async def _set_session_id(session: AgentSession, msg: ResultMessage) -> None:
 
 
 # --- System prompt construction from layered .md files ---
-# SOUL.md: shared personality for ALL agents
+# SOUL.md: full personality for master + admin agents (agents in BOT_DIR or worktrees)
 # dev_context.md: axi-assistant development context (architecture, safety, test workflow)
 # Content uses %(var)s interpolation — literal % must be escaped as %% in prompt files.
 
@@ -611,6 +659,28 @@ _PROMPT_VARS = {"axi_user_data": AXI_USER_DATA, "bot_dir": BOT_DIR}
 _SOUL = _load_prompt_file(os.path.join(BOT_DIR, "SOUL.md"), _PROMPT_VARS)
 _DEV_CONTEXT = _load_prompt_file(os.path.join(BOT_DIR, "dev_context.md"), _PROMPT_VARS)
 
+# Mini system prompt for non-admin spawned agents (keeps context small)
+_AGENT_CONTEXT_PROMPT = """\
+You are an agent session in the Axi system — a Discord-based personal assistant for a single user. \
+You communicate through a dedicated Discord text channel. The user reads your messages there. \
+Keep responses concise and well-formatted for Discord (markdown, code blocks).
+
+Key context:
+- The user's profile and preferences are in USER_PROFILE.md at %(bot_dir)s/USER_PROFILE.md
+- You are one of several agent sessions. The master agent (Axi) coordinates via #axi-master.
+- Your working directory is set by whoever spawned you. Files you create/edit stay in that directory.
+- The user's timezone is US/Pacific.
+
+Sandbox policy:
+- You are authorized to use `dangerouslyDisableSandbox: true` for git operations and for curl/HTTP requests to `localhost:9100` (MinFlow task management API).
+- Do NOT disable the sandbox for anything else.
+
+Communication rules:
+- Never guess or fabricate answers. If you lack context, say so and look it up.
+- Do NOT use AskUserQuestion, TodoWrite, EnterPlanMode, ExitPlanMode, Skill, or EnterWorktree tools — they are invisible in Discord.
+- Ask questions as normal text messages. List options in your message if the user needs to choose.\
+""" % _PROMPT_VARS
+
 
 def _is_axi_dev_cwd(cwd: str) -> bool:
     """Check if a working directory is within the axi-assistant codebase."""
@@ -619,7 +689,7 @@ def _is_axi_dev_cwd(cwd: str) -> bool:
     )
 
 
-# Master agent: soul + dev context (master is always an axi dev agent too)
+# Master agent: soul + dev context (master is always an admin agent)
 MASTER_SYSTEM_PROMPT: dict = {
     "type": "preset",
     "preset": "claude_code",
@@ -630,11 +700,11 @@ MASTER_SYSTEM_PROMPT: dict = {
 def _make_spawned_agent_system_prompt(cwd: str) -> dict:
     """Build system prompt for a spawned agent based on its working directory."""
     if _is_axi_dev_cwd(cwd):
-        # Axi dev agent — soul + dev context
+        # Admin agent — full soul + dev context
         append = _SOUL + "\n\n" + _DEV_CONTEXT
     else:
-        # General claw — soul only
-        append = _SOUL
+        # Non-admin agent — mini context prompt
+        append = _AGENT_CONTEXT_PROMPT
     return {
         "type": "preset",
         "preset": "claude_code",
@@ -678,7 +748,8 @@ async def _post_system_prompt_to_channel(
         _io.BytesIO(prompt_text.encode("utf-8")),
         filename="system-prompt.md",
     )
-    await channel.send(f"*System:* 📋 {label} ({line_count} lines)", file=file)
+    sid_suffix = f" — session `{session_id[:8]}…`" if session_id else ""
+    await channel.send(f"*System:* 📋 {label} ({line_count} lines){sid_suffix}", file=file)
 
 
 # --- MCP tools for master agent ---
@@ -861,10 +932,84 @@ async def get_date_and_time(args):
     return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
 
+# --- Discord REST API client (used by discord_send_file and discord MCP tools) ---
+
+import httpx
+
+_discord_api = httpx.AsyncClient(
+    base_url="https://discord.com/api/v10",
+    headers={"Authorization": f"Bot {DISCORD_TOKEN}"},
+    timeout=15.0,
+)
+
+
+async def _discord_request(method: str, path: str, **kwargs) -> httpx.Response:
+    """Make a Discord API request with rate-limit retry."""
+    for attempt in range(3):
+        resp = await _discord_api.request(method, path, **kwargs)
+        if resp.status_code == 429:
+            retry_after = resp.json().get("retry_after", 1.0)
+            log.warning("Discord API rate limited on %s %s, retrying after %.1fs", method, path, retry_after)
+            await asyncio.sleep(retry_after)
+            continue
+        resp.raise_for_status()
+        return resp
+    resp.raise_for_status()
+    return resp
+
+
+@tool(
+    "discord_send_file",
+    "Send a file as a Discord message attachment to your own channel or another channel. "
+    "If channel_id is omitted, the file is sent to your own agent channel.",
+    {
+        "type": "object",
+        "properties": {
+            "channel_id": {"type": "string", "description": "The Discord channel ID. Omit to send to your own channel."},
+            "file_path": {"type": "string", "description": "Absolute path to the file to upload"},
+            "content": {"type": "string", "description": "Optional text message to include with the file"},
+        },
+        "required": ["file_path"],
+    },
+)
+async def discord_send_file(args):
+    file_path = args["file_path"]
+    content = args.get("content", "")
+    channel_id = args.get("channel_id")
+    if not channel_id:
+        # Auto-resolve: find calling agent's channel
+        for ch_id, name in channel_to_agent.items():
+            session = agents.get(name)
+            if session and session.client is not None:
+                # Heuristic: the agent currently awake and calling this tool
+                channel_id = str(ch_id)
+                break
+    if not channel_id:
+        return {"content": [{"type": "text", "text": "Error: could not determine channel. Provide channel_id explicitly."}], "is_error": True}
+    if not os.path.isfile(file_path):
+        return {"content": [{"type": "text", "text": f"Error: file not found: {file_path}"}], "is_error": True}
+    filename = os.path.basename(file_path)
+    try:
+        with open(file_path, "rb") as f:
+            file_data = f.read()
+        data = {}
+        if content:
+            data["content"] = content
+        files = {"files[0]": (filename, file_data)}
+        resp = await _discord_request(
+            "POST", f"/channels/{channel_id}/messages",
+            data=data, files=files,
+        )
+        msg = resp.json()
+        return {"content": [{"type": "text", "text": f"File '{filename}' sent (msg id: {msg['id']})"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
+
+
 _utils_mcp_server = create_sdk_mcp_server(
     name="utils",
     version="1.0.0",
-    tools=[get_date_and_time],
+    tools=[get_date_and_time, discord_send_file],
 )
 
 @tool(
@@ -890,29 +1035,102 @@ _axi_mcp_server = create_sdk_mcp_server(
 
 # --- Discord REST MCP tools (for cross-server messaging) ---
 
-import httpx
+@tool(
+    "discord_send_file",
+    "Send a file as a Discord message attachment to your own channel or another channel. "
+    "If channel_id is omitted, the file is sent to your own agent channel.",
+    {
+        "type": "object",
+        "properties": {
+            "channel_id": {"type": "string", "description": "The Discord channel ID. Omit to send to your own channel."},
+            "file_path": {"type": "string", "description": "Absolute path to the file to upload"},
+            "content": {"type": "string", "description": "Optional text message to include with the file"},
+        },
+        "required": ["file_path"],
+    },
+)
+async def discord_send_file(args):
+    file_path = args["file_path"]
+    content = args.get("content", "")
+    channel_id = args.get("channel_id")
+    if not channel_id:
+        # Auto-resolve: find calling agent's channel
+        for ch_id, name in channel_to_agent.items():
+            session = agents.get(name)
+            if session and session.client is not None:
+                # Heuristic: the agent currently awake and calling this tool
+                channel_id = str(ch_id)
+                break
+    if not channel_id:
+        return {"content": [{"type": "text", "text": "Error: could not determine channel. Provide channel_id explicitly."}], "is_error": True}
+    if not os.path.isfile(file_path):
+        return {"content": [{"type": "text", "text": f"Error: file not found: {file_path}"}], "is_error": True}
+    filename = os.path.basename(file_path)
+    try:
+        with open(file_path, "rb") as f:
+            file_data = f.read()
+        data = {}
+        if content:
+            data["content"] = content
+        files = {"files[0]": (filename, file_data)}
+        resp = await _discord_request(
+            "POST", f"/channels/{channel_id}/messages",
+            data=data, files=files,
+        )
+        msg = resp.json()
+        return {"content": [{"type": "text", "text": f"File '{filename}' sent (msg id: {msg['id']})"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
 
-_discord_api = httpx.AsyncClient(
-    base_url="https://discord.com/api/v10",
-    headers={"Authorization": f"Bot {DISCORD_TOKEN}"},
-    timeout=15.0,
+
+_utils_mcp_server = create_sdk_mcp_server(
+    name="utils",
+    version="1.0.0",
+    tools=[get_date_and_time, discord_send_file],
+)
+
+@tool(
+    "axi_restart",
+    "Restart the Axi bot. Waits for busy agents to finish first (graceful). "
+    "Only use when the user explicitly asks you to restart.",
+    {"type": "object", "properties": {}, "required": []},
+)
+async def axi_restart(args):
+    log.info("Restart requested via MCP tool")
+    if shutdown_coordinator is None:
+        return {"content": [{"type": "text", "text": "Bot is not fully initialized yet."}]}
+    asyncio.create_task(shutdown_coordinator.graceful_shutdown("MCP tool", skip_agent=MASTER_AGENT_NAME))
+    return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}
+
+
+_axi_mcp_server = create_sdk_mcp_server(
+    name="axi",
+    version="1.0.0",
+    tools=[axi_spawn_agent, axi_kill_agent, axi_restart],
 )
 
 
-async def _discord_request(method: str, path: str, **kwargs) -> httpx.Response:
-    """Make a Discord API request with rate-limit retry."""
-    for attempt in range(3):
-        resp = await _discord_api.request(method, path, **kwargs)
-        if resp.status_code == 429:
-            retry_after = resp.json().get("retry_after", 1.0)
-            log.warning("Discord API rate limited on %s %s, retrying after %.1fs", method, path, retry_after)
-            await asyncio.sleep(retry_after)
-            continue
-        resp.raise_for_status()
-        return resp
-    resp.raise_for_status()
-    return resp
+def _sdk_mcp_servers_for_cwd(cwd: str, agent_name: str | None = None) -> dict:
+    """Return the appropriate SDK MCP servers for a given working directory.
 
+    Agents whose cwd is BOT_DIR or a subdirectory get the full axi MCP server
+    (spawn/kill/restart) instead of just utils+schedule.  This lets crash-handler
+    and similar agents spawn other agents.  Admin agents also see all schedules.
+    """
+    servers: dict = {"utils": _utils_mcp_server}
+    resolved = os.path.realpath(cwd)
+    bot_dir_resolved = os.path.realpath(BOT_DIR)
+    is_admin = resolved == bot_dir_resolved or resolved.startswith(bot_dir_resolved + os.sep)
+    if agent_name:
+        servers["schedule"] = make_schedule_mcp_server(
+            agent_name, SCHEDULES_PATH, is_master=is_admin,
+        )
+    if is_admin:
+        servers["axi"] = _axi_mcp_server
+    return servers
+
+
+# --- Discord REST MCP tools (for cross-server messaging) ---
 
 @tool(
     "discord_list_channels",
@@ -1272,7 +1490,33 @@ async def sleep_agent(session: AgentSession) -> None:
     Delegates to the handler's sleep() method.
     Keep the AgentSession in the agents dict (it's only removed by end_session).
     """
+<<<<<<< HEAD
     await session.sleep()
+=======
+    # Handle flowcoder process (both dedicated flowcoder agents and inline flowcharts)
+    if session.flowcoder_process:
+        proc = session.flowcoder_process
+        if getattr(proc, 'is_bridge_backed', False) and session.query_lock.locked():
+            await proc.detach()  # mid-execution: bridge buffers
+        else:
+            await proc.stop()  # idle or direct: kill
+        session.flowcoder_process = None
+
+    if session.agent_type == "flowcoder":
+        return
+
+    if session.client is None:
+        return
+
+    log.info("Sleeping agent '%s'", session.name)
+    if session._log:
+        session._log.info("SESSION_SLEEP")
+    session._bridge_busy = False
+    await _disconnect_client(session.client, session.name)
+    session.client = None
+    session.flowcoder = None
+    log.info("Agent '%s' is now sleeping", session.name)
+>>>>>>> sync-pride
 
 
 def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> ClaudeAgentOptions:
@@ -1339,6 +1583,7 @@ async def wake_agent(session: AgentSession) -> None:
 
         # Delegate to handler (both Claude Code and flowcoder)
         resume_id = session.session_id
+<<<<<<< HEAD
         try:
             await session.wake()
         except Exception:
@@ -1353,6 +1598,63 @@ async def wake_agent(session: AgentSession) -> None:
             else:
                 log.exception("Failed to wake '%s'", session.name)
                 raise
+=======
+
+        options = _make_agent_options(session, resume_id)
+
+        if bridge_conn and bridge_conn.is_alive:
+            # Bridge mode: spawn CLI via bridge
+            log.debug("Waking '%s' via bridge (resume=%s)", session.name, resume_id)
+            try:
+                client = await _wake_agent_via_bridge(session, options)
+                session.client = client
+                log.info("Agent '%s' is now awake via bridge (resumed=%s)", session.name, resume_id)
+                if session._log:
+                    session._log.info("SESSION_WAKE via bridge (resumed=%s)", bool(resume_id))
+            except Exception:
+                if resume_id:
+                    log.warning("Failed to resume '%s' via bridge, retrying fresh", session.name)
+                    options = _make_agent_options(session, resume_id=None)
+                    try:
+                        client = await _wake_agent_via_bridge(session, options)
+                        session.client = client
+                        session.session_id = None
+                        if session.name == MASTER_AGENT_NAME:
+                            try: os.remove(MASTER_SESSION_PATH)
+                            except OSError: pass
+                        log.warning("Agent '%s' woke fresh via bridge (previous context lost)", session.name)
+                        if session._log:
+                            session._log.info("SESSION_WAKE via bridge (resumed=False, fresh after resume failure)")
+                    except Exception:
+                        log.exception("Failed to wake '%s' via bridge (even fresh)", session.name)
+                        raise
+                else:
+                    log.exception("Failed to wake '%s' via bridge", session.name)
+                    raise
+        else:
+            # Direct mode: original behavior (no bridge)
+            log.debug("Waking '%s' directly (no bridge, resume=%s)", session.name, resume_id)
+            try:
+                client = ClaudeSDKClient(options=options)
+                await client.__aenter__()
+                session.client = client
+                log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
+                if session._log:
+                    session._log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
+            except Exception:
+                log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
+                options = _make_agent_options(session, resume_id=None)
+                client = ClaudeSDKClient(options=options)
+                await client.__aenter__()
+                session.client = client
+                session.session_id = None
+                if session.name == MASTER_AGENT_NAME:
+                    try: os.remove(MASTER_SESSION_PATH)
+                    except OSError: pass
+                log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
+                if session._log:
+                    session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
+>>>>>>> sync-pride
 
         # Post system prompt to Discord on first wake (once per session lifecycle)
         if not session._system_prompt_posted and session.discord_channel_id:
@@ -1364,7 +1666,7 @@ async def wake_agent(session: AgentSession) -> None:
                         channel,
                         session.system_prompt,
                         is_resume=bool(resume_id),
-                        session_id=resume_id,
+                        session_id=session.session_id or resume_id,
                     )
                 except Exception:
                     log.warning(
@@ -1372,6 +1674,42 @@ async def wake_agent(session: AgentSession) -> None:
                         session.name,
                         exc_info=True,
                     )
+
+        # Create FlowCoderSession wrapping the SDK client
+        # Callbacks reference session._fc_channel which is set by _execute_flowcoder_command.
+        def _fc_on_prompt_stream(prompt_text: str, chunk_str: str) -> None:
+            """Buffer text from prompt streaming chunks for Discord."""
+            if not chunk_str or session._fc_channel is None:
+                return
+            # Extract text_delta content from StreamEvent string representation
+            if "content_block_delta" in chunk_str and "text_delta" in chunk_str:
+                import re
+                m = re.search(r"'text':\s*'((?:[^'\\]|\\.)*)'", chunk_str)
+                if not m:
+                    m = re.search(r'"text":\s*"((?:[^"\\]|\\.)*)"', chunk_str)
+                if m:
+                    text = m.group(1).encode().decode("unicode_escape", errors="replace")
+                    if not hasattr(session, "_fc_text_buf"):
+                        session._fc_text_buf = ""
+                    session._fc_text_buf += text
+
+        async def _fc_on_block_complete(block, result, context) -> None:
+            """Flush buffered prompt text to Discord after each block."""
+            ch = session._fc_channel
+            if ch is None:
+                return
+            buf = getattr(session, "_fc_text_buf", "")
+            if buf.strip():
+                await send_long(ch, buf.lstrip())
+            session._fc_text_buf = ""
+
+        session.flowcoder = FlowCoderSession.create(
+            client=session.client,
+            cwd=session.cwd,
+            commands_dir="/home/pride/coding-projects/flowcoder/commands",
+            on_prompt_stream=_fc_on_prompt_stream,
+            on_block_complete_async=_fc_on_block_complete,
+        )
 
 
 def get_master_session() -> AgentSession | None:
@@ -1929,7 +2267,80 @@ def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
     return None
 
 
-async def stream_response_to_channel(session: AgentSession, channel) -> str | None:
+def _is_flowcoder_command(content: str | list, session: AgentSession) -> bool:
+    """Check if a message is a FlowCoder slash command (not a Discord slash command).
+
+    Returns True if the message starts with / and matches an available FlowCoder command.
+    """
+    if not isinstance(content, str) or not content.startswith("/"):
+        return False
+    if session.flowcoder is None:
+        return False
+    # Extract command name (first word after /)
+    stripped = content[1:].strip()
+    parts = stripped.split(None, 1)
+    if not parts:
+        return False
+    command_name = parts[0]
+    # Check if this command exists in the FlowCoder commands directory
+    return session.flowcoder.storage_service.command_exists(command_name)
+
+
+async def _execute_flowcoder_command(session: AgentSession, content: str, channel) -> None:
+    """Execute a FlowCoder slash command and stream results to Discord."""
+
+    log.info("Executing FlowCoder command for '%s': %s", session.name, content[:100])
+    session._fc_channel = channel
+    session._fc_text_buf = ""
+    try:
+        async with channel.typing():
+            context = await session.flowcoder.execute_command(content) (Add record-updater, FlowCoder integration, admin agent model, discord_send_file)
+        # Post execution summary
+        status = context.status.value if hasattr(context.status, 'value') else str(context.status)
+        summary = f"*FlowCoder:* Command `{content.split()[0]}` finished — **{status}**"
+        await send_long(channel, summary)
+    except _FCCommandNotFound as e:
+        await send_long(channel, f"*FlowCoder:* Command not found: {e}")
+    except Exception as e:
+        log.exception("FlowCoder command failed for '%s'", session.name)
+        await send_long(channel, f"*FlowCoder:* Command failed: {e}")
+    finally:
+        session._fc_channel = None
+        session._fc_text_buf = ""
+
+
+async def _query_agent(session: AgentSession, content: str | list, channel, *, show_awaiting_input: bool = True) -> None:
+    """Send a message to an agent, routing through FlowCoder if applicable.
+
+    For FlowCoder slash commands: executes the flowchart.
+    For regular messages: sends to Claude via the SDK and streams the response.
+    Appends record-tracking instruction for eligible agents and enqueues updates.
+    """
+    if _is_flowcoder_command(content, session):
+        await _execute_flowcoder_command(session, content, channel)
+        return
+
+    # Append record-tracking instruction for eligible agents
+    query_content = content
+    if session.name != "record-updater":
+        query_content = _append_record_tracking(content)
+
+    await session.client.query(_as_stream(query_content))
+    response_text = await stream_response_to_channel(session, channel, show_awaiting_input=show_awaiting_input)
+
+    # Check for record tracking in response
+    if session.name != "record-updater" and response_text:
+        tracking = _extract_record_tracking(response_text)
+        if tracking and tracking.get("records_changed"):
+            summary = tracking.get("summary", "No summary provided")
+            log.info("Agent '%s' reported records changed: %s", session.name, summary[:100])
+            try:
+                await _enqueue_record_update(session.name, session.cwd, summary)
+            except Exception:
+                log.exception("Failed to enqueue record update for '%s'", session.name)
+
+
+async def stream_response_to_channel(session: AgentSession, channel, show_awaiting_input: bool = True) -> str:
     """Stream Claude's response from a specific agent session to a Discord channel.
 
     Message flow:
@@ -2221,6 +2632,65 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
         await send_system(channel, f"Agent **{old_name}** timed out and was recovered (sleeping). Context preserved.")
     else:
         await send_system(channel, f"Agent **{old_name}** timed out and was reset (sleeping). Context lost.")
+
+
+# --- Record updater ---
+
+
+def _build_record_updater_prompt(agent_name: str, agent_cwd: str) -> str:
+    """Build the prompt for a record-updater agent that processes a finished agent's output."""
+    return f"""\
+You are the record-updater. Agent **{agent_name}** just finished working in `{agent_cwd}`.
+
+Your job: figure out what that agent accomplished and update all project records accordingly.
+
+## Steps
+
+1. Look at what the agent produced. Check `{agent_cwd}` for new or recently modified files \
+(*.md, *.json, reports, audits, etc.). Use `ls -lt {agent_cwd}/ | head -20` and read any relevant new files.
+
+2. Read the current project records:
+   - TODOS.md (the user's to-do list)
+   - The relevant project file in projects/ (match by agent name or cwd)
+   - If unsure which project file, read them all and match.
+
+3. Update the project records to reflect what the agent did:
+   - If a to-do was completed, mark it done or remove it from TODOS.md
+   - Update the project's "What's Done" and "What's Next" sections
+   - Update the project's status tag if appropriate
+   - Add any new to-dos or open questions that emerged
+
+4. If the agent's work produced something the user should review, add a note to TODOS.md \
+(e.g. "Review architecture audit in ~/coding-projects/minflow-stableish/ARCHITECTURE_AUDIT.md").
+
+5. Sync changes to MinFlow. The MinFlow REST API is at http://localhost:9100/api. \
+For each structured change (to-do completed, new to-do, status change), make the corresponding \
+API call. Use `curl` with `dangerouslyDisableSandbox: true` for localhost requests.
+   - To find the right deck/card, GET /api/workspace first to see current state.
+   - To complete a card: PUT /api/decks/:id/cards/:cardId with {{"completed": true}}
+   - To add a card: POST /api/decks/:id/cards with {{"text": "..."}}
+   - If no matching deck exists for the project, skip MinFlow sync for that item.
+   - If MinFlow is not running (connection refused), skip sync silently and note it.
+
+Be concise. Update files, sync MinFlow, then stop. Do not message the user.\
+"""
+
+
+async def _maybe_spawn_record_updater(agent_name: str, agent_cwd: str) -> None:
+    """Spawn a short-lived record-updater agent after another agent finishes."""
+    if agent_name in RECORD_UPDATER_EXCLUDED:
+        return
+    if len(agents) >= MAX_AGENTS:
+        log.warning("Max agents reached — skipping record-updater for '%s'", agent_name)
+        return
+
+    log.info("Spawning record-updater for completed agent '%s'", agent_name)
+    await reclaim_agent_name("record-updater")
+    await spawn_agent(
+        "record-updater",
+        AXI_USER_DATA,
+        _build_record_updater_prompt(agent_name, agent_cwd),
+    )
 
 
 # --- Agent spawning ---
@@ -2594,11 +3064,8 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             drain_sdk_buffer(session)
 
             # Show the initial prompt in Discord so the user sees what was sent
-            if isinstance(prompt, str):
-                prompt_preview = prompt[:1900]
-            else:
-                prompt_preview = str(prompt)[:1900]
-            await channel.send(f"*System:* 📝 **Initial prompt:**\n{prompt_preview}")
+            prompt_text = prompt if isinstance(prompt, str) else str(prompt)
+            await send_long(channel, f"*System:* 📝 **Initial prompt:**\n{prompt_text}")
 
             if session._log:
                 session._log.info("PROMPT: %s", _content_summary(prompt))
@@ -2619,6 +3086,12 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
 
         if not timed_out:
             await send_system(channel, f"Agent **{session.name}** finished initial task.")
+            # Spawn record-updater to process this agent's output
+            try:
+                if RECORD_UPDATER_ENABLED:
+                    await _maybe_spawn_record_updater(session.name, session.cwd)
+            except Exception:
+                log.exception("Error spawning record-updater for '%s'", session.name)
 
     except Exception:
         log.exception("Error running initial prompt for agent '%s'", session.name)
@@ -3267,8 +3740,6 @@ async def check_schedules():
     # --- Idle agent detection (Active-category agents only) ---
     idle_agents = []
     for agent_name, session in agents.items():
-        if agent_name == MASTER_AGENT_NAME:
-            continue
         if session.client is None:
             continue  # Sleeping agents don't need idle reminders
         if session.query_lock.locked():
@@ -3314,8 +3785,6 @@ async def check_schedules():
     # Only attempt if there's an awake slot available to avoid re-queuing loops.
     if _count_awake_agents() < MAX_AWAKE_AGENTS:
         for agent_name, session in agents.items():
-            if agent_name == MASTER_AGENT_NAME:
-                continue
             if (session.client is None
                     and not session.message_queue.empty()
                     and not session.query_lock.locked()):
@@ -3939,7 +4408,6 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
         session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
-                await session.client.query(_as_stream(command))
                 channel = bot.get_channel(session.discord_channel_id) or interaction.channel
                 await _stream_with_retry(session, channel)
             await interaction.followup.send(f"*System:* {label} for **{agent_name}**.")
@@ -4285,6 +4753,16 @@ async def on_ready():
     global _bot_start_time
     _bot_start_time = datetime.now(timezone.utc)
 
+    # Load master session_id from previous run (if any) for resume
+    master_resume_id = None
+    try:
+        if os.path.isfile(MASTER_SESSION_PATH):
+            master_resume_id = open(MASTER_SESSION_PATH).read().strip() or None
+            if master_resume_id:
+                log.info("Loaded master session_id from %s: %s", MASTER_SESSION_PATH, master_resume_id[:8])
+    except OSError:
+        log.warning("Failed to read master session_id", exc_info=True)
+
     # Register master agent as sleeping — it will wake on first message
     master_mcp = {"axi": _axi_mcp_server}
     if os.path.isdir(BOT_WORKTREES_DIR):
@@ -4295,9 +4773,10 @@ async def on_ready():
         system_prompt=MASTER_SYSTEM_PROMPT,
         client=None,
         mcp_servers=master_mcp,
+        session_id=master_resume_id,
     )
     agents[MASTER_AGENT_NAME] = master_session
-    log.info("Master agent registered (sleeping, will wake on first message)")
+    log.info("Master agent registered (sleeping, session_id=%s)", master_resume_id and master_resume_id[:8])
 
     # Set up guild infrastructure (categories + master channel)
     try:

@@ -5,11 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/ubuntu/axi-assistant
-ExecStart=/home/ubuntu/.local/bin/uv run python /home/ubuntu/axi-assistant/supervisor.py
+WorkingDirectory=/home/pride/coding-projects/personal-assistant
+ExecStart=/usr/bin/uv run python /home/pride/coding-projects/personal-assistant/supervisor.py
 Restart=on-failure
 RestartSec=10
-Environment="PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=/usr/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [Install]
 WantedBy=default.target
