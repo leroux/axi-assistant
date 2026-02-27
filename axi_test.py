@@ -217,9 +217,17 @@ def cmd_up(args):
     data_path = os.path.join(TESTS_DIR, f"{name}-data")
 
     if os.path.isfile(os.path.join(instance_path, ".env")):
-        print(f"Error: Instance '{name}' already has a reservation (.env exists)", file=sys.stderr)
-        print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
-        sys.exit(1)
+        if is_instance_running(name):
+            print(f"Error: Instance '{name}' is already running", file=sys.stderr)
+            print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(f"Cleaning up stale reservation for '{name}' (not running, .env left behind)")
+            subprocess.run(
+                ["systemctl", "--user", "stop", f"axi-test@{name}"],
+                capture_output=True,
+            )
+            os.remove(os.path.join(instance_path, ".env"))
 
     guild_name = pick_guild(config, args.guild)
 
@@ -285,6 +293,14 @@ def cmd_down(args):
     if not os.path.isfile(env_path):
         print(f"Error: No reservation found for '{name}' (no .env)", file=sys.stderr)
         sys.exit(1)
+
+    # Stop the systemd service if it's still running
+    if is_instance_running(name):
+        print(f"Stopping axi-test@{name}...")
+        subprocess.run(
+            ["systemctl", "--user", "stop", f"axi-test@{name}"],
+            check=True,
+        )
 
     # Remove .env to release the reservation
     os.remove(env_path)
