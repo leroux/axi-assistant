@@ -221,14 +221,36 @@ class BridgeServer:
             await self._send_result(ResultMsg(ok=False, name=name, error="not found"))
             return
 
-        cp.subscribed = True
         buffered_count = len(cp.buffer)
         log.debug("[subscribe][%s] replaying %d buffered messages", name, buffered_count)
 
-        # Replay buffer
-        for msg in cp.buffer:
-            await self._send_to_client(msg)
+        # CRITICAL: Write all buffered messages to the socket buffer synchronously
+        # (no await between writes) to prevent interleaving with live relay messages.
+        # writer.write() is sync — the event loop cannot yield between calls —
+        # so all buffered payloads land in the socket buffer before any new messages
+        # from _relay_stdout can be written.
+        writer = self._client_writer
+        if writer is not None:
+            for msg in cp.buffer:
+                payload = msg.model_dump_json().encode() + b"\n"
+                log.debug("[subscribe][%s] replay-write %s (%d bytes)",
+                          name, type(msg).__name__, len(payload))
+                writer.write(payload)
         cp.buffer.clear()
+        cp.subscribed = True  # NOW relay sends directly — after all buffered writes
+
+        # Safe to yield — buffered bytes are already ahead of any new relay bytes
+        if writer is not None:
+            try:
+                await writer.drain()
+            except (ConnectionError, BrokenPipeError, OSError):
+                log.warning("[subscribe][%s] drain failed — client disconnected", name)
+                async with self._client_lock:
+                    if self._client_writer is writer:
+                        self._client_writer = None
+                        for cp2 in self._cli_procs.values():
+                            cp2.subscribed = False
+                return
 
         await self._send_result(ResultMsg(
             ok=True, name=name, replayed=buffered_count,

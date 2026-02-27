@@ -18,7 +18,7 @@ from claude_agent_sdk import ClaudeSDKClient
 if TYPE_CHECKING:
     from bot import AgentSession
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("__main__")  # Use bot.py's logger for consistent log output
 
 
 class AgentHandler(ABC):
@@ -167,14 +167,17 @@ class ClaudeCodeHandler(AgentHandler):
         session._bridge_busy = False
 
         drain_stderr(session)
-        drain_sdk_buffer(session)
+        drained = drain_sdk_buffer(session)
 
         if session._log:
             session._log.info("USER: %s", _content_summary(content))
 
+        log.info("HANDLER[%s] process_message: drained=%d, calling query+stream", session.name, drained)
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
+                log.info("HANDLER[%s] calling client.query()", session.name)
                 await session.client.query(_as_stream(content))
+                log.info("HANDLER[%s] query() returned, calling _stream_with_retry()", session.name)
                 await _stream_with_retry(session, channel)
         except TimeoutError:
             await _handle_query_timeout(session, channel)

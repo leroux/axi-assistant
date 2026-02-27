@@ -498,6 +498,16 @@ def _content_summary(content: str | list) -> str:
     return " ".join(parts)[:200]
 
 
+# --- Stream tracing (debug instrumentation) ---
+_stream_counter = 0
+
+def _next_stream_id(agent_name: str) -> str:
+    """Generate a unique stream ID for tracing."""
+    global _stream_counter
+    _stream_counter += 1
+    return f"{agent_name}:S{_stream_counter}"
+
+
 def drain_sdk_buffer(session: AgentSession) -> int:
     """Drain any stale messages from the SDK message buffer before sending a new query.
 
@@ -2419,8 +2429,11 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
 async def send_long(channel, text: str) -> None:
     """Send a potentially long message, splitting as needed."""
     chunks = split_message(text.strip())
-    for chunk in chunks:
+    caller = "".join(f.name or "?" for f in __import__("traceback").extract_stack(limit=4)[:-1])
+    for i, chunk in enumerate(chunks):
         if chunk:
+            log.info("DISCORD_SEND[#%s] chunk %d/%d len=%d caller=%s text=%r",
+                     getattr(channel, 'name', '?'), i+1, len(chunks), len(chunk), caller, chunk[:80])
             try:
                 await channel.send(chunk)
             except discord.NotFound:
@@ -2814,7 +2827,9 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
     the typing indicator from lingering during SDK bookkeeping.
     """
 
-    log.debug("Streaming response for '%s'", session.name)
+    stream_id = _next_stream_id(session.name)
+    log.info("STREAM_START[%s] caller=%s", stream_id,
+             "".join(f.name or "?" for f in __import__("traceback").extract_stack(limit=4)[:-1]))
 
     text_buffer = ""
     hit_rate_limit = False
@@ -2822,6 +2837,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
     typing_stopped = False
 
     _flush_count = 0
+    _msg_total = 0
 
     async def flush_text(text: str, reason: str = "?") -> None:
         nonlocal _flush_count
@@ -2843,8 +2859,9 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
     async with channel.typing() as _typing_ctx:
         async for msg in _receive_response_safe(session):
             _msg_seq += 1
+            _msg_total += 1
             if session._log:
-                session._log.debug("MSG_SEQ[%d] type=%s buf_len=%d", _msg_seq, type(msg).__name__, len(text_buffer))
+                session._log.debug("MSG_SEQ[%s][%d] type=%s buf_len=%d", stream_id, _msg_seq, type(msg).__name__, len(text_buffer))
 
             # Drain and send any stderr messages first
             for stderr_msg in drain_stderr(session):
@@ -3014,14 +3031,17 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 await channel.send(part)
 
     if hit_rate_limit:
+        log.info("STREAM_END[%s] result=rate_limit msgs=%d flushes=%d", stream_id, _msg_total, _flush_count)
         return None
 
     if hit_transient_error:
+        log.info("STREAM_END[%s] result=transient_error(%s) msgs=%d flushes=%d",
+                 stream_id, hit_transient_error, _msg_total, _flush_count)
         return hit_transient_error
 
     await flush_text(text_buffer, "post_loop")
 
-    log.debug("Stream complete for '%s'", session.name)
+    log.info("STREAM_END[%s] result=ok msgs=%d flushes=%d", stream_id, _msg_total, _flush_count)
 
     if SHOW_AWAITING_INPUT:
         await send_system(channel, "Bot has finished responding and is awaiting input.")
@@ -3034,10 +3054,13 @@ async def _stream_with_retry(session: AgentSession, channel) -> bool:
 
     Returns True on success, False if all retries exhausted.
     """
+    log.info("RETRY_ENTER[%s] starting initial stream", session.name)
     error = await stream_response_to_channel(session, channel)
     if error is None:
+        log.info("RETRY_EXIT[%s] first attempt succeeded", session.name)
         return True
 
+    log.warning("RETRY_TRIGGERED[%s] error=%s — will retry", session.name, error)
     for attempt in range(2, API_ERROR_MAX_RETRIES + 1):
         delay = API_ERROR_BASE_DELAY * (2 ** (attempt - 2))
         log.warning(
@@ -3561,7 +3584,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
 
             if session._log:
                 session._log.info("PROMPT: %s", _content_summary(prompt))
-            log.debug("Running initial prompt for '%s': %s", session.name, _content_summary(prompt))
+            log.info("INITIAL_PROMPT[%s] running initial prompt: %s", session.name, _content_summary(prompt))
             session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
             try:
                 # Handler's process_message already handles timeout and streaming
@@ -3600,6 +3623,8 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
 
 async def _process_message_queue(session: AgentSession) -> None:
     """Process any queued messages for an agent after the current query finishes."""
+    if session.message_queue:
+        log.info("QUEUE[%s] processing %d queued messages", session.name, len(session.message_queue))
     while session.message_queue:
         if shutdown_coordinator and shutdown_coordinator.requested:
             log.info("Shutdown requested — not processing further queued messages for '%s'", session.name)
@@ -3834,6 +3859,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
                 channel = await get_agent_channel(session.name)
                 if replayed > 0 and channel:
                     # There's buffered output to drain — stream it to Discord
+                    log.info("RECONNECT_DRAIN[%s] draining buffered output (replayed=%d)", session.name, replayed)
                     await send_system(channel, "*(reconnected after restart — resuming output)*")
                     try:
                         async with asyncio.timeout(QUERY_TIMEOUT):
@@ -3960,12 +3986,23 @@ def _init_shutdown_coordinator() -> None:
 
 # --- Message handler ---
 
+_seen_message_ids: set[int] = set()  # dedup guard for Discord duplicate delivery
+
 @bot.event
 async def on_message(message):
     """Handle incoming Discord messages.
 
     Simplified handler-based routing that delegates to AgentSession.process_message().
     """
+    # Dedup: Discord may deliver the same message twice on gateway reconnects
+    if message.id in _seen_message_ids:
+        log.warning("DEDUP[%s] duplicate on_message delivery — skipping", message.id)
+        return
+    _seen_message_ids.add(message.id)
+    # Prune old IDs to prevent memory leak (keep last 500)
+    if len(_seen_message_ids) > 500:
+        _seen_message_ids.clear()
+
     # --- Authorization and channel checks ---
     if message.author.id == bot.user.id:
         return
@@ -4062,6 +4099,10 @@ async def on_message(message):
             return
 
     # --- Backpressure conditions (queue if any apply) ---
+    msg_id = message.id
+    log.info("ON_MSG[%s][%s] processing=%s reconnecting=%s queue_size=%d lock_locked=%s",
+             agent_name, msg_id, session.is_processing(), session._reconnecting,
+             session.message_queue.qsize(), session.query_lock.locked())
 
     # 1. Reconnecting: queue messages
     if session._reconnecting:
@@ -4079,8 +4120,8 @@ async def on_message(message):
         )
         return
 
-    # 2. Flowcoder running: send to stdin (handler will handle)
-    if session.is_processing():
+    # 2. Flowcoder running: forward to stdin
+    if session.agent_type == "flowcoder" and session.is_processing():
         try:
             await session.process_message(content, message.channel)
             await _add_reaction(message, "✅")
@@ -4090,7 +4131,7 @@ async def on_message(message):
             await send_system(message.channel, str(e))
             return
 
-    # 3. Agent busy: queue messages
+    # 3. Agent busy: queue messages for later
     if session.is_processing():
         session.message_queue.append((content, message.channel, message))
         position = len(session.message_queue)
@@ -4106,7 +4147,9 @@ async def on_message(message):
         return
 
     # --- Normal processing path ---
+    log.info("ON_MSG[%s][%s] ACQUIRING query_lock", agent_name, msg_id)
     async with session.query_lock:
+        log.info("ON_MSG[%s][%s] ACQUIRED query_lock", agent_name, msg_id)
         # Wake if needed
         if not session.is_awake():
             log.debug("Waking agent '%s' for user message", agent_name)
@@ -4114,7 +4157,7 @@ async def on_message(message):
                 return
 
         # Process the message
-        log.debug("Processing message for agent '%s'", agent_name)
+        log.info("ON_MSG[%s][%s] calling process_message", agent_name, msg_id)
         session.activity = ActivityState(
             phase="starting", query_started=datetime.now(timezone.utc)
         )
@@ -4142,7 +4185,7 @@ async def on_message(message):
         finally:
             session.activity = ActivityState(phase="idle")
 
-    log.debug("Query completed for '%s'", agent_name)
+    log.info("ON_MSG[%s][%s] query_lock RELEASED, checking queue", agent_name, msg_id)
 
     # Process any queued messages
     await _process_message_queue(session)
