@@ -110,6 +110,7 @@ BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
 MASTER_SESSION_PATH = os.path.join(BOT_DIR, ".master_session_id")
 CONFIG_PATH = os.path.join(BOT_DIR, "config.json")
 RATE_LIMIT_HISTORY_PATH = os.path.join(_log_dir, "rate_limit_history.jsonl")
+USAGE_HISTORY_PATH = os.path.join(AXI_USER_DATA, "usage_history.jsonl")
 schedule_last_fired: dict[str, datetime] = {}
 _bot_start_time: datetime | None = None
 
@@ -341,6 +342,8 @@ class SessionUsage:
     total_cost_usd: float = 0.0
     total_turns: int = 0
     total_duration_ms: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
     first_query: datetime | None = None
     last_query: datetime | None = None
 
@@ -678,8 +681,8 @@ def _parse_channel_topic(topic: str | None) -> tuple[str | None, str | None]:
         part = part.strip()
         if part.startswith("cwd: "):
             cwd = part[5:].strip()
-        elif part.startswith("session: "):
-            session_id = part[9:].strip()
+        elif part.startswith("session:"):
+            session_id = part[8:].strip()
     return cwd, session_id
 
 
@@ -2182,6 +2185,11 @@ def _record_session_usage(agent_name: str, msg: ResultMessage) -> None:
     if not sid:
         return
     now = datetime.now(timezone.utc)
+    usage = getattr(msg, "usage", None) or {}
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
+
+    # In-memory tracking
     if sid not in _session_usage:
         _session_usage[sid] = SessionUsage(agent_name=agent_name, first_query=now)
     entry = _session_usage[sid]
@@ -2189,7 +2197,27 @@ def _record_session_usage(agent_name: str, msg: ResultMessage) -> None:
     entry.total_cost_usd += msg.total_cost_usd or 0.0
     entry.total_turns += msg.num_turns or 0
     entry.total_duration_ms += msg.duration_ms or 0
+    entry.total_input_tokens += input_tokens
+    entry.total_output_tokens += output_tokens
     entry.last_query = now
+
+    # Persistent JSONL log
+    try:
+        record = {
+            "ts": now.isoformat(),
+            "agent": agent_name,
+            "session_id": sid,
+            "cost_usd": msg.total_cost_usd,
+            "turns": msg.num_turns,
+            "duration_ms": msg.duration_ms,
+            "duration_api_ms": msg.duration_api_ms,
+            "is_error": msg.is_error,
+            "usage": usage if usage else None,
+        }
+        with open(USAGE_HISTORY_PATH, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        log.warning("Failed to write usage history", exc_info=True)
 
 
 def _update_rate_limit_quota(data: dict) -> None:
@@ -4064,8 +4092,12 @@ async def claude_usage_command(interaction: discord.Interaction, history: int | 
                 age_s = int((datetime.now(timezone.utc) - usage.first_query).total_seconds())
                 active_str = f" | Active since {_format_time_remaining(age_s)} ago"
 
+            token_str = ""
+            if usage.total_input_tokens or usage.total_output_tokens:
+                token_str = f" | Tokens: {usage.total_input_tokens:,}in / {usage.total_output_tokens:,}out"
+
             lines.append(f"**{usage.agent_name}** (`{sid[:8]}`)")
-            lines.append(f"  Cost: **${usage.total_cost_usd:.2f}** | Queries: {usage.queries} | Turns: {usage.total_turns}")
+            lines.append(f"  Cost: **${usage.total_cost_usd:.2f}** | Queries: {usage.queries} | Turns: {usage.total_turns}{token_str}")
             lines.append(f"  API time: {duration_str}{active_str}")
             lines.append("")
 
