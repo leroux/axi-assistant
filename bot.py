@@ -99,8 +99,47 @@ SKIPS_PATH = os.path.join(BOT_DIR, "schedule_skips.json")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
+CONFIG_PATH = os.path.join(BOT_DIR, "config.json")
 schedule_last_fired: dict[str, datetime] = {}
 _bot_start_time: datetime | None = None
+
+# --- User configuration management ---
+
+VALID_MODELS = {"haiku", "sonnet", "opus"}
+_config_lock = threading.Lock()
+
+def _load_config() -> dict:
+    """Load user configuration from file."""
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            log.warning("Failed to load config: %s", e)
+    return {}
+
+def _save_config(config: dict) -> None:
+    """Save user configuration to file."""
+    try:
+        with _config_lock:
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=2)
+    except Exception as e:
+        log.error("Failed to save config: %s", e)
+
+def _get_model() -> str:
+    """Get the current model preference."""
+    config = _load_config()
+    return config.get("model", "haiku")
+
+def _set_model(model: str) -> str:
+    """Set the model preference. Returns validation error string or empty string on success."""
+    if model.lower() not in VALID_MODELS:
+        return f"Invalid model '{model}'. Valid options: {', '.join(sorted(VALID_MODELS))}"
+    config = _load_config()
+    config["model"] = model.lower()
+    _save_config(config)
+    return ""
 
 # --- Agent session management ---
 
@@ -1279,7 +1318,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> 
     """Build ClaudeAgentOptions for a session."""
     return ClaudeAgentOptions(
         # model="opus",
-        model="haiku",
+        model=_get_model(),
         #effort="high",
         # thinking={"type": "enabled", "budget_tokens": 128000},
         #thinking={"type": "adaptive"},
@@ -3499,6 +3538,27 @@ async def claude_usage_command(interaction: discord.Interaction):
         lines.append("**Rate Limit**: No data yet (updates on next API call)")
 
     await interaction.response.send_message("\n".join(lines))
+
+
+@bot.tree.command(name="model", description="Get or set the default LLM model for spawned agents.")
+@app_commands.describe(name="Model name (haiku, sonnet, opus) — omit to view current")
+async def model_command(interaction: discord.Interaction, name: str | None = None):
+    log.info("Slash command /model name=%s from %s", name, interaction.user)
+    if interaction.user.id not in ALLOWED_USER_IDS:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    if name is None:
+        # Show current model
+        current = _get_model()
+        await interaction.response.send_message(f"Current model: **{current}**")
+    else:
+        # Set model
+        error = _set_model(name)
+        if error:
+            await interaction.response.send_message(f"*System:* {error}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"*System:* Model set to **{name.lower()}**.")
 
 
 @bot.tree.command(name="list-agents", description="List all active agent sessions.")
