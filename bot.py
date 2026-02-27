@@ -166,6 +166,22 @@ def _set_model(model: str) -> str:
         _save_config(config)
     return ""
 
+
+async def _post_model_warning(session) -> None:
+    """Post a warning to Discord if the agent is running on a non-opus model."""
+    model = _get_model()
+    if model == "opus" or not session.discord_channel_id:
+        return
+    channel = bot.get_channel(session.discord_channel_id)
+    if channel and isinstance(channel, TextChannel):
+        try:
+            await channel.send(
+                f"⚠️ Running on **{model}** — switch to opus with `/model opus` for best results."
+            )
+        except Exception:
+            log.warning("Failed to post model warning for '%s'", session.name, exc_info=True)
+
+
 # --- Agent session management ---
 
 MASTER_AGENT_NAME = "axi-master"
@@ -1357,6 +1373,7 @@ async def wake_or_queue(
     """
     try:
         await session.wake()
+        await _post_model_warning(session)
         return True
     except ConcurrencyLimitError:
         await session.message_queue.put((content, channel, orig_message))
@@ -1682,6 +1699,8 @@ async def wake_agent(session: AgentSession) -> None:
                         session.name,
                         exc_info=True,
                     )
+
+        await _post_model_warning(session)
 
 
 def get_master_session() -> AgentSession | None:
@@ -3081,6 +3100,7 @@ async def _process_message_queue(session: AgentSession) -> None:
             if not session.is_awake():
                 try:
                     await session.wake()
+                    await _post_model_warning(session)
                 except Exception:
                     log.exception(
                         "Failed to wake agent '%s' for queued message", session.name
