@@ -1,50 +1,51 @@
+import asyncio
+import base64
+import json
+import logging
 import os
 import re
-import json
-import time
 import signal
-import asyncio
 import subprocess
 import threading
-import logging
+import time
 from collections import deque
-from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
-import base64
-
 import discord
-from dotenv import load_dotenv
-from discord import Intents, app_commands, CategoryChannel, TextChannel
-from discord.ext.commands import Bot
-from discord.ext import tasks
-from discord.enums import ChannelType
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, create_sdk_mcp_server, tool
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server, tool
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk.types import (
     AssistantMessage,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ResultMessage,
     StreamEvent,
     SystemMessage,
     ToolPermissionContext,
-    PermissionResultAllow,
-    PermissionResultDeny,
 )
 from croniter import croniter
-from shutdown import ShutdownCoordinator, kill_supervisor, exit_for_restart
+from discord import CategoryChannel, Intents, TextChannel, app_commands
+from discord.enums import ChannelType
+from discord.ext import tasks
+from discord.ext.commands import Bot
+from dotenv import load_dotenv
+
 from bridge import (
-    BridgeConnection, BridgeTransport, ensure_bridge, build_cli_spawn_args,
-    connect_to_bridge,
+    BridgeConnection,
+    BridgeTransport,
+    ensure_bridge,
 )
+from handlers import AgentHandler, get_handler
 from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
-from handlers import get_handler, AgentHandler
+from shutdown import ShutdownCoordinator, exit_for_restart, kill_supervisor
 
 FLOWCODER_ENABLED = os.environ.get("FLOWCODER_ENABLED", "").lower() in ("1", "true", "yes")
 
 if FLOWCODER_ENABLED:
-    from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
+    from flowcoder import BridgeFlowcoderProcess, FlowcoderProcess
 else:
     FlowcoderProcess = None
     BridgeFlowcoderProcess = None
@@ -76,6 +77,7 @@ _file_fmt = logging.Formatter("%(asctime)s %(levelname)-8s [%(funcName)s:%(linen
 _file_fmt.converter = time.gmtime
 _file_handler.setFormatter(_file_fmt)
 log.addHandler(_file_handler)
+
 
 def _resolve_discord_token() -> str:
     """Resolve Discord token from env or test slot reservation.
@@ -116,9 +118,7 @@ def _resolve_discord_token() -> str:
             config = json.load(f)
         return config["bots"][slot["token_id"]]["token"]
     except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
-        raise RuntimeError(
-            f"Cannot resolve token for bot '{slot.get('token_id')}': {e}"
-        ) from None
+        raise RuntimeError(f"Cannot resolve token for bot '{slot.get('token_id')}': {e}") from None
 
 
 DISCORD_TOKEN = _resolve_discord_token()
@@ -163,15 +163,13 @@ _bot_start_time: datetime | None = None
 # Directories agents are allowed to use as cwd (configurable via .env)
 _allowed_cwds_env = os.environ.get("ALLOWED_CWDS", "")
 ALLOWED_CWDS: list[str] = [
-    os.path.realpath(os.path.expanduser(p))
-    for p in (_allowed_cwds_env.split(":") if _allowed_cwds_env else [])
+    os.path.realpath(os.path.expanduser(p)) for p in (_allowed_cwds_env.split(":") if _allowed_cwds_env else [])
 ] + [os.path.realpath(AXI_USER_DATA), os.path.realpath(BOT_DIR), os.path.realpath(BOT_WORKTREES_DIR)]
 
 # Extra directories that admin agents (rooted in BOT_DIR) can spawn into and write to
 _admin_cwds_env = os.environ.get("ADMIN_ALLOWED_CWDS", "")
 ADMIN_ALLOWED_CWDS: list[str] = [
-    os.path.realpath(os.path.expanduser(p))
-    for p in (_admin_cwds_env.split(":") if _admin_cwds_env else [])
+    os.path.realpath(os.path.expanduser(p)) for p in (_admin_cwds_env.split(":") if _admin_cwds_env else [])
 ]
 ALLOWED_CWDS += ADMIN_ALLOWED_CWDS
 
@@ -180,15 +178,17 @@ ALLOWED_CWDS += ADMIN_ALLOWED_CWDS
 VALID_MODELS = {"haiku", "sonnet", "opus"}
 _config_lock = threading.Lock()
 
+
 def _load_config() -> dict:
     """Load user configuration from file. Caller must hold _config_lock if consistency matters."""
     if os.path.exists(CONFIG_PATH):
         try:
-            with open(CONFIG_PATH, "r") as f:
+            with open(CONFIG_PATH) as f:
                 return json.load(f)
         except Exception as e:
             log.warning("Failed to load config: %s", e)
     return {}
+
 
 def _save_config(config: dict) -> None:
     """Save user configuration to file. Caller must hold _config_lock."""
@@ -198,11 +198,13 @@ def _save_config(config: dict) -> None:
     except Exception as e:
         log.error("Failed to save config: %s", e)
 
+
 def _get_model() -> str:
     """Get the current model preference."""
     with _config_lock:
         config = _load_config()
     return config.get("model", "opus")
+
 
 def _set_model(model: str) -> str:
     """Set the model preference. Returns validation error string or empty string on success."""
@@ -223,9 +225,7 @@ async def _post_model_warning(session) -> None:
     channel = bot.get_channel(session.discord_channel_id)
     if channel and isinstance(channel, TextChannel):
         try:
-            await channel.send(
-                f"⚠️ Running on **{model}** — switch to opus with `/model opus` for best results."
-            )
+            await channel.send(f"⚠️ Running on **{model}** — switch to opus with `/model opus` for best results.")
         except Exception:
             log.warning("Failed to post model warning for '%s'", session.name, exc_info=True)
 
@@ -247,14 +247,15 @@ KILLED_CATEGORY_NAME = "Killed"
 @dataclass
 class ActivityState:
     """Real-time activity tracking for an agent during a query."""
-    phase: str = "idle"           # "thinking", "writing", "tool_use", "waiting", "starting", "idle"
+
+    phase: str = "idle"  # "thinking", "writing", "tool_use", "waiting", "starting", "idle"
     tool_name: str | None = None  # Current tool being called (e.g. "Bash", "Read")
     tool_input_preview: str = ""  # First ~200 chars of tool input JSON
-    thinking_text: str = ""       # Accumulated thinking content for debug display
-    turn_count: int = 0           # Number of API turns in current query
+    thinking_text: str = ""  # Accumulated thinking content for debug display
+    turn_count: int = 0  # Number of API turns in current query
     query_started: datetime | None = None  # When the current query began
-    last_event: datetime | None = None     # When the last stream event arrived
-    text_chars: int = 0           # Characters of text generated in current turn
+    last_event: datetime | None = None  # When the last stream event arrived
+    text_chars: int = 0  # Characters of text generated in current turn
 
 
 TOOL_DISPLAY_NAMES = {
@@ -293,7 +294,7 @@ class AgentSession:
     query_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stderr_buffer: list[str] = field(default_factory=list)
     stderr_lock: threading.Lock = field(default_factory=threading.Lock)
-    last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
     system_prompt: dict | str | None = None
     _system_prompt_posted: bool = False  # Set True after posting system prompt to Discord
     last_idle_notified: datetime | None = None
@@ -303,12 +304,14 @@ class AgentSession:
     message_queue: deque = field(default_factory=deque)
     mcp_servers: dict | None = None
     _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
-    _bridge_busy: bool = False   # True when reconnected to a mid-task CLI (bridge idle=False)
+    _bridge_busy: bool = False  # True when reconnected to a mid-task CLI (bridge idle=False)
     activity: ActivityState = field(default_factory=ActivityState)
     flowcoder_process: "FlowcoderProcess | None" = None
     flowcoder_command: str = ""
     flowcoder_args: str = ""
-    debug: bool = field(default_factory=lambda: os.environ.get("DISCORD_DEBUG", "").strip().lower() in ("1", "true", "on"))  # Post tool calls and thinking phases to Discord
+    debug: bool = field(
+        default_factory=lambda: os.environ.get("DISCORD_DEBUG", "").strip().lower() in ("1", "true", "on")
+    )  # Post tool calls and thinking phases to Discord
     plan_approval_future: asyncio.Future | None = None  # Set when waiting for user to approve/reject a plan
     plan_mode: bool = False  # When True, agent is in plan mode (read-only, plan before implement)
     _log: logging.Logger | None = None
@@ -383,6 +386,7 @@ shutdown_coordinator: ShutdownCoordinator | None = None
 # Global rate limit state (all agents share the same API account)
 _rate_limited_until: datetime | None = None
 
+
 @dataclass
 class SessionUsage:
     agent_name: str
@@ -395,15 +399,18 @@ class SessionUsage:
     first_query: datetime | None = None
     last_query: datetime | None = None
 
+
 _session_usage: dict[str, SessionUsage] = {}  # keyed by session_id
+
 
 @dataclass
 class RateLimitQuota:
-    status: str              # "allowed", "allowed_warning", "rejected"
-    resets_at: datetime      # from resetsAt unix timestamp
-    rate_limit_type: str     # "five_hour"
+    status: str  # "allowed", "allowed_warning", "rejected"
+    resets_at: datetime  # from resetsAt unix timestamp
+    rate_limit_type: str  # "five_hour"
     utilization: float | None = None  # 0.0-1.0, only present on warnings
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
 
 _rate_limit_quotas: dict[str, RateLimitQuota] = {}
 
@@ -417,9 +424,11 @@ _bot_creating_channels: set[str] = set()  # channel names currently being create
 
 def make_stderr_callback(session: AgentSession):
     """Create a stderr callback bound to a specific agent session."""
+
     def callback(text: str) -> None:
         with session.stderr_lock:
             session.stderr_buffer.append(text)
+
     return callback
 
 
@@ -446,6 +455,7 @@ async def _as_stream(content: str | list):
 
 
 # --- Emoji reaction helpers ---
+
 
 async def _add_reaction(message: discord.Message | None, emoji: str) -> None:
     """Add a reaction to a message, silently ignoring errors."""
@@ -505,7 +515,8 @@ async def _extract_message_content(message: discord.Message) -> str | list:
     ts_prefix = message.created_at.strftime("[%Y-%m-%d %H:%M:%S UTC] ")
 
     image_attachments = [
-        a for a in message.attachments
+        a
+        for a in message.attachments
         if a.content_type
         and a.content_type.split(";")[0].strip() in _SUPPORTED_IMAGE_TYPES
         and a.size <= _MAX_IMAGE_SIZE
@@ -545,6 +556,7 @@ def _content_summary(content: str | list) -> str:
 
 # --- Stream tracing (debug instrumentation) ---
 _stream_counter = 0
+
 
 def _next_stream_id(agent_name: str) -> str:
     """Generate a unique stream ID for tracing."""
@@ -587,7 +599,9 @@ def drain_sdk_buffer(session: AgentSession) -> int:
             msg_role = msg.get("message", {}).get("role", "") if isinstance(msg.get("message"), dict) else ""
             log.warning(
                 "Drained stale SDK message from '%s': type=%s role=%s",
-                session.name, msg_type, msg_role,
+                session.name,
+                msg_type,
+                msg_role,
             )
             # Still capture rate limit events even when drained stale
             if msg_type == "rate_limit_event":
@@ -610,15 +624,21 @@ def make_cwd_permission_callback(allowed_cwd: str, session: "AgentSession | None
     bot_dir = os.path.realpath(BOT_DIR)
 
     # Agents rooted in bot code or worktree dirs also get worktree + admin write access
-    is_code_agent = (allowed == bot_dir or allowed.startswith(bot_dir + os.sep) or
-                     allowed == worktrees or allowed.startswith(worktrees + os.sep))
+    is_code_agent = (
+        allowed == bot_dir
+        or allowed.startswith(bot_dir + os.sep)
+        or allowed == worktrees
+        or allowed.startswith(worktrees + os.sep)
+    )
     bases = [allowed, user_data]
     if is_code_agent:
         bases.append(worktrees)
         bases.extend(ADMIN_ALLOWED_CWDS)
 
     async def _check_permission(
-        tool_name: str, tool_input: dict, ctx: ToolPermissionContext,
+        tool_name: str,
+        tool_input: dict,
+        ctx: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
         # Forbidden tools in Discord mode (rendered as invisible/broken in Discord channel UI)
         forbidden_tools = {"AskUserQuestion", "TodoWrite", "Skill", "EnterWorktree", "Task"}
@@ -705,18 +725,20 @@ async def _handle_exit_plan_mode(
                     f"--{boundary}--\r\n"
                 )
                 await _discord_api.request(
-                    "POST", f"/channels/{channel_id}/messages",
+                    "POST",
+                    f"/channels/{channel_id}/messages",
                     content=body.encode(),
                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
                 )
             else:
                 await _send_plan_msg(f"{header}\n\n{plan_content}")
         else:
-            await _send_plan_msg(f"{header}\n\n*(Plan file not found — the agent should have described the plan in its messages above.)*")
+            await _send_plan_msg(
+                f"{header}\n\n*(Plan file not found — the agent should have described the plan in its messages above.)*"
+            )
 
         await _send_plan_msg(
-            "Reply with **approve** to proceed, **reject** to cancel, "
-            "or type feedback to revise the plan."
+            "Reply with **approve** to proceed, **reject** to cancel, or type feedback to revise the plan."
         )
     except Exception:
         log.exception("_handle_exit_plan_mode: failed to post plan to Discord — auto-approving")
@@ -756,6 +778,7 @@ async def _handle_exit_plan_mode(
 
 # --- Schedule helpers ---
 
+
 def load_schedules() -> list[dict]:
     try:
         with open(SCHEDULES_PATH) as f:
@@ -780,11 +803,13 @@ def load_history() -> list[dict]:
 
 def append_history(entry: dict, fired_at: datetime) -> None:
     history = load_history()
-    history.append({
-        "name": entry["name"],
-        "prompt": entry["prompt"],
-        "fired_at": fired_at.isoformat(),
-    })
+    history.append(
+        {
+            "name": entry["name"],
+            "prompt": entry["prompt"],
+            "fired_at": fired_at.isoformat(),
+        }
+    )
     with open(HISTORY_PATH, "w") as f:
         json.dump(history, f, indent=2)
         f.write("\n")
@@ -792,7 +817,7 @@ def append_history(entry: dict, fired_at: datetime) -> None:
 
 def prune_history() -> None:
     history = load_history()
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    cutoff = datetime.now(UTC) - timedelta(days=7)
     pruned = [h for h in history if datetime.fromisoformat(h["fired_at"]) > cutoff]
     if len(pruned) != len(history):
         with open(HISTORY_PATH, "w") as f:
@@ -836,6 +861,7 @@ def check_skip(name: str) -> bool:
 
 
 # --- Channel topic helpers ---
+
 
 def _format_channel_topic(cwd: str, session_id: str | None = None) -> str:
     """Format agent metadata for a Discord channel topic."""
@@ -957,8 +983,10 @@ def _pack_prompt_text(pack_names: list[str]) -> str:
             log.warning("Pack '%s' not found (available: %s)", name, list(_PACKS.keys()))
     return "\n\n".join(parts)
 
+
 # Mini system prompt for non-admin spawned agents (keeps context small)
-_AGENT_CONTEXT_PROMPT = """\
+_AGENT_CONTEXT_PROMPT = (
+    """\
 You are an agent session in the Axi system — a Discord-based personal assistant for a single user. \
 You communicate through a dedicated Discord text channel. The user reads your messages there. \
 Keep responses concise and well-formatted for Discord (markdown, code blocks).
@@ -978,14 +1006,14 @@ Communication rules:
 - Do NOT use AskUserQuestion, TodoWrite, Skill, or EnterWorktree tools — they are invisible in Discord.
 - EnterPlanMode and ExitPlanMode ARE supported — use plan mode normally for non-trivial implementation tasks. Your plan will be posted to Discord for user approval.
 - Ask questions as normal text messages. List options in your message if the user needs to choose.\
-""" % _PROMPT_VARS
+"""
+    % _PROMPT_VARS
+)
 
 
 def _is_axi_dev_cwd(cwd: str) -> bool:
     """Check if a working directory is within the axi-assistant codebase."""
-    return cwd.startswith(BOT_DIR) or (
-        BOT_WORKTREES_DIR and cwd.startswith(BOT_WORKTREES_DIR)
-    )
+    return cwd.startswith(BOT_DIR) or (BOT_WORKTREES_DIR and cwd.startswith(BOT_WORKTREES_DIR))
 
 
 # Master agent: soul + dev context + master packs
@@ -993,8 +1021,7 @@ _master_packs_text = _pack_prompt_text(MASTER_PACKS)
 MASTER_SYSTEM_PROMPT: dict = {
     "type": "preset",
     "preset": "claude_code",
-    "append": _SOUL + "\n\n" + _DEV_CONTEXT
-    + ("\n\n" + _master_packs_text if _master_packs_text else ""),
+    "append": _SOUL + "\n\n" + _DEV_CONTEXT + ("\n\n" + _master_packs_text if _master_packs_text else ""),
 }
 
 
@@ -1067,22 +1094,45 @@ async def _post_system_prompt_to_channel(
 
 # --- MCP tools for master agent ---
 
+
 @tool(
     "axi_spawn_agent",
-    "Spawn a new Axi agent session with its own Discord channel. "
-    "Returns immediately with success/error message.",
+    "Spawn a new Axi agent session with its own Discord channel. Returns immediately with success/error message.",
     {
         "type": "object",
         "properties": {
-            "name": {"type": "string", "description": "Unique short name, no spaces (e.g. 'feature-auth', 'fix-bug-123')"},
-            "cwd": {"type": "string", "description": "Absolute path to the working directory for the agent. Defaults to a per-agent subdirectory under user data (agents/<name>/)."},
+            "name": {
+                "type": "string",
+                "description": "Unique short name, no spaces (e.g. 'feature-auth', 'fix-bug-123')",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Absolute path to the working directory for the agent. Defaults to a per-agent subdirectory under user data (agents/<name>/).",
+            },
             "prompt": {"type": "string", "description": "Initial task instructions for the agent"},
             "resume": {"type": "string", "description": "Optional session ID to resume a previous agent session"},
-            "agent_type": {"type": "string", "enum": ["claude_code", "flowcoder"], "description": "Agent type. 'claude_code' (default) for interactive Claude, 'flowcoder' for flowchart executor."},
-            "command": {"type": "string", "description": "Flowcoder command name (required when agent_type='flowcoder')"},
-            "command_args": {"type": "string", "description": "Arguments for the flowcoder command (shell-style string)"},
-            "packs": {"type": "array", "items": {"type": "string"}, "description": "Optional list of pack names to load into this agent's system prompt. Defaults to the standard set. Pass [] to disable packs."},
-            "no_worktree": {"type": "boolean", "description": "Skip auto-worktree creation and use cwd directly (default: false)"},
+            "agent_type": {
+                "type": "string",
+                "enum": ["claude_code", "flowcoder"],
+                "description": "Agent type. 'claude_code' (default) for interactive Claude, 'flowcoder' for flowchart executor.",
+            },
+            "command": {
+                "type": "string",
+                "description": "Flowcoder command name (required when agent_type='flowcoder')",
+            },
+            "command_args": {
+                "type": "string",
+                "description": "Arguments for the flowcoder command (shell-style string)",
+            },
+            "packs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional list of pack names to load into this agent's system prompt. Defaults to the standard set. Pass [] to disable packs.",
+            },
+            "no_worktree": {
+                "type": "boolean",
+                "description": "Skip auto-worktree creation and use cwd directly (default: false)",
+            },
         },
         "required": ["name", "prompt"],
     },
@@ -1106,13 +1156,15 @@ async def axi_spawn_agent(args):
         if not os.path.isdir(worktree_path):
             result = subprocess.run(
                 ["git", "-C", BOT_DIR, "worktree", "add", worktree_path, "-b", branch],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if result.returncode != 0:
                 # Branch might already exist, try without -b
                 result = subprocess.run(
                     ["git", "-C", BOT_DIR, "worktree", "add", worktree_path, branch],
-                    capture_output=True, text=True,
+                    capture_output=True,
+                    text=True,
                 )
                 if result.returncode != 0:
                     log.warning("Failed to create worktree for '%s': %s", agent_name, result.stderr.strip())
@@ -1129,30 +1181,68 @@ async def axi_spawn_agent(args):
     # Flowcoder-specific validation
     if agent_type == "flowcoder":
         if not FLOWCODER_ENABLED:
-            return {"content": [{"type": "text", "text": "Error: flowcoder integration is disabled."}], "is_error": True}
+            return {
+                "content": [{"type": "text", "text": "Error: flowcoder integration is disabled."}],
+                "is_error": True,
+            }
         if not fc_command:
-            return {"content": [{"type": "text", "text": "Error: 'command' is required when agent_type='flowcoder'."}], "is_error": True}
+            return {
+                "content": [{"type": "text", "text": "Error: 'command' is required when agent_type='flowcoder'."}],
+                "is_error": True,
+            }
         if agent_resume:
-            return {"content": [{"type": "text", "text": "Error: 'resume' is not supported for flowcoder agents."}], "is_error": True}
+            return {
+                "content": [{"type": "text", "text": "Error: 'resume' is not supported for flowcoder agents."}],
+                "is_error": True,
+            }
 
     # Use global ALLOWED_CWDS (which includes ALLOWED_CWDS and ADMIN_ALLOWED_CWDS from .env)
     if not any(agent_cwd == d or agent_cwd.startswith(d + os.sep) for d in ALLOWED_CWDS):
-        return {"content": [{"type": "text", "text": "Error: cwd is not in allowed directories. Check ALLOWED_CWDS or ADMIN_ALLOWED_CWDS in .env."}], "is_error": True}
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Error: cwd is not in allowed directories. Check ALLOWED_CWDS or ADMIN_ALLOWED_CWDS in .env.",
+                }
+            ],
+            "is_error": True,
+        }
 
     if not agent_name:
-        return {"content": [{"type": "text", "text": "Error: 'name' is required and cannot be empty."}], "is_error": True}
+        return {
+            "content": [{"type": "text", "text": "Error: 'name' is required and cannot be empty."}],
+            "is_error": True,
+        }
     if agent_name == MASTER_AGENT_NAME:
-        return {"content": [{"type": "text", "text": f"Error: cannot spawn agent with reserved name '{MASTER_AGENT_NAME}'."}], "is_error": True}
+        return {
+            "content": [
+                {"type": "text", "text": f"Error: cannot spawn agent with reserved name '{MASTER_AGENT_NAME}'."}
+            ],
+            "is_error": True,
+        }
     if agent_name in agents and not agent_resume:
-        return {"content": [{"type": "text", "text": f"Error: agent '{agent_name}' already exists. Kill it first or use 'resume' to replace it."}], "is_error": True}
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Error: agent '{agent_name}' already exists. Kill it first or use 'resume' to replace it.",
+                }
+            ],
+            "is_error": True,
+        }
 
     async def _do_spawn():
         try:
             if agent_name in agents and agent_resume:
                 await reclaim_agent_name(agent_name)
             await spawn_agent(
-                agent_name, agent_cwd, agent_prompt, resume=agent_resume,
-                agent_type=agent_type, command=fc_command, command_args=fc_command_args,
+                agent_name,
+                agent_cwd,
+                agent_prompt,
+                resume=agent_resume,
+                agent_type=agent_type,
+                command=fc_command,
+                command_args=fc_command_args,
                 packs=agent_packs,
             )
         except Exception:
@@ -1165,13 +1255,27 @@ async def axi_spawn_agent(args):
             except Exception:
                 pass
 
-    log.info("Spawning agent '%s' via MCP tool (type=%s, cwd=%s, resume=%s, packs=%s)", agent_name, agent_type, agent_cwd, agent_resume, agent_packs)
+    log.info(
+        "Spawning agent '%s' via MCP tool (type=%s, cwd=%s, resume=%s, packs=%s)",
+        agent_name,
+        agent_type,
+        agent_cwd,
+        agent_resume,
+        agent_packs,
+    )
     # Guard against on_guild_channel_create race: mark channel as bot-created
     # BEFORE the background task runs, so the guard is already set when the
     # gateway event fires.  spawn_agent will discard it after agents[name] is set.
     _bot_creating_channels.add(_normalize_channel_name(agent_name))
     asyncio.create_task(_do_spawn())
-    return {"content": [{"type": "text", "text": f"Agent '{agent_name}' ({agent_type}) spawn initiated in {agent_cwd}. The agent's channel will be notified when it's ready."}]}
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": f"Agent '{agent_name}' ({agent_type}) spawn initiated in {agent_cwd}. The agent's channel will be notified when it's ready.",
+            }
+        ]
+    }
 
 
 @tool(
@@ -1190,9 +1294,15 @@ async def axi_kill_agent(args):
     agent_name = args.get("name", "").strip()
 
     if not agent_name:
-        return {"content": [{"type": "text", "text": "Error: 'name' is required and cannot be empty."}], "is_error": True}
+        return {
+            "content": [{"type": "text", "text": "Error: 'name' is required and cannot be empty."}],
+            "is_error": True,
+        }
     if agent_name == MASTER_AGENT_NAME:
-        return {"content": [{"type": "text", "text": f"Error: cannot kill reserved agent '{MASTER_AGENT_NAME}'."}], "is_error": True}
+        return {
+            "content": [{"type": "text", "text": f"Error: cannot kill reserved agent '{MASTER_AGENT_NAME}'."}],
+            "is_error": True,
+        }
     if agent_name not in agents:
         return {"content": [{"type": "text", "text": f"Error: agent '{agent_name}' not found."}], "is_error": True}
 
@@ -1292,7 +1402,7 @@ _discord_api = httpx.AsyncClient(
 
 async def _discord_request(method: str, path: str, **kwargs) -> httpx.Response:
     """Make a Discord API request with rate-limit retry."""
-    for attempt in range(3):
+    for _attempt in range(3):
         resp = await _discord_api.request(method, path, **kwargs)
         if resp.status_code == 429:
             retry_after = resp.json().get("retry_after", 1.0)
@@ -1329,7 +1439,8 @@ async def _get_or_create_exceptions_channel() -> str | None:
                 return _exceptions_channel_id
         # Create it (type 0 = text channel, no category)
         resp = await _discord_request(
-            "POST", f"/guilds/{guild_id}/channels",
+            "POST",
+            f"/guilds/{guild_id}/channels",
             json={"name": "exceptions", "type": 0},
         )
         _exceptions_channel_id = resp.json()["id"]
@@ -1347,7 +1458,8 @@ async def send_to_exceptions(message: str) -> bool:
         if ch_id is None:
             return False
         await _discord_request(
-            "POST", f"/channels/{ch_id}/messages",
+            "POST",
+            f"/channels/{ch_id}/messages",
             json={"content": message[:2000]},
         )
         return True
@@ -1363,7 +1475,10 @@ async def send_to_exceptions(message: str) -> bool:
     {
         "type": "object",
         "properties": {
-            "channel_id": {"type": "string", "description": "The Discord channel ID. Omit to send to your own channel."},
+            "channel_id": {
+                "type": "string",
+                "description": "The Discord channel ID. Omit to send to your own channel.",
+            },
             "file_path": {"type": "string", "description": "Absolute path to the file to upload"},
             "content": {"type": "string", "description": "Optional text message to include with the file"},
         },
@@ -1383,7 +1498,10 @@ async def discord_send_file(args):
                 channel_id = str(ch_id)
                 break
     if not channel_id:
-        return {"content": [{"type": "text", "text": "Error: could not determine channel. Provide channel_id explicitly."}], "is_error": True}
+        return {
+            "content": [{"type": "text", "text": "Error: could not determine channel. Provide channel_id explicitly."}],
+            "is_error": True,
+        }
     if not os.path.isfile(file_path):
         return {"content": [{"type": "text", "text": f"Error: file not found: {file_path}"}], "is_error": True}
     filename = os.path.basename(file_path)
@@ -1395,8 +1513,10 @@ async def discord_send_file(args):
             data["content"] = content
         files = {"files[0]": (filename, file_data)}
         resp = await _discord_request(
-            "POST", f"/channels/{channel_id}/messages",
-            data=data, files=files,
+            "POST",
+            f"/channels/{channel_id}/messages",
+            data=data,
+            files=files,
         )
         msg = resp.json()
         return {"content": [{"type": "text", "text": f"File '{filename}' sent (msg id: {msg['id']})"}]}
@@ -1406,6 +1526,7 @@ async def discord_send_file(args):
 
 # --- Discord REST MCP tools (for cross-server messaging) ---
 
+
 @tool(
     "discord_send_file",
     "Send a file as a Discord message attachment to your own channel or another channel. "
@@ -1413,7 +1534,10 @@ async def discord_send_file(args):
     {
         "type": "object",
         "properties": {
-            "channel_id": {"type": "string", "description": "The Discord channel ID. Omit to send to your own channel."},
+            "channel_id": {
+                "type": "string",
+                "description": "The Discord channel ID. Omit to send to your own channel.",
+            },
             "file_path": {"type": "string", "description": "Absolute path to the file to upload"},
             "content": {"type": "string", "description": "Optional text message to include with the file"},
         },
@@ -1433,7 +1557,10 @@ async def discord_send_file(args):
                 channel_id = str(ch_id)
                 break
     if not channel_id:
-        return {"content": [{"type": "text", "text": "Error: could not determine channel. Provide channel_id explicitly."}], "is_error": True}
+        return {
+            "content": [{"type": "text", "text": "Error: could not determine channel. Provide channel_id explicitly."}],
+            "is_error": True,
+        }
     if not os.path.isfile(file_path):
         return {"content": [{"type": "text", "text": f"Error: file not found: {file_path}"}], "is_error": True}
     filename = os.path.basename(file_path)
@@ -1445,8 +1572,10 @@ async def discord_send_file(args):
             data["content"] = content
         files = {"files[0]": (filename, file_data)}
         resp = await _discord_request(
-            "POST", f"/channels/{channel_id}/messages",
-            data=data, files=files,
+            "POST",
+            f"/channels/{channel_id}/messages",
+            data=data,
+            files=files,
         )
         msg = resp.json()
         return {"content": [{"type": "text", "text": f"File '{filename}' sent (msg id: {msg['id']})"}]}
@@ -1459,6 +1588,7 @@ _utils_mcp_server = create_sdk_mcp_server(
     version="1.0.0",
     tools=[get_date_and_time, discord_send_file],
 )
+
 
 @tool(
     "axi_restart",
@@ -1498,7 +1628,7 @@ async def _deliver_inter_agent_message(
     )
 
     # Build the prompt the target agent will receive
-    ts_prefix = datetime.now(timezone.utc).strftime("[%Y-%m-%d %H:%M:%S UTC] ")
+    ts_prefix = datetime.now(UTC).strftime("[%Y-%m-%d %H:%M:%S UTC] ")
     prompt = ts_prefix + f"[Inter-agent message from {sender_name}] {content}"
 
     if target_session.query_lock.locked():
@@ -1508,7 +1638,8 @@ async def _deliver_inter_agent_message(
         target_session.message_queue.appendleft((prompt, channel, None))
         log.info(
             "Inter-agent message from '%s' to busy agent '%s' — interrupting",
-            sender_name, target_session.name,
+            sender_name,
+            target_session.name,
         )
         try:
             if bridge_conn and bridge_conn.is_alive:
@@ -1569,11 +1700,12 @@ async def _process_inter_agent_prompt(
                     )
                     return
 
-            session.last_activity = datetime.now(timezone.utc)
+            session.last_activity = datetime.now(UTC)
             session.last_idle_notified = None
             session.idle_reminder_count = 0
             session.activity = ActivityState(
-                phase="starting", query_started=datetime.now(timezone.utc),
+                phase="starting",
+                query_started=datetime.now(UTC),
             )
             try:
                 await session.process_message(content, channel)
@@ -1582,12 +1714,14 @@ async def _process_inter_agent_prompt(
             except RuntimeError as e:
                 log.warning(
                     "Runtime error processing inter-agent message for '%s': %s",
-                    session.name, e,
+                    session.name,
+                    e,
                 )
                 await send_system(channel, str(e))
             except Exception:
                 log.exception(
-                    "Error processing inter-agent message for '%s'", session.name,
+                    "Error processing inter-agent message for '%s'",
+                    session.name,
                 )
                 await send_system(
                     channel,
@@ -1600,7 +1734,8 @@ async def _process_inter_agent_prompt(
         await _process_message_queue(session)
     except Exception:
         log.exception(
-            "Unhandled error in _process_inter_agent_prompt for '%s'", session.name,
+            "Unhandled error in _process_inter_agent_prompt for '%s'",
+            session.name,
         )
 
 
@@ -1688,7 +1823,9 @@ def _sdk_mcp_servers_for_cwd(cwd: str, agent_name: str | None = None) -> dict:
     is_admin = resolved == bot_dir_resolved or resolved.startswith(bot_dir_resolved + os.sep)
     if agent_name:
         servers["schedule"] = make_schedule_mcp_server(
-            agent_name, SCHEDULES_PATH, is_master=is_admin,
+            agent_name,
+            SCHEDULES_PATH,
+            is_master=is_admin,
         )
     if is_admin:
         servers["axi"] = _axi_mcp_server
@@ -1696,6 +1833,7 @@ def _sdk_mcp_servers_for_cwd(cwd: str, agent_name: str | None = None) -> dict:
 
 
 # --- Discord REST MCP tools (for cross-server messaging) ---
+
 
 @tool(
     "discord_list_channels",
@@ -1719,11 +1857,13 @@ async def discord_list_channels(args):
         categories = {c["id"]: c["name"] for c in channels if c["type"] == 4}
         for ch in channels:
             if ch["type"] == 0:  # GUILD_TEXT
-                text_channels.append({
-                    "id": ch["id"],
-                    "name": ch["name"],
-                    "category": categories.get(ch.get("parent_id"), None),
-                })
+                text_channels.append(
+                    {
+                        "id": ch["id"],
+                        "name": ch["name"],
+                        "category": categories.get(ch.get("parent_id")),
+                    }
+                )
         return {"content": [{"type": "text", "text": json.dumps(text_channels, indent=2)}]}
     except Exception as e:
         return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
@@ -1779,11 +1919,15 @@ async def discord_send_message(args):
     agent_name = channel_to_agent.get(int(channel_id))
     if agent_name:
         return {
-            "content": [{"type": "text", "text":
-                f"Error: Cannot send to agent channel #{agent_name}. "
-                f"Your text responses are automatically sent to your own channel. "
-                f"Just write your response as normal text instead of using this tool. "
-                f"This tool is only for sending messages to OTHER channels."}],
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Error: Cannot send to agent channel #{agent_name}. "
+                    f"Your text responses are automatically sent to your own channel. "
+                    f"Just write your response as normal text instead of using this tool. "
+                    f"This tool is only for sending messages to OTHER channels.",
+                }
+            ],
             "is_error": True,
         }
     try:
@@ -1810,9 +1954,7 @@ def _get_subprocess_pid(client: ClaudeSDKClient) -> int | None:
     Returns None if the client has no live subprocess.
     """
     try:
-        transport = getattr(client, "_transport", None) or getattr(
-            getattr(client, "_query", None), "transport", None
-        )
+        transport = getattr(client, "_transport", None) or getattr(getattr(client, "_query", None), "transport", None)
         if transport is None:
             return None
         proc = getattr(transport, "_process", None)
@@ -1898,17 +2040,13 @@ async def wake_or_queue(
         awake = _count_awake_agents()
         log.debug("Concurrency limit hit for '%s', queuing message (position %d)", session.name, position)
         await _add_reaction(orig_message, "📨")
-        await send_system(
-            channel,
-            f"⏳ All {awake} agent slots busy. Message queued (position {position})."
-        )
+        await send_system(channel, f"⏳ All {awake} agent slots busy. Message queued (position {position}).")
         return False
     except Exception:
         log.exception("Failed to wake agent '%s'", session.name)
         await _add_reaction(orig_message, "❌")
         await send_system(
-            channel,
-            f"Failed to wake agent **{session.name}**. Try `/kill-agent {session.name}` and respawn."
+            channel, f"Failed to wake agent **{session.name}**. Try `/kill-agent {session.name}` and respawn."
         )
         return False
 
@@ -1925,7 +2063,7 @@ async def _disconnect_client(client: ClaudeSDKClient, label: str) -> None:
         # Bridge transport: close() sends KILL to bridge, no local process to worry about
         try:
             await asyncio.wait_for(transport.close(), timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             log.warning("'%s' bridge transport close timed out", label)
         except Exception:
             log.exception("'%s' error closing bridge transport", label)
@@ -1935,7 +2073,7 @@ async def _disconnect_client(client: ClaudeSDKClient, label: str) -> None:
     pid = _get_subprocess_pid(client)
     try:
         await asyncio.wait_for(client.__aexit__(None, None, None), timeout=5.0)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+    except (TimeoutError, asyncio.CancelledError):
         log.warning("'%s' shutdown timed out or was cancelled", label)
     except RuntimeError as e:
         if "cancel scope" in str(e):
@@ -1989,9 +2127,9 @@ async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
 def _count_awake_agents() -> int:
     """Count agents that are currently awake (client or running flowcoder engine)."""
     return sum(
-        1 for s in agents.values()
-        if s.client is not None
-        or (s.flowcoder_process is not None and s.flowcoder_process.is_running)
+        1
+        for s in agents.values()
+        if s.client is not None or (s.flowcoder_process is not None and s.flowcoder_process.is_running)
     )
 
 
@@ -2010,7 +2148,7 @@ async def _evict_idle_agent(exclude: str | None = None) -> bool:
             continue  # busy
         if s._bridge_busy:
             continue  # reconnected to running CLI
-        idle_duration = (datetime.now(timezone.utc) - s.last_activity).total_seconds()
+        idle_duration = (datetime.now(UTC) - s.last_activity).total_seconds()
         candidates.append((idle_duration, name, s))
 
     if not candidates:
@@ -2037,7 +2175,12 @@ async def _ensure_awake_slot(requesting_agent: str) -> bool:
     Returns True if a slot is available, False if all slots are busy.
     """
     while _count_awake_agents() >= MAX_AWAKE_AGENTS:
-        log.debug("Awake slots full (%d/%d), attempting eviction for '%s'", _count_awake_agents(), MAX_AWAKE_AGENTS, requesting_agent)
+        log.debug(
+            "Awake slots full (%d/%d), attempting eviction for '%s'",
+            _count_awake_agents(),
+            MAX_AWAKE_AGENTS,
+            requesting_agent,
+        )
         evicted = await _evict_idle_agent(exclude=requesting_agent)
         if not evicted:
             log.warning("Cannot free awake slot for '%s' — all %d slots busy", requesting_agent, MAX_AWAKE_AGENTS)
@@ -2047,6 +2190,7 @@ async def _ensure_awake_slot(requesting_agent: str) -> bool:
 
 class ConcurrencyLimitError(Exception):
     """Raised when the awake-agent concurrency limit is reached and no slots can be freed."""
+
     pass
 
 
@@ -2059,7 +2203,7 @@ async def sleep_agent(session: AgentSession) -> None:
     # Handle flowcoder process (both dedicated flowcoder agents and inline flowcharts)
     if session.flowcoder_process:
         proc = session.flowcoder_process
-        if getattr(proc, 'is_bridge_backed', False) and session.query_lock.locked():
+        if getattr(proc, "is_bridge_backed", False) and session.query_lock.locked():
             await proc.detach()  # mid-execution: bridge buffers
         else:
             await proc.stop()  # idle or direct: kill
@@ -2086,7 +2230,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> 
         model=_get_model(),
         effort="high",
         thinking={"type": "enabled", "budget_tokens": 128000},
-        #betas=["context-1m-2025-08-07"],
+        # betas=["context-1m-2025-08-07"],
         setting_sources=["local"],
         permission_mode="plan" if session.plan_mode else "default",
         can_use_tool=make_cwd_permission_callback(session.cwd, session),
@@ -2164,8 +2308,10 @@ async def wake_agent(session: AgentSession) -> None:
                         session.client = client
                         session.session_id = None
                         if session.name == MASTER_AGENT_NAME:
-                            try: os.remove(MASTER_SESSION_PATH)
-                            except OSError: pass
+                            try:
+                                os.remove(MASTER_SESSION_PATH)
+                            except OSError:
+                                pass
                         log.warning("Agent '%s' woke fresh via bridge (previous context lost)", session.name)
                         if session._log:
                             session._log.info("SESSION_WAKE via bridge (resumed=False, fresh after resume failure)")
@@ -2193,8 +2339,10 @@ async def wake_agent(session: AgentSession) -> None:
                 session.client = client
                 session.session_id = None
                 if session.name == MASTER_AGENT_NAME:
-                    try: os.remove(MASTER_SESSION_PATH)
-                    except OSError: pass
+                    try:
+                        os.remove(MASTER_SESSION_PATH)
+                    except OSError:
+                        pass
                 log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
                 if session._log:
                     session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
@@ -2238,7 +2386,9 @@ def _normalize_channel_name(name: str) -> str:
     return name[:100]  # Discord channel name limit
 
 
-def _build_category_overwrites(guild: discord.Guild) -> dict[discord.Object | discord.Member | discord.Role, discord.PermissionOverwrite]:
+def _build_category_overwrites(
+    guild: discord.Guild,
+) -> dict[discord.Object | discord.Member | discord.Role, discord.PermissionOverwrite]:
     """Build permission overwrites for Axi categories: deny @everyone, allow approved users + bot."""
     overwrites: dict[discord.Object | discord.Member | discord.Role, discord.PermissionOverwrite] = {
         guild.default_role: discord.PermissionOverwrite(
@@ -2372,7 +2522,10 @@ async def reconstruct_agents_from_channels() -> int:
             reconstructed += 1
             log.info(
                 "Reconstructed agent '%s' from #%s (category=%s, session_id=%s)",
-                agent_name, ch.name, cat.name, session_id,
+                agent_name,
+                ch.name,
+                cat.name,
+                session_id,
             )
 
     log.info("Reconstructed %d agent(s) from channels", reconstructed)
@@ -2461,6 +2614,7 @@ async def get_master_channel() -> TextChannel | None:
 
 # --- Message splitting ---
 
+
 def split_message(text: str, limit: int = 2000) -> list[str]:
     """Split text into chunks that fit within Discord's message limit.
     Splits on newline boundaries where possible."""
@@ -2484,8 +2638,15 @@ async def send_long(channel, text: str) -> None:
     caller = "".join(f.name or "?" for f in __import__("traceback").extract_stack(limit=4)[:-1])
     for i, chunk in enumerate(chunks):
         if chunk:
-            log.info("DISCORD_SEND[#%s] chunk %d/%d len=%d caller=%s text=%r",
-                     getattr(channel, 'name', '?'), i+1, len(chunks), len(chunk), caller, chunk[:80])
+            log.info(
+                "DISCORD_SEND[#%s] chunk %d/%d len=%d caller=%s text=%r",
+                getattr(channel, "name", "?"),
+                i + 1,
+                len(chunks),
+                len(chunk),
+                caller,
+                chunk[:80],
+            )
             try:
                 await channel.send(chunk)
             except discord.NotFound:
@@ -2509,6 +2670,7 @@ async def send_system(channel, text: str) -> None:
 
 # --- Rate limit handling ---
 
+
 def _parse_rate_limit_seconds(text: str) -> int:
     """Parse wait duration from rate limit error text. Returns seconds.
 
@@ -2517,28 +2679,28 @@ def _parse_rate_limit_seconds(text: str) -> int:
     text_lower = text.lower()
 
     # "in X seconds/minutes/hours" or "after X seconds/minutes/hours"
-    match = re.search(r'(?:in|after)\s+(\d+)\s*(seconds?|minutes?|mins?|hours?|hrs?)', text_lower)
+    match = re.search(r"(?:in|after)\s+(\d+)\s*(seconds?|minutes?|mins?|hours?|hrs?)", text_lower)
     if match:
         value = int(match.group(1))
         unit = match.group(2)
-        if unit.startswith('min'):
+        if unit.startswith("min"):
             return value * 60
-        elif unit.startswith('hour') or unit.startswith('hr'):
+        elif unit.startswith("hour") or unit.startswith("hr"):
             return value * 3600
         return value
 
     # "retry after X" (seconds implied)
-    match = re.search(r'retry\s+after\s+(\d+)', text_lower)
+    match = re.search(r"retry\s+after\s+(\d+)", text_lower)
     if match:
         return int(match.group(1))
 
     # "X seconds" anywhere
-    match = re.search(r'(\d+)\s*(?:seconds?|secs?)', text_lower)
+    match = re.search(r"(\d+)\s*(?:seconds?|secs?)", text_lower)
     if match:
         return int(match.group(1))
 
     # "X minutes" anywhere
-    match = re.search(r'(\d+)\s*(?:minutes?|mins?)', text_lower)
+    match = re.search(r"(\d+)\s*(?:minutes?|mins?)", text_lower)
     if match:
         return int(match.group(1)) * 60
 
@@ -2565,7 +2727,7 @@ def _is_rate_limited() -> bool:
     global _rate_limited_until
     if _rate_limited_until is None:
         return False
-    if datetime.now(timezone.utc) >= _rate_limited_until:
+    if datetime.now(UTC) >= _rate_limited_until:
         _rate_limited_until = None
         return False
     return True
@@ -2575,7 +2737,7 @@ def _rate_limit_remaining_seconds() -> int:
     """Get remaining rate limit time in seconds."""
     if _rate_limited_until is None:
         return 0
-    remaining = (_rate_limited_until - datetime.now(timezone.utc)).total_seconds()
+    remaining = (_rate_limited_until - datetime.now(UTC)).total_seconds()
     return max(0, int(remaining))
 
 
@@ -2583,7 +2745,7 @@ def _record_session_usage(agent_name: str, msg: ResultMessage) -> None:
     sid = msg.session_id
     if not sid:
         return
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     usage = getattr(msg, "usage", None) or {}
     input_tokens = usage.get("input_tokens", 0)
     output_tokens = usage.get("output_tokens", 0)
@@ -2626,7 +2788,7 @@ def _update_rate_limit_quota(data: dict) -> None:
         return
     rl_type = info.get("rateLimitType", "unknown")
     new_status = info.get("status", "unknown")
-    new_resets_at = datetime.fromtimestamp(resets_at_unix, tz=timezone.utc)
+    new_resets_at = datetime.fromtimestamp(resets_at_unix, tz=UTC)
     new_utilization = info.get("utilization")
 
     # Preserve existing utilization when the new event lacks it and the window hasn't rolled over
@@ -2645,7 +2807,7 @@ def _update_rate_limit_quota(data: dict) -> None:
     # Append to persistent history log (full raw JSON for future analysis)
     try:
         record = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "raw": data,
         }
         with open(RATE_LIMIT_HISTORY_PATH, "a") as f:
@@ -2659,7 +2821,7 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel) ->
     global _rate_limited_until
 
     wait_seconds = _parse_rate_limit_seconds(error_text)
-    new_limit = datetime.now(timezone.utc) + timedelta(seconds=wait_seconds)
+    new_limit = datetime.now(UTC) + timedelta(seconds=wait_seconds)
     already_limited = _is_rate_limited()
 
     # Update expiry (extend if needed)
@@ -2667,7 +2829,9 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel) ->
         _rate_limited_until = new_limit
 
     log.warning("Rate limited — waiting %ds (until %s)", wait_seconds, _rate_limited_until.isoformat())
-    log.debug("Rate limit set: duration=%ds, already_limited=%s, agent='%s'", wait_seconds, already_limited, session.name)
+    log.debug(
+        "Rate limit set: duration=%ds, already_limited=%s, agent='%s'", wait_seconds, already_limited, session.name
+    )
 
     # Only notify if this is a new rate limit (avoid spam if already limited)
     if not already_limited:
@@ -2683,13 +2847,11 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel) ->
                 parts.append(f"{rl_type}: {pct}")
             quota_lines = "\nUtilization: " + " · ".join(parts)
 
-        msg_text = (
-            f"⚠️ **Rate limited by Claude API.** Resets in ~**{remaining}** (at {reset_time}).{quota_lines}"
-        )
+        msg_text = f"⚠️ **Rate limited by Claude API.** Resets in ~**{remaining}** (at {reset_time}).{quota_lines}"
 
         # Notify ALL active agent channels, not just the one that triggered it
         notified_channels = set()
-        for name, agent_session in agents.items():
+        for _name, agent_session in agents.items():
             if not agent_session.discord_channel_id:
                 continue
             ch = bot.get_channel(agent_session.discord_channel_id)
@@ -2720,6 +2882,7 @@ async def _notify_rate_limit_expired(delay: float) -> None:
 
 # --- Streaming response ---
 
+
 async def _receive_response_safe(session: AgentSession):
     """Wrapper around receive_messages() that handles unknown message types.
 
@@ -2739,8 +2902,12 @@ async def _receive_response_safe(session: AgentSession):
                     session._log.info("RATE_LIMIT_EVENT: %s", json.dumps(data)[:500])
                 _update_rate_limit_quota(data)
             else:
-                log.warning("Unknown SDK message type from '%s': type=%s data=%s",
-                            session.name, msg_type, json.dumps(data)[:500])
+                log.warning(
+                    "Unknown SDK message type from '%s': type=%s data=%s",
+                    session.name,
+                    msg_type,
+                    json.dumps(data)[:500],
+                )
                 if session._log:
                     session._log.warning("UNKNOWN_MSG: type=%s data=%s", msg_type, json.dumps(data)[:500])
                 preview = json.dumps(data)[:400]
@@ -2756,7 +2923,7 @@ async def _receive_response_safe(session: AgentSession):
 def _update_activity(session: AgentSession, event: dict) -> None:
     """Update the agent's activity state from a raw Anthropic stream event."""
     activity = session.activity
-    activity.last_event = datetime.now(timezone.utc)
+    activity.last_event = datetime.now(UTC)
     event_type = event.get("type", "")
 
     if event_type == "content_block_start":
@@ -2821,7 +2988,7 @@ def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
         elif tool_name == "Grep":
             return f'grep "{data.get("pattern", "")}" {data.get("path", ".")}'[:100]
         elif tool_name == "Glob":
-            return f'{data.get("pattern", "")}'[:100]
+            return f"{data.get('pattern', '')}"[:100]
     except (json.JSONDecodeError, TypeError):
         # Partial JSON — try simple extraction
         if tool_name == "Bash":
@@ -2835,7 +3002,9 @@ def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
     return None
 
 
-async def _query_agent(session: AgentSession, content: str | list, channel, *, show_awaiting_input: bool = True) -> None:
+async def _query_agent(
+    session: AgentSession, content: str | list, channel, *, show_awaiting_input: bool = True
+) -> None:
     """Send a message to an agent and stream the response.
 
     Appends record-tracking instruction for eligible agents and enqueues updates.
@@ -2880,8 +3049,11 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
     """
 
     stream_id = _next_stream_id(session.name)
-    log.info("STREAM_START[%s] caller=%s", stream_id,
-             "".join(f.name or "?" for f in __import__("traceback").extract_stack(limit=4)[:-1]))
+    log.info(
+        "STREAM_START[%s] caller=%s",
+        stream_id,
+        "".join(f.name or "?" for f in __import__("traceback").extract_stack(limit=4)[:-1]),
+    )
 
     text_buffer = ""
     hit_rate_limit = False
@@ -2896,8 +3068,14 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
         if not text.strip():
             return
         _flush_count += 1
-        log.info("FLUSH[%s] #%d reason=%s len=%d text=%r",
-                 session.name, _flush_count, reason, len(text.strip()), text.strip()[:120])
+        log.info(
+            "FLUSH[%s] #%d reason=%s len=%d text=%r",
+            session.name,
+            _flush_count,
+            reason,
+            len(text.strip()),
+            text.strip()[:120],
+        )
         await send_long(channel, text.lstrip())
 
     def stop_typing() -> None:
@@ -2913,7 +3091,9 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
             _msg_seq += 1
             _msg_total += 1
             if session._log:
-                session._log.debug("MSG_SEQ[%s][%d] type=%s buf_len=%d", stream_id, _msg_seq, type(msg).__name__, len(text_buffer))
+                session._log.debug(
+                    "MSG_SEQ[%s][%d] type=%s buf_len=%d", stream_id, _msg_seq, type(msg).__name__, len(text_buffer)
+                )
 
             # Drain and send any stderr messages first
             for stderr_msg in drain_stderr(session):
@@ -2967,8 +3147,9 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                             session._log.debug("STREAM: %s delta=%s", event_type, delta_type)
                     elif event_type in ("content_block_start", "content_block_stop"):
                         block = event.get("content_block", {})
-                        session._log.debug("STREAM: %s type=%s index=%s",
-                                           event_type, block.get("type", "?"), event.get("index"))
+                        session._log.debug(
+                            "STREAM: %s type=%s index=%s", event_type, block.get("type", "?"), event.get("index")
+                        )
                     elif event_type == "message_start":
                         msg_data = event.get("message", {})
                         session._log.debug("STREAM: message_start model=%s", msg_data.get("model", "?"))
@@ -3002,7 +3183,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
             elif isinstance(msg, AssistantMessage):
                 if msg.error in ("rate_limit", "billing_error"):
                     error_text = text_buffer
-                    for block in (msg.content or []):
+                    for block in msg.content or []:
                         if hasattr(block, "text"):
                             error_text += " " + block.text
                     log.warning("Agent '%s' hit %s error: %s", session.name, msg.error, error_text[:200])
@@ -3012,7 +3193,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                     hit_rate_limit = True
                 elif msg.error:
                     error_text = text_buffer
-                    for block in (msg.content or []):
+                    for block in msg.content or []:
                         if hasattr(block, "text"):
                             error_text += " " + block.text
                     log.warning("Agent '%s' hit API error (%s): %s", session.name, msg.error, error_text[:200])
@@ -3030,12 +3211,15 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
 
                 # Log assistant response content to per-agent log
                 if session._log:
-                    for block in (msg.content or []):
+                    for block in msg.content or []:
                         if hasattr(block, "text"):
                             session._log.info("ASSISTANT: %s", block.text[:2000])
                         elif hasattr(block, "type") and block.type == "tool_use":
-                            session._log.info("TOOL_USE: %s(%s)", block.name,
-                                              json.dumps(block.input)[:500] if hasattr(block, "input") else "")
+                            session._log.info(
+                                "TOOL_USE: %s(%s)",
+                                block.name,
+                                json.dumps(block.input)[:500] if hasattr(block, "input") else "",
+                            )
 
             elif isinstance(msg, ResultMessage):
                 stop_typing()
@@ -3044,20 +3228,25 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                     await flush_text(text_buffer, "result_msg")
                 text_buffer = ""
                 if session._log:
-                    session._log.info("RESULT: cost=$%s turns=%d duration=%dms session=%s",
-                                      msg.total_cost_usd, msg.num_turns, msg.duration_ms, msg.session_id)
+                    session._log.info(
+                        "RESULT: cost=$%s turns=%d duration=%dms session=%s",
+                        msg.total_cost_usd,
+                        msg.num_turns,
+                        msg.duration_ms,
+                        msg.session_id,
+                    )
                 _record_session_usage(session.name, msg)
 
             elif isinstance(msg, SystemMessage):
                 if session._log:
-                    session._log.debug("SYSTEM_MSG: subtype=%s data=%s",
-                                       msg.subtype, json.dumps(msg.data)[:500])
+                    session._log.debug("SYSTEM_MSG: subtype=%s data=%s", msg.subtype, json.dumps(msg.data)[:500])
                 if msg.subtype == "compact_boundary":
                     metadata = msg.data.get("compact_metadata", {})
                     trigger = metadata.get("trigger", "unknown")
                     pre_tokens = metadata.get("pre_tokens")
-                    log.info("Agent '%s' context compacted: trigger=%s pre_tokens=%s",
-                             session.name, trigger, pre_tokens)
+                    log.info(
+                        "Agent '%s' context compacted: trigger=%s pre_tokens=%s", session.name, trigger, pre_tokens
+                    )
                     token_info = f" ({pre_tokens:,} tokens)" if pre_tokens else ""
                     await channel.send(f"🔄 Context compacted{token_info}")
 
@@ -3087,8 +3276,13 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
         return None
 
     if hit_transient_error:
-        log.info("STREAM_END[%s] result=transient_error(%s) msgs=%d flushes=%d",
-                 stream_id, hit_transient_error, _msg_total, _flush_count)
+        log.info(
+            "STREAM_END[%s] result=transient_error(%s) msgs=%d flushes=%d",
+            stream_id,
+            hit_transient_error,
+            _msg_total,
+            _flush_count,
+        )
         return hit_transient_error
 
     await flush_text(text_buffer, "post_loop")
@@ -3118,7 +3312,11 @@ async def _stream_with_retry(session: AgentSession, channel) -> bool:
         delay = API_ERROR_BASE_DELAY * (2 ** (attempt - 2))
         log.warning(
             "Agent '%s' transient error '%s', retrying in %ds (attempt %d/%d)",
-            session.name, error, delay, attempt, API_ERROR_MAX_RETRIES,
+            session.name,
+            error,
+            delay,
+            attempt,
+            API_ERROR_MAX_RETRIES,
         )
         await channel.send(
             f"\u26a0\ufe0f API error, retrying in {delay}s... (attempt {attempt}/{API_ERROR_MAX_RETRIES})"
@@ -3137,11 +3335,10 @@ async def _stream_with_retry(session: AgentSession, channel) -> bool:
 
     log.error(
         "Agent '%s' transient error persisted after %d retries",
-        session.name, API_ERROR_MAX_RETRIES,
+        session.name,
+        API_ERROR_MAX_RETRIES,
     )
-    await channel.send(
-        f"\u274c API error persisted after {API_ERROR_MAX_RETRIES} retries. Try again later."
-    )
+    await channel.send(f"\u274c API error persisted after {API_ERROR_MAX_RETRIES} retries. Try again later.")
     return False
 
 
@@ -3166,7 +3363,7 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
                 if isinstance(msg, ResultMessage):
                     await _set_session_id(session, msg, channel=channel)
                     break
-        session.last_activity = datetime.now(timezone.utc)
+        session.last_activity = datetime.now(UTC)
         await send_system(
             channel,
             f"Agent **{session.name}** timed out and was interrupted. Context preserved.",
@@ -3277,8 +3474,13 @@ async def reclaim_agent_name(name: str) -> None:
 
 
 async def spawn_agent(
-    name: str, cwd: str, initial_prompt: str, resume: str | None = None,
-    agent_type: str = "claude_code", command: str = "", command_args: str = "",
+    name: str,
+    cwd: str,
+    initial_prompt: str,
+    resume: str | None = None,
+    agent_type: str = "claude_code",
+    command: str = "",
+    command_args: str = "",
     packs: list[str] | None = None,
 ) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
@@ -3369,7 +3571,7 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
         return
 
     # Prepend UTC timestamp for LLM temporal awareness
-    ts_prefix = datetime.now(timezone.utc).strftime("[%Y-%m-%d %H:%M:%S UTC] ")
+    ts_prefix = datetime.now(UTC).strftime("[%Y-%m-%d %H:%M:%S UTC] ")
     prompt = ts_prefix + prompt
 
     asyncio.create_task(_run_initial_prompt(session, prompt, channel))
@@ -3380,8 +3582,8 @@ async def _run_flowcoder(session: AgentSession, channel: TextChannel) -> None:
     log.info("Starting flowcoder agent '%s' (channel=%s)", session.name, channel.id)
     try:
         async with session.query_lock:
-            session.last_activity = datetime.now(timezone.utc)
-            session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+            session.last_activity = datetime.now(UTC)
+            session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
 
             cmd_display = session.flowcoder_command
             if session.flowcoder_args:
@@ -3408,7 +3610,7 @@ async def _run_flowcoder(session: AgentSession, channel: TextChannel) -> None:
             try:
                 await _stream_flowcoder_to_channel(session, channel)
             except asyncio.CancelledError:
-                if getattr(proc, 'is_bridge_backed', False):
+                if getattr(proc, "is_bridge_backed", False):
                     await proc.detach()
                     session.flowcoder_process = None
                     session.activity = ActivityState(phase="idle")
@@ -3436,8 +3638,8 @@ async def _run_flowcoder(session: AgentSession, channel: TextChannel) -> None:
 async def _run_inline_flowchart(session: AgentSession, channel, command: str, args: str) -> None:
     """Run a flowchart command inline in an agent's channel."""
     async with session.query_lock:
-        session.last_activity = datetime.now(timezone.utc)
-        session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+        session.last_activity = datetime.now(UTC)
+        session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
 
         cmd_display = command + (f" {args}" if args else "")
         await send_system(channel, f"Running flowchart: `{cmd_display}`")
@@ -3446,7 +3648,9 @@ async def _run_inline_flowchart(session: AgentSession, channel, command: str, ar
             proc = BridgeFlowcoderProcess(
                 bridge_name=f"{session.name}:flowcoder",
                 conn=bridge_conn,
-                command=command, args=args, cwd=session.cwd,
+                command=command,
+                args=args,
+                cwd=session.cwd,
             )
         else:
             proc = FlowcoderProcess(command=command, args=args, cwd=session.cwd)
@@ -3456,7 +3660,7 @@ async def _run_inline_flowchart(session: AgentSession, channel, command: str, ar
         try:
             await _stream_flowcoder_to_channel(session, channel)
         except asyncio.CancelledError:
-            if getattr(proc, 'is_bridge_backed', False):
+            if getattr(proc, "is_bridge_backed", False):
                 await proc.detach()
                 session.flowcoder_process = None
                 session.activity = ActivityState(phase="idle")
@@ -3497,7 +3701,7 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
                 await send_long(channel, text)
 
     async for msg in proc.messages():
-        session.last_activity = datetime.now(timezone.utc)
+        session.last_activity = datetime.now(UTC)
         msg_type = msg.get("type", "")
         msg_subtype = msg.get("subtype", "")
 
@@ -3618,8 +3822,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
                     awake = _count_awake_agents()
                     await send_system(
                         channel,
-                        f"⏳ All {awake} agent slots are busy. "
-                        f"Initial prompt queued — will run when a slot opens.",
+                        f"⏳ All {awake} agent slots are busy. Initial prompt queued — will run when a slot opens.",
                     )
                     return
                 except Exception:
@@ -3627,7 +3830,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
                     await send_system(channel, f"Failed to wake agent **{session.name}**.")
                     return
 
-            session.last_activity = datetime.now(timezone.utc)
+            session.last_activity = datetime.now(UTC)
             drain_stderr(session)
             drain_sdk_buffer(session)
 
@@ -3638,11 +3841,11 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
             if session._log:
                 session._log.info("PROMPT: %s", _content_summary(prompt))
             log.info("INITIAL_PROMPT[%s] running initial prompt: %s", session.name, _content_summary(prompt))
-            session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+            session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
             try:
                 # Handler's process_message already handles timeout and streaming
                 await session.process_message(prompt, channel)
-                session.last_activity = datetime.now(timezone.utc)
+                session.last_activity = datetime.now(UTC)
             except RuntimeError as e:
                 # Agent-specific error from handler
                 log.warning("Handler error for '%s' initial prompt: %s", session.name, e)
@@ -3701,9 +3904,7 @@ async def _process_message_queue(session: AgentSession) -> None:
                     await session.wake()
                     await _post_model_warning(session)
                 except Exception:
-                    log.exception(
-                        "Failed to wake agent '%s' for queued message", session.name
-                    )
+                    log.exception("Failed to wake agent '%s' for queued message", session.name)
                     await _add_reaction(orig_message, "❌")
                     await send_system(
                         channel,
@@ -3720,12 +3921,10 @@ async def _process_message_queue(session: AgentSession) -> None:
                         )
                     return
 
-            session.last_activity = datetime.now(timezone.utc)
+            session.last_activity = datetime.now(UTC)
             session.last_idle_notified = None
             session.idle_reminder_count = 0
-            session.activity = ActivityState(
-                phase="starting", query_started=datetime.now(timezone.utc)
-            )
+            session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
             try:
                 await session.process_message(content, channel)
                 await _add_reaction(orig_message, "✅")
@@ -3741,9 +3940,7 @@ async def _process_message_queue(session: AgentSession) -> None:
                 await _add_reaction(orig_message, "❌")
                 await send_system(channel, str(e))
             except Exception:
-                log.exception(
-                    "Error processing queued message for '%s'", session.name
-                )
+                log.exception("Error processing queued message for '%s'", session.name)
                 await _add_reaction(orig_message, "❌")
                 await send_system(
                     channel,
@@ -3751,7 +3948,6 @@ async def _process_message_queue(session: AgentSession) -> None:
                 )
             finally:
                 session.activity = ActivityState(phase="idle")
-
 
 
 # --- Graceful shutdown (delegated to shutdown.py) ---
@@ -3832,7 +4028,9 @@ async def _connect_bridge() -> None:
         buffered = info.get("buffered_msgs", 0)
         log.info(
             "Reconnecting agent '%s' (status=%s, buffered=%d)",
-            agent_name, status, buffered,
+            agent_name,
+            status,
+            buffered,
         )
 
         # Mark as reconnecting to prevent on_message from waking a new CLI
@@ -3871,7 +4069,10 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
             cli_idle = sub_result.idle if sub_result.idle is not None else True
             log.info(
                 "Subscribed to '%s' (replayed=%d, status=%s, idle=%s)",
-                session.name, replayed, cli_status, cli_idle,
+                session.name,
+                replayed,
+                cli_status,
+                cli_idle,
             )
 
             # Build minimal options for reconnecting (no model/thinking needed — CLI already running)
@@ -3889,11 +4090,13 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
             client = ClaudeSDKClient(options=options, transport=transport)
             await client.__aenter__()
             session.client = client
-            session.last_activity = datetime.now(timezone.utc)
+            session.last_activity = datetime.now(UTC)
 
             if session._log:
                 session._log.info(
-                    "SESSION_RECONNECT via bridge (replayed=%d, idle=%s)", replayed, cli_idle,
+                    "SESSION_RECONNECT via bridge (replayed=%d, idle=%s)",
+                    replayed,
+                    cli_idle,
                 )
 
             # If the CLI already exited while we were down, note it
@@ -3923,12 +4126,14 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict) -> None
                     except Exception:
                         log.exception("Error draining buffered output for '%s'", session.name)
                     session._bridge_busy = False
-                    session.last_activity = datetime.now(timezone.utc)
+                    session.last_activity = datetime.now(UTC)
                 elif channel:
                     await send_system(channel, "*(reconnected after restart — task still running)*")
                 log.info(
                     "Agent '%s' reconnected mid-task (idle=False, replayed=%d, bridge_busy=%s)",
-                    session.name, replayed, session._bridge_busy,
+                    session.name,
+                    replayed,
+                    session._bridge_busy,
                 )
             elif cli_status == "running":
                 # Agent is idle (between turns) — no drain needed, no special protection
@@ -3971,7 +4176,9 @@ async def _reconnect_flowcoder(session: AgentSession, bridge_name: str, bridge_i
             replayed = sub_result.replayed or 0
             log.info(
                 "Flowcoder '%s' subscribed (replayed=%d, status=%s)",
-                bridge_name, replayed, sub_result.status,
+                bridge_name,
+                replayed,
+                sub_result.status,
             )
 
             channel = await get_agent_channel(session.name)
@@ -4017,7 +4224,7 @@ def _init_shutdown_coordinator() -> None:
     async def _send_goodbye() -> None:
         # Detach all bridge-backed flowcoder processes so they survive restart
         for s in agents.values():
-            if s.flowcoder_process and getattr(s.flowcoder_process, 'is_bridge_backed', False):
+            if s.flowcoder_process and getattr(s.flowcoder_process, "is_bridge_backed", False):
                 await s.flowcoder_process.detach()
                 log.info("Detached bridge flowcoder for '%s' before shutdown", s.name)
                 s.flowcoder_process = None
@@ -4041,6 +4248,7 @@ def _init_shutdown_coordinator() -> None:
 # --- Message handler ---
 
 _seen_message_ids: set[int] = set()  # dedup guard for Discord duplicate delivery
+
 
 @bot.event
 async def on_message(message):
@@ -4132,16 +4340,20 @@ async def on_message(message):
             await _add_reaction(message, "✅")
             await send_system(message.channel, "Plan approved — agent resuming implementation.")
         elif text in ("reject", "rejected", "no", "n", "cancel", "stop"):
-            session.plan_approval_future.set_result({"approved": False, "message": "User rejected the plan. Please revise."})
+            session.plan_approval_future.set_result(
+                {"approved": False, "message": "User rejected the plan. Please revise."}
+            )
             await _add_reaction(message, "❌")
             await send_system(message.channel, "Plan rejected — agent will revise.")
         else:
             # Treat any other message as feedback for revision
             feedback = content if isinstance(content, str) else str(content)
-            session.plan_approval_future.set_result({
-                "approved": False,
-                "message": f"User wants changes to the plan: {feedback}",
-            })
+            session.plan_approval_future.set_result(
+                {
+                    "approved": False,
+                    "message": f"User wants changes to the plan: {feedback}",
+                }
+            )
             await _add_reaction(message, "📝")
             await send_system(message.channel, "Feedback received — agent will revise the plan.")
         return
@@ -4154,9 +4366,15 @@ async def on_message(message):
 
     # --- Backpressure conditions (queue if any apply) ---
     msg_id = message.id
-    log.info("ON_MSG[%s][%s] processing=%s reconnecting=%s queue_size=%d lock_locked=%s",
-             agent_name, msg_id, session.is_processing(), session._reconnecting,
-             session.message_queue.qsize(), session.query_lock.locked())
+    log.info(
+        "ON_MSG[%s][%s] processing=%s reconnecting=%s queue_size=%d lock_locked=%s",
+        agent_name,
+        msg_id,
+        session.is_processing(),
+        session._reconnecting,
+        session.message_queue.qsize(),
+        session.query_lock.locked(),
+    )
 
     # 1. Reconnecting: queue messages
     if session._reconnecting:
@@ -4189,14 +4407,11 @@ async def on_message(message):
     if session.is_processing():
         session.message_queue.append((content, message.channel, message))
         position = len(session.message_queue)
-        log.debug(
-            "Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position
-        )
+        log.debug("Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position)
         await _add_reaction(message, "📨")
         await send_system(
             message.channel,
-            f"Agent **{agent_name}** is busy — message queued (position {position}). "
-            f"Will process after current turn.",
+            f"Agent **{agent_name}** is busy — message queued (position {position}). Will process after current turn.",
         )
         return
 
@@ -4212,9 +4427,7 @@ async def on_message(message):
 
         # Process the message
         log.info("ON_MSG[%s][%s] calling process_message", agent_name, msg_id)
-        session.activity = ActivityState(
-            phase="starting", query_started=datetime.now(timezone.utc)
-        )
+        session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
 
         try:
             await session.process_message(content, message.channel)
@@ -4233,8 +4446,7 @@ async def on_message(message):
             await _add_reaction(message, "❌")
             await send_system(
                 message.channel,
-                f"Error communicating with agent **{agent_name}**. "
-                f"Try `/kill-agent {agent_name}` and respawn.",
+                f"Error communicating with agent **{agent_name}**. Try `/kill-agent {agent_name}` and respawn.",
             )
         finally:
             session.activity = ActivityState(phase="idle")
@@ -4249,6 +4461,7 @@ async def on_message(message):
 
 # --- Scheduler loop ---
 
+
 @tasks.loop(seconds=10)
 async def check_schedules():
     # If shutdown is in progress, skip all scheduled work
@@ -4258,7 +4471,7 @@ async def check_schedules():
     prune_history()
     prune_skips()
 
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     now_local = datetime.now(SCHEDULE_TIMEZONE)
     entries = load_schedules()
     fired_one_off_keys: set[str] = set()  # schedule_key values for fired one-offs
@@ -4364,7 +4577,7 @@ async def check_schedules():
             continue  # All reminders already sent
 
         # Cumulative threshold: sum of thresholds up to current reminder count
-        cumulative = sum(IDLE_REMINDER_THRESHOLDS[:session.idle_reminder_count + 1], timedelta())
+        cumulative = sum(IDLE_REMINDER_THRESHOLDS[: session.idle_reminder_count + 1], timedelta())
         idle_duration = now_utc - session.last_activity
 
         if idle_duration > cumulative:
@@ -4377,8 +4590,7 @@ async def check_schedules():
         if agent_ch:
             await send_system(
                 agent_ch,
-                f"Agent **{agent_name}** has been idle for {idle_minutes} minutes. "
-                f"Use `/kill-agent` to terminate.",
+                f"Agent **{agent_name}** has been idle for {idle_minutes} minutes. Use `/kill-agent` to terminate.",
             )
         # Only notify master channel on the final threshold (48h) to reduce noise
         is_final_threshold = session.idle_reminder_count + 1 >= len(IDLE_REMINDER_THRESHOLDS)
@@ -4389,16 +4601,14 @@ async def check_schedules():
                 f"(cwd: `{session.cwd}`). Use `/kill-agent` to terminate.",
             )
         session.idle_reminder_count += 1
-        session.last_idle_notified = datetime.now(timezone.utc)
+        session.last_idle_notified = datetime.now(UTC)
 
     # --- Stranded-message safety net ---
     # Catch any messages stranded by the tiny race between queue-empty check and sleep.
     # Only attempt if there's an awake slot available to avoid re-queuing loops.
     if _count_awake_agents() < MAX_AWAKE_AGENTS:
         for agent_name, session in agents.items():
-            if (session.client is None
-                    and session.message_queue
-                    and not session.query_lock.locked()):
+            if session.client is None and session.message_queue and not session.query_lock.locked():
                 content, ch, stranded_msg = session.message_queue.popleft()
                 log.info("Stranded message found for sleeping agent '%s', waking", agent_name)
                 await _remove_reaction(stranded_msg, "📨")
@@ -4422,8 +4632,12 @@ async def check_schedules():
             continue  # Reconnected to running CLI — task still in progress
         idle_duration = now_utc - session.last_activity
         if idle_duration > idle_threshold:
-            log.info("Auto-sleeping idle agent '%s' (idle %.0fs, pressure=%s)",
-                     agent_name, idle_duration.total_seconds(), under_pressure)
+            log.info(
+                "Auto-sleeping idle agent '%s' (idle %.0fs, pressure=%s)",
+                agent_name,
+                idle_duration.total_seconds(),
+                under_pressure,
+            )
             try:
                 await sleep_agent(session)
             except Exception:
@@ -4437,22 +4651,19 @@ async def before_check_schedules():
 
 # --- Slash commands ---
 
+
 async def killable_agent_autocomplete(interaction, current: str) -> list[app_commands.Choice[str]]:
     """Autocomplete callback excluding axi-master."""
     return [
         app_commands.Choice(name=name, value=name)
-        for name in agents.keys()
+        for name in agents
         if name != MASTER_AGENT_NAME and current.lower() in name.lower()
     ][:25]
 
 
 async def agent_autocomplete(interaction, current: str) -> list[app_commands.Choice[str]]:
     """Autocomplete callback for agent name parameters (all agents)."""
-    return [
-        app_commands.Choice(name=name, value=name)
-        for name in agents.keys()
-        if current.lower() in name.lower()
-    ][:25]
+    return [app_commands.Choice(name=name, value=name) for name in agents if current.lower() in name.lower()][:25]
 
 
 @bot.tree.command(name="ping", description="Check bot latency and uptime.")
@@ -4468,7 +4679,7 @@ async def ping_command(interaction: discord.Interaction):
 
     # Bot uptime
     if _bot_start_time is not None:
-        bot_uptime = datetime.now(timezone.utc) - _bot_start_time
+        bot_uptime = datetime.now(UTC) - _bot_start_time
         bot_str = _fmt_uptime(int(bot_uptime.total_seconds()))
     else:
         bot_str = "initializing"
@@ -4505,7 +4716,7 @@ async def claude_usage_command(interaction: discord.Interaction, history: int | 
         count = max(1, min(history, 50))  # clamp 1-50
         lines = [f"**Rate Limit History** (last {count} events)", ""]
         try:
-            with open(RATE_LIMIT_HISTORY_PATH, "r") as f:
+            with open(RATE_LIMIT_HISTORY_PATH) as f:
                 all_lines = f.readlines()
             recent = all_lines[-count:]
             if not recent:
@@ -4541,7 +4752,9 @@ async def claude_usage_command(interaction: discord.Interaction, history: int | 
 
     if _session_usage:
         # Group by agent name, show each session
-        for sid, usage in sorted(_session_usage.items(), key=lambda x: x[1].last_query or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+        for sid, usage in sorted(
+            _session_usage.items(), key=lambda x: x[1].last_query or datetime.min.replace(tzinfo=UTC), reverse=True
+        ):
             total_cost += usage.total_cost_usd
             total_queries += usage.queries
 
@@ -4550,7 +4763,7 @@ async def claude_usage_command(interaction: discord.Interaction, history: int | 
 
             active_str = ""
             if usage.first_query:
-                age_s = int((datetime.now(timezone.utc) - usage.first_query).total_seconds())
+                age_s = int((datetime.now(UTC) - usage.first_query).total_seconds())
                 active_str = f" | Active since {_format_time_remaining(age_s)} ago"
 
             token_str = ""
@@ -4558,7 +4771,9 @@ async def claude_usage_command(interaction: discord.Interaction, history: int | 
                 token_str = f" | Tokens: {usage.total_input_tokens:,}in / {usage.total_output_tokens:,}out"
 
             lines.append(f"**{usage.agent_name}** (`{sid[:8]}`)")
-            lines.append(f"  Cost: **${usage.total_cost_usd:.2f}** | Queries: {usage.queries} | Turns: {usage.total_turns}{token_str}")
+            lines.append(
+                f"  Cost: **${usage.total_cost_usd:.2f}** | Queries: {usage.queries} | Turns: {usage.total_turns}{token_str}"
+            )
             lines.append(f"  API time: {duration_str}{active_str}")
             lines.append("")
 
@@ -4570,7 +4785,7 @@ async def claude_usage_command(interaction: discord.Interaction, history: int | 
 
     # Rate limit section
     if _rate_limit_quotas:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         lines.append("**Rate Limits**")
 
         # Display order: five_hour first, then seven_day, then any others
@@ -4652,7 +4867,7 @@ async def list_agents(interaction):
         await interaction.response.send_message("No active agents.", ephemeral=True)
         return
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     lines = []
     for name, session in agents.items():
         idle_minutes = int((now - session.last_activity).total_seconds() / 60)
@@ -4701,19 +4916,15 @@ async def agent_status(interaction, agent_name: str | None = None):
 
     session = agents.get(agent_name)
     if session is None:
-        await interaction.response.send_message(
-            f"Agent **{agent_name}** not found.", ephemeral=True
-        )
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
         return
 
-    await interaction.response.send_message(
-        _format_agent_status(agent_name, session), ephemeral=True
-    )
+    await interaction.response.send_message(_format_agent_status(agent_name, session), ephemeral=True)
 
 
 def _format_agent_status(name: str, session: AgentSession) -> str:
     """Format a detailed status message for a single agent."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     lines = [f"**{name}**"]
 
     # Flowcoder-specific status
@@ -4818,7 +5029,7 @@ async def _show_all_agents_status(interaction):
         await interaction.response.send_message("No active agents.", ephemeral=True)
         return
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     lines = []
     for name, session in agents.items():
         if session.client is None:
@@ -4856,9 +5067,7 @@ async def _show_all_agents_status(interaction):
         remaining = _format_time_remaining(_rate_limit_remaining_seconds())
         header += f" | rate limited (~{remaining})"
 
-    await interaction.response.send_message(
-        f"*System:* {header}\n" + "\n".join(lines), ephemeral=True
-    )
+    await interaction.response.send_message(f"*System:* {header}\n" + "\n".join(lines), ephemeral=True)
 
 
 @bot.tree.command(name="debug", description="Toggle debug output (tool calls, thinking) for an agent.")
@@ -4886,7 +5095,9 @@ async def debug_command(interaction: discord.Interaction, mode: str | None = Non
         elif mode_lower == "off":
             session.debug = False
         else:
-            await interaction.response.send_message("Usage: `/debug` (toggle), `/debug on`, `/debug off`", ephemeral=True)
+            await interaction.response.send_message(
+                "Usage: `/debug` (toggle), `/debug on`, `/debug off`", ephemeral=True
+            )
             return
     else:
         session.debug = not session.debug
@@ -4913,15 +5124,11 @@ async def kill_agent(interaction, agent_name: str | None = None):
             return
 
     if agent_name == MASTER_AGENT_NAME:
-        await interaction.response.send_message(
-            "Cannot kill the axi-master session.", ephemeral=True
-        )
+        await interaction.response.send_message("Cannot kill the axi-master session.", ephemeral=True)
         return
 
     if agent_name not in agents:
-        await interaction.response.send_message(
-            f"Agent **{agent_name}** not found.", ephemeral=True
-        )
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
         return
 
     await interaction.response.defer()
@@ -4934,8 +5141,7 @@ async def kill_agent(interaction, agent_name: str | None = None):
         if session_id:
             await send_system(
                 agent_ch,
-                f"Agent **{agent_name}** moved to Killed.\n"
-                f"Session ID: `{session_id}` — use this to resume later.",
+                f"Agent **{agent_name}** moved to Killed.\nSession ID: `{session_id}` — use this to resume later.",
             )
         else:
             await send_system(agent_ch, f"Agent **{agent_name}** moved to Killed.")
@@ -4947,8 +5153,7 @@ async def kill_agent(interaction, agent_name: str | None = None):
 
     if session_id:
         await interaction.followup.send(
-            f"*System:* Agent **{agent_name}** moved to Killed.\n"
-            f"Session ID: `{session_id}` — use this to resume later."
+            f"*System:* Agent **{agent_name}** moved to Killed.\nSession ID: `{session_id}` — use this to resume later."
         )
     else:
         await interaction.followup.send(f"*System:* Agent **{agent_name}** moved to Killed.")
@@ -5081,7 +5286,10 @@ async def skip_agent(interaction, agent_name: str | None = None):
         await interaction.followup.send(f"Failed to skip **{agent_name}**: {e}")
 
 
-@bot.tree.command(name="plan", description="Toggle plan mode — agent will plan before implementing. Infers agent from current channel.")
+@bot.tree.command(
+    name="plan",
+    description="Toggle plan mode — agent will plan before implementing. Infers agent from current channel.",
+)
 @app_commands.autocomplete(agent_name=agent_autocomplete)
 async def toggle_plan_mode(interaction, agent_name: str | None = None):
     log.info("Slash command /plan agent=%s from %s", agent_name, interaction.user)
@@ -5132,7 +5340,9 @@ async def toggle_plan_mode(interaction, agent_name: str | None = None):
         )
 
 
-@bot.tree.command(name="reset-context", description="Reset an agent's context. Infers agent from current channel, or specify by name.")
+@bot.tree.command(
+    name="reset-context", description="Reset an agent's context. Infers agent from current channel, or specify by name."
+)
 @app_commands.autocomplete(agent_name=agent_autocomplete)
 async def reset_context(interaction, agent_name: str | None = None, working_dir: str | None = None):
     log.info("Slash command /reset-context agent=%s cwd=%s from %s", agent_name, working_dir, interaction.user)
@@ -5150,16 +5360,12 @@ async def reset_context(interaction, agent_name: str | None = None, working_dir:
             return
 
     if agent_name not in agents:
-        await interaction.response.send_message(
-            f"Agent **{agent_name}** not found.", ephemeral=True
-        )
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
         return
 
     await interaction.response.defer()
     session = await reset_session(agent_name, cwd=working_dir)
-    await interaction.followup.send(
-        f"*System:* Context reset for **{agent_name}**. Working directory: `{session.cwd}`"
-    )
+    await interaction.followup.send(f"*System:* Context reset for **{agent_name}**. Working directory: `{session.cwd}`")
 
 
 async def _handle_text_command(message, session, agent_name):
@@ -5214,11 +5420,11 @@ async def _handle_text_command(message, session, agent_name):
                     await send_system(channel, f"Failed to wake agent **{agent_name}**.")
                     return True
 
-            session.last_activity = datetime.now(timezone.utc)
+            session.last_activity = datetime.now(UTC)
             drain_stderr(session)
             drain_sdk_buffer(session)
 
-            session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+            session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
             try:
                 async with asyncio.timeout(QUERY_TIMEOUT):
                     await session.client.query(_as_stream(command))
@@ -5271,11 +5477,11 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
                 await interaction.followup.send(f"Failed to wake agent **{agent_name}**.")
                 return
 
-        session.last_activity = datetime.now(timezone.utc)
+        session.last_activity = datetime.now(UTC)
         drain_stderr(session)
         drain_sdk_buffer(session)
 
-        session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+        session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
                 channel = bot.get_channel(session.discord_channel_id) or interaction.channel
@@ -5291,7 +5497,9 @@ async def _run_agent_sdk_command(interaction, agent_name: str | None, command: s
             session.activity = ActivityState(phase="idle")
 
 
-@bot.tree.command(name="compact", description="Compact an agent's conversation context. Infers agent from current channel.")
+@bot.tree.command(
+    name="compact", description="Compact an agent's conversation context. Infers agent from current channel."
+)
 @app_commands.autocomplete(agent_name=agent_autocomplete)
 async def compact_context(interaction, agent_name: str | None = None):
     log.info("Slash command /compact agent=%s from %s", agent_name, interaction.user)
@@ -5314,9 +5522,7 @@ async def _run_telos_interview(session: AgentSession, channel) -> None:
         with open(interview_path) as f:
             interview_instructions = f.read()
     except FileNotFoundError:
-        await channel.send(
-            f"*System:* Could not find `telos_interview.md`. Cannot start TELOS interview."
-        )
+        await channel.send("*System:* Could not find `telos_interview.md`. Cannot start TELOS interview.")
         return
     except OSError as e:
         await channel.send(f"*System:* Error reading telos_interview.md: {e}")
@@ -5335,7 +5541,10 @@ async def _run_telos_interview(session: AgentSession, channel) -> None:
     await _stream_with_retry(session, channel)
 
 
-@bot.tree.command(name="telos", description="Start a TELOS identity interview to build your user profile. Infers agent from current channel.")
+@bot.tree.command(
+    name="telos",
+    description="Start a TELOS identity interview to build your user profile. Infers agent from current channel.",
+)
 @app_commands.autocomplete(agent_name=agent_autocomplete)
 async def telos_interview_cmd(interaction: discord.Interaction, agent_name: str | None = None):
     log.info("Slash command /telos agent=%s from %s", agent_name, interaction.user)
@@ -5374,10 +5583,10 @@ async def telos_interview_cmd(interaction: discord.Interaction, agent_name: str 
                 await interaction.followup.send(f"Failed to wake agent **{agent_name}**.")
                 return
 
-        session.last_activity = datetime.now(timezone.utc)
+        session.last_activity = datetime.now(UTC)
         drain_stderr(session)
         drain_sdk_buffer(session)
-        session.activity = ActivityState(phase="starting", query_started=datetime.now(timezone.utc))
+        session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
 
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
@@ -5406,10 +5615,12 @@ def _list_flowchart_commands() -> list[dict]:
         try:
             with open(os.path.join(commands_dir, fname)) as f:
                 data = json.load(f)
-            results.append({
-                "name": data.get("name", fname.removesuffix(".json")),
-                "description": data.get("description", ""),
-            })
+            results.append(
+                {
+                    "name": data.get("name", fname.removesuffix(".json")),
+                    "description": data.get("description", ""),
+                }
+            )
         except Exception:
             results.append({"name": fname.removesuffix(".json"), "description": ""})
     return results
@@ -5448,11 +5659,15 @@ async def flowchart_cmd(interaction: discord.Interaction, name: str, args: str |
         return
 
     if session.query_lock.locked():
-        await interaction.response.send_message(f"Agent **{agent_name}** is busy. Wait for it to finish.", ephemeral=True)
+        await interaction.response.send_message(
+            f"Agent **{agent_name}** is busy. Wait for it to finish.", ephemeral=True
+        )
         return
 
     if session.flowcoder_process and session.flowcoder_process.is_running:
-        await interaction.response.send_message(f"Agent **{agent_name}** already has a flowchart running.", ephemeral=True)
+        await interaction.response.send_message(
+            f"Agent **{agent_name}** already has a flowchart running.", ephemeral=True
+        )
         return
 
     await interaction.response.defer()
@@ -5523,7 +5738,8 @@ async def restart_including_bridge_cmd(interaction, force: bool = False):
     # for the soft restart path. Check it so we don't start a second shutdown.
     if shutdown_coordinator.requested:
         await interaction.response.send_message(
-            "*System:* A restart is already in progress.", ephemeral=True,
+            "*System:* A restart is already in progress.",
+            ephemeral=True,
         )
         return
 
@@ -5566,6 +5782,7 @@ async def restart_including_bridge_cmd(interaction, force: bool = False):
 
 # --- Channel creation listener ---
 
+
 @bot.event
 async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     """Auto-register agent when a user manually creates a channel in the Active category."""
@@ -5604,11 +5821,15 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     except discord.HTTPException as e:
         log.warning("Failed to set topic on #%s: %s", agent_name, e)
 
-    await send_system(channel, f"Agent **{agent_name}** auto-registered from channel creation.\n`cwd: {cwd}`\nSend a message to wake it up.")
+    await send_system(
+        channel,
+        f"Agent **{agent_name}** auto-registered from channel creation.\n`cwd: {cwd}`\nSend a message to wake it up.",
+    )
     log.info("Auto-registered agent '%s' from manual channel creation (cwd=%s)", agent_name, cwd)
 
 
 # --- Readme channel sync ---
+
 
 async def sync_readme_channel() -> None:
     """Sync the readme channel: find or create #readme, lock permissions, update message.
@@ -5633,9 +5854,9 @@ async def sync_readme_channel() -> None:
     # Find or create #readme channel
     channel = None
     for ch in guild.text_channels:
-            if ch.name == "readme" and ch.category is None:
-                channel = ch
-                break
+        if ch.name == "readme" and ch.category is None:
+            channel = ch
+            break
 
     if channel is None:
         # Create it at the top of the channel list, outside any category
@@ -5696,6 +5917,7 @@ async def sync_readme_channel() -> None:
 
 _on_ready_fired = False
 
+
 @bot.event
 async def on_ready():
     global _on_ready_fired
@@ -5710,7 +5932,7 @@ async def on_ready():
     _on_ready_fired = True
 
     global _bot_start_time
-    _bot_start_time = datetime.now(timezone.utc)
+    _bot_start_time = datetime.now(UTC)
 
     # Load master session_id from previous run (if any) for resume
     master_resume_id = None
@@ -5822,22 +6044,16 @@ async def on_ready():
             crashed_commit = rollback_info.get("crashed_commit", "")
 
             msg_lines = [
-                f"*System:* **Automatic rollback performed.**",
+                "*System:* **Automatic rollback performed.**",
                 f"Axi crashed on startup (exit code {exit_code} after {uptime}s) at {timestamp}.",
             ]
             if details:
                 msg_lines.append(f"Actions taken: {details}.")
             if pre_commit and crashed_commit and pre_commit != crashed_commit:
-                msg_lines.append(
-                    f"Reverted from `{crashed_commit[:7]}` to `{pre_commit[:7]}`."
-                )
-                msg_lines.append(
-                    "Reverted commits are still in the reflog: `git reflog`"
-                )
+                msg_lines.append(f"Reverted from `{crashed_commit[:7]}` to `{pre_commit[:7]}`.")
+                msg_lines.append("Reverted commits are still in the reflog: `git reflog`")
             if "stashed" in details:
-                msg_lines.append(
-                    "Stashed changes: `git stash list` / `git stash show -p` / `git stash pop`"
-                )
+                msg_lines.append("Stashed changes: `git stash list` / `git stash show -p` / `git stash pop`")
             if ENABLE_CRASH_HANDLER:
                 msg_lines.append("Spawning crash analysis agent...")
             await master_ch.send("\n".join(msg_lines))
@@ -5946,9 +6162,9 @@ def _handle_task_exception(loop, context):
         log.error("Unhandled exception in async task: %s", context.get("message", ""), exc_info=exception)
         msg_text = context.get("message", "")
         exc_str = f"{type(exception).__name__}: {exception}"
-        loop.create_task(send_to_exceptions(
-            f"🔥 Unhandled exception in async task:\n**{msg_text}**\n```\n{exc_str[:1500]}\n```"
-        ))
+        loop.create_task(
+            send_to_exceptions(f"🔥 Unhandled exception in async task:\n**{msg_text}**\n```\n{exc_str[:1500]}\n```")
+        )
     else:
         log.error("Unhandled async error: %s", context.get("message", ""))
 
@@ -5956,6 +6172,7 @@ def _handle_task_exception(loop, context):
 def _acquire_lock():
     """Acquire an exclusive file lock to prevent duplicate bot instances."""
     import fcntl
+
     lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
     # Open (or create) the lock file — keep the fd open for the process lifetime
     lock_fd = open(lock_path, "w")

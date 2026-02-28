@@ -7,12 +7,13 @@ Usage:
     discord_query.py history <channel> [options]
     discord_query.py search <guild_id> <query> [options]
 """
+
 import argparse
 import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from dotenv import load_dotenv
@@ -123,7 +124,7 @@ def resolve_snowflake(value: str) -> int:
     try:
         dt = datetime.fromisoformat(value)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return datetime_to_snowflake(dt)
     except ValueError:
         print(f"Error: Cannot parse '{value}' as a snowflake ID or ISO datetime.", file=sys.stderr)
@@ -155,15 +156,14 @@ def resolve_channel(client: httpx.Client, channel_arg: str) -> str:
 
     channels = api_get(client, f"/guilds/{guild_id}/channels")
     text_channels = [
-        c for c in channels
+        c
+        for c in channels
         if c["type"] in (0, 5)  # text and announcement
         and c["name"].lower() == channel_name.lower()
     ]
 
     if not text_channels:
-        available = sorted(
-            [c["name"] for c in channels if c["type"] in (0, 5)]
-        )
+        available = sorted([c["name"] for c in channels if c["type"] in (0, 5)])
         print(
             f"Error: No text channel named '{channel_name}' in guild {guild_id}.",
             file=sys.stderr,
@@ -208,15 +208,17 @@ def format_message(msg: dict, fmt: str) -> str:
         return line
 
     # JSONL
-    return json.dumps({
-        "id": msg.get("id"),
-        "ts": ts,
-        "author": author_name,
-        "author_id": author.get("id"),
-        "content": content,
-        "attachments": attachments,
-        "embeds": embeds,
-    })
+    return json.dumps(
+        {
+            "id": msg.get("id"),
+            "ts": ts,
+            "author": author_name,
+            "author_id": author.get("id"),
+            "content": content,
+            "attachments": attachments,
+            "embeds": embeds,
+        }
+    )
 
 
 # --- Subcommands ---
@@ -251,7 +253,7 @@ def cmd_channels(args, client: httpx.Client) -> None:
 
     for ch in text_channels:
         ch_type = "announcement" if ch["type"] == 5 else "text"
-        category = categories.get(ch.get("parent_id"), None)
+        category = categories.get(ch.get("parent_id"))
         entry = {
             "id": str(ch["id"]),
             "name": ch["name"],
@@ -326,9 +328,7 @@ def cmd_search(args, client: httpx.Client) -> None:
     else:
         channels = api_get(client, f"/guilds/{guild_id}/channels")
         channel_ids = [
-            str(c["id"])
-            for c in sorted(channels, key=lambda c: c.get("position", 0))
-            if c["type"] in (0, 5)
+            str(c["id"]) for c in sorted(channels, key=lambda c: c.get("position", 0)) if c["type"] in (0, 5)
         ]
 
     found = 0
@@ -399,7 +399,9 @@ def main():
         help="Channel ID, or guild_id:channel_name (e.g. 123456789:general).",
     )
     p_history.add_argument(
-        "--limit", type=int, default=DEFAULT_LIMIT,
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT,
         help=f"Number of messages to fetch (default {DEFAULT_LIMIT}, max {MAX_LIMIT}).",
     )
     p_history.add_argument(
@@ -411,7 +413,9 @@ def main():
         help="Fetch messages after this point (ISO datetime or snowflake ID).",
     )
     p_history.add_argument(
-        "--format", choices=["jsonl", "text"], default="jsonl",
+        "--format",
+        choices=["jsonl", "text"],
+        default="jsonl",
         help="Output format (default: jsonl).",
     )
 
@@ -428,15 +432,21 @@ def main():
         help="Filter by author username (case-insensitive substring match).",
     )
     p_search.add_argument(
-        "--limit", type=int, default=DEFAULT_LIMIT,
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT,
         help=f"Max results to return (default {DEFAULT_LIMIT}, max {MAX_LIMIT}).",
     )
     p_search.add_argument(
-        "--max-scan", type=int, default=DEFAULT_MAX_SCAN,
+        "--max-scan",
+        type=int,
+        default=DEFAULT_MAX_SCAN,
         help=f"Max messages to scan per channel (default {DEFAULT_MAX_SCAN}).",
     )
     p_search.add_argument(
-        "--format", choices=["jsonl", "text"], default="jsonl",
+        "--format",
+        choices=["jsonl", "text"],
+        default="jsonl",
         help="Output format (default: jsonl).",
     )
 

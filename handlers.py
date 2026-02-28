@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import discord
@@ -84,10 +84,8 @@ class ClaudeCodeHandler(AgentHandler):
 
         # Import here to avoid circular dependency
         from bot import (
-            _make_agent_options,
-            _get_subprocess_pid,
-            _ensure_process_dead,
             _create_transport,
+            _make_agent_options,
         )
 
         options = _make_agent_options(session, session.session_id)
@@ -113,7 +111,7 @@ class ClaudeCodeHandler(AgentHandler):
         log.debug("Sleeping Claude Code agent '%s'", session.name)
 
         # Import here to avoid circular dependency
-        from bot import _get_subprocess_pid, _ensure_process_dead
+        from bot import _ensure_process_dead, _get_subprocess_pid
 
         pid = _get_subprocess_pid(session.client)
         try:
@@ -121,7 +119,7 @@ class ClaudeCodeHandler(AgentHandler):
                 session.client.__aexit__(None, None, None),
                 timeout=5.0,
             )
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             log.warning("'%s' shutdown timed out or cancelled", session.name)
         except Exception:
             log.exception("Error disconnecting agent '%s'", session.name)
@@ -152,16 +150,14 @@ class ClaudeCodeHandler(AgentHandler):
         from bot import (
             QUERY_TIMEOUT,
             _as_stream,
-            drain_stderr,
-            drain_sdk_buffer,
-            _stream_with_retry,
-            _handle_query_timeout,
             _content_summary,
-            send_system,
-            ActivityState,
+            _handle_query_timeout,
+            _stream_with_retry,
+            drain_sdk_buffer,
+            drain_stderr,
         )
 
-        session.last_activity = datetime.now(timezone.utc)
+        session.last_activity = datetime.now(UTC)
         session.last_idle_notified = None
         session.idle_reminder_count = 0
         session._bridge_busy = False
@@ -183,9 +179,7 @@ class ClaudeCodeHandler(AgentHandler):
             await _handle_query_timeout(session, channel)
         except Exception:
             log.exception("Error querying Claude Code agent '%s'", session.name)
-            raise RuntimeError(
-                f"Query failed for agent '{session.name}'"
-            ) from None
+            raise RuntimeError(f"Query failed for agent '{session.name}'") from None
 
 
 class FlowcoderHandler(AgentHandler):
@@ -197,10 +191,7 @@ class FlowcoderHandler(AgentHandler):
 
     def is_processing(self, session: AgentSession) -> bool:
         """Agent is processing if process is running."""
-        return (
-            session.flowcoder_process is not None
-            and session.flowcoder_process.is_running
-        )
+        return session.flowcoder_process is not None and session.flowcoder_process.is_running
 
     async def wake(self, session: AgentSession) -> None:
         """Spawn and start flowcoder process."""
@@ -211,7 +202,7 @@ class FlowcoderHandler(AgentHandler):
 
         # Import here to avoid circular dependency
         from bot import bridge_conn
-        from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
+        from flowcoder import BridgeFlowcoderProcess, FlowcoderProcess
 
         if bridge_conn and bridge_conn.is_alive:
             proc = BridgeFlowcoderProcess(

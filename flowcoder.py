@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 
 # Bridge protocol types — optional import (bridge package may not be available)
 try:
-    from bridge.protocol import StdoutMsg, StderrMsg, ExitMsg
+    from bridge.protocol import ExitMsg, StderrMsg, StdoutMsg
 except ImportError:  # pragma: no cover
     StdoutMsg = StderrMsg = ExitMsg = None  # type: ignore[assignment,misc]
 
@@ -43,7 +43,11 @@ def build_engine_cmd(
         )
         engine_bin = os.path.join(
             flowcoder_home,
-            "packages", "flowcoder-engine", ".venv", "bin", "flowcoder-engine",
+            "packages",
+            "flowcoder-engine",
+            ".venv",
+            "bin",
+            "flowcoder-engine",
         )
 
     flowcoder_home = os.environ.get(
@@ -63,7 +67,8 @@ def build_engine_cmd(
 def build_engine_env() -> dict[str, str]:
     """Build clean env (strip CLAUDECODE/SDK vars)."""
     return {
-        k: v for k, v in os.environ.items()
+        k: v
+        for k, v in os.environ.items()
         if k not in ("CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_ENTRYPOINT")
     }
 
@@ -188,7 +193,7 @@ class FlowcoderProcess:
                 pass
             try:
                 await asyncio.wait_for(self._proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 try:
                     self._proc.kill()
                 except ProcessLookupError:
@@ -258,21 +263,25 @@ class BridgeFlowcoderProcess:
 
         log.info(
             "Starting bridge flowcoder '%s': %s (cwd=%s)",
-            self.bridge_name, " ".join(cmd), self.cwd,
+            self.bridge_name,
+            " ".join(cmd),
+            self.cwd,
         )
 
         # Register queue before spawn so we don't miss early output
         self._queue = self._conn.register_agent(self.bridge_name)
 
         result = await self._conn.send_command(
-            "spawn", name=self.bridge_name, cli_args=cmd, env=env, cwd=self.cwd,
+            "spawn",
+            name=self.bridge_name,
+            cli_args=cmd,
+            env=env,
+            cwd=self.cwd,
         )
         if not result.ok and not result.already_running:
             self._conn.unregister_agent(self.bridge_name)
             self._queue = None
-            raise RuntimeError(
-                f"Bridge spawn failed for '{self.bridge_name}': {result.error}"
-            )
+            raise RuntimeError(f"Bridge spawn failed for '{self.bridge_name}': {result.error}")
 
         sub_result = await self._conn.send_command("subscribe", name=self.bridge_name)
         if not sub_result.ok:
@@ -290,9 +299,7 @@ class BridgeFlowcoderProcess:
         if not result.ok:
             self._conn.unregister_agent(self.bridge_name)
             self._queue = None
-            raise RuntimeError(
-                f"Bridge subscribe failed for '{self.bridge_name}': {result.error}"
-            )
+            raise RuntimeError(f"Bridge subscribe failed for '{self.bridge_name}': {result.error}")
         self._running = True
         return result
 
@@ -322,7 +329,8 @@ class BridgeFlowcoderProcess:
                 self._running = False
                 log.info(
                     "Bridge flowcoder '%s' exited (code=%s)",
-                    self.bridge_name, msg.code,
+                    self.bridge_name,
+                    msg.code,
                 )
                 break
 

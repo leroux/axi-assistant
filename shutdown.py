@@ -21,20 +21,22 @@ import os
 import signal
 import threading
 import time
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
 
 RESTART_EXIT_CODE = 42
-STATUS_INTERVAL = 30          # seconds between "still waiting" messages
-POLL_INTERVAL = 5             # seconds between busy-agent polls
-SHUTDOWN_DEADLINE = 30        # safety deadline for the exit phase (after agents finish)
-BOT_CLOSE_TIMEOUT = 10        # max seconds to wait for bot.close()
+STATUS_INTERVAL = 30  # seconds between "still waiting" messages
+POLL_INTERVAL = 5  # seconds between busy-agent polls
+SHUTDOWN_DEADLINE = 30  # safety deadline for the exit phase (after agents finish)
+BOT_CLOSE_TIMEOUT = 10  # max seconds to wait for bot.close()
 
 
 # ---------------------------------------------------------------------------
 # Protocols — the coordinator only depends on these interfaces
 # ---------------------------------------------------------------------------
+
 
 @runtime_checkable
 class Sleepable(Protocol):
@@ -51,15 +53,16 @@ class Sleepable(Protocol):
 
 
 # Callback types
-SleepFn = Callable[[Sleepable], Awaitable[None]]       # sleep one agent
-CloseBotFn = Callable[[], Awaitable[None]]              # close discord bot
-NotifyFn = Callable[[str, str], Awaitable[None]]        # (agent_name, message) → send status
-GoodbyeFn = Callable[[], Awaitable[None]]               # send goodbye message to master channel
+SleepFn = Callable[[Sleepable], Awaitable[None]]  # sleep one agent
+CloseBotFn = Callable[[], Awaitable[None]]  # close discord bot
+NotifyFn = Callable[[str, str], Awaitable[None]]  # (agent_name, message) → send status
+GoodbyeFn = Callable[[], Awaitable[None]]  # send goodbye message to master channel
 
 
 # ---------------------------------------------------------------------------
 # Safety deadline — guarantees the process exits
 # ---------------------------------------------------------------------------
+
 
 def _start_deadline_thread(timeout: float) -> threading.Thread:
     """Spawn a daemon thread that calls os._exit(42) after *timeout* seconds.
@@ -67,10 +70,10 @@ def _start_deadline_thread(timeout: float) -> threading.Thread:
     This is the last-resort safety net: if bot.close() or sleep_agent() hangs,
     the process will still exit and the supervisor will restart it.
     """
+
     def _deadline():
         time.sleep(timeout)
-        log.warning("Shutdown safety deadline reached (%ds) — forcing os._exit(%d)",
-                     timeout, RESTART_EXIT_CODE)
+        log.warning("Shutdown safety deadline reached (%ds) — forcing os._exit(%d)", timeout, RESTART_EXIT_CODE)
         os._exit(RESTART_EXIT_CODE)
 
     t = threading.Thread(target=_deadline, daemon=True, name="shutdown-deadline")
@@ -110,6 +113,7 @@ def exit_for_restart() -> None:
 # ---------------------------------------------------------------------------
 # ShutdownCoordinator
 # ---------------------------------------------------------------------------
+
 
 class ShutdownCoordinator:
     """Coordinates graceful (and forced) shutdown of agent sessions.
@@ -164,11 +168,7 @@ class ShutdownCoordinator:
 
     def get_busy_agents(self, skip: str | None = None) -> dict[str, Sleepable]:
         """Return agents whose query_lock is held, excluding *skip*."""
-        return {
-            name: s
-            for name, s in self._agents.items()
-            if s.query_lock.locked() and name != skip
-        }
+        return {name: s for name, s in self._agents.items() if s.query_lock.locked() and name != skip}
 
     # -- Sleep all (with skip) ----------------------------------------------
 
@@ -220,7 +220,7 @@ class ShutdownCoordinator:
 
         try:
             await asyncio.wait_for(self._close_bot_fn(), timeout=self._bot_close_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("bot.close() timed out after %ds — proceeding to kill", self._bot_close_timeout)
         except Exception:
             log.exception("bot.close() raised — proceeding to kill")

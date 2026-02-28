@@ -16,11 +16,11 @@ import asyncio
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from croniter import croniter
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
+from croniter import croniter
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -164,15 +164,11 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
                 fire_at = datetime.fromisoformat(at_str)
             except (ValueError, TypeError):
                 return _error(
-                    f"Cannot parse datetime: '{at_str}'. "
-                    "Use ISO 8601 format (e.g. '2026-03-01T14:00:00+00:00')."
+                    f"Cannot parse datetime: '{at_str}'. Use ISO 8601 format (e.g. '2026-03-01T14:00:00+00:00')."
                 )
             if fire_at.tzinfo is None:
-                return _error(
-                    "Datetime must include timezone information "
-                    "(e.g. +00:00 or Z at the end)."
-                )
-            if fire_at <= datetime.now(timezone.utc):
+                return _error("Datetime must include timezone information (e.g. +00:00 or Z at the end).")
+            if fire_at <= datetime.now(UTC):
                 return _error("Datetime is in the past. Provide a future time.")
 
         # --- Acquire lock and write ---
@@ -183,16 +179,12 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
             # Per-agent uniqueness
             if any(e["name"] == name for e in mine):
                 return _error(
-                    f"A schedule named '{name}' already exists. "
-                    "Use a different name or delete the existing one first."
+                    f"A schedule named '{name}' already exists. Use a different name or delete the existing one first."
                 )
 
             # Per-agent limit
             if len(mine) >= MAX_SCHEDULES_PER_AGENT:
-                return _error(
-                    f"Schedule limit reached ({MAX_SCHEDULES_PER_AGENT}). "
-                    "Delete an existing schedule first."
-                )
+                return _error(f"Schedule limit reached ({MAX_SCHEDULES_PER_AGENT}). Delete an existing schedule first.")
 
             # Build entry
             entry: dict[str, Any] = {
@@ -215,8 +207,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
         tz_note = os.environ.get("SCHEDULE_TIMEZONE", "UTC")
         if stype == "recurring":
             return _text(
-                f"Created recurring schedule '{name}' with cron '{cron_expr}'. "
-                f"Cron is evaluated in {tz_note} timezone."
+                f"Created recurring schedule '{name}' with cron '{cron_expr}'. Cron is evaluated in {tz_note} timezone."
             )
         else:
             return _text(f"Created one-off schedule '{name}' firing at {at_str}.")
@@ -248,9 +239,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
 
     list_tool = SdkMcpTool(
         name="schedule_list",
-        description=(
-            "List all of your scheduled tasks (one-off and recurring)."
-        ),
+        description=("List all of your scheduled tasks (one-off and recurring)."),
         input_schema={"type": "object", "properties": {}},
         handler=handle_schedule_list,
     )
@@ -268,29 +257,22 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
                 "name": {
                     "type": "string",
                     "description": (
-                        "Short identifier (lowercase letters, numbers, hyphens). "
-                        "Must be unique among your schedules."
+                        "Short identifier (lowercase letters, numbers, hyphens). Must be unique among your schedules."
                     ),
                 },
                 "prompt": {
                     "type": "string",
-                    "description": (
-                        "The message that will be sent to you when this "
-                        "schedule fires."
-                    ),
+                    "description": ("The message that will be sent to you when this schedule fires."),
                 },
                 "schedule_type": {
                     "type": "string",
                     "enum": ["recurring", "one_off"],
-                    "description": (
-                        "Whether this repeats on a cron schedule or fires once."
-                    ),
+                    "description": ("Whether this repeats on a cron schedule or fires once."),
                 },
                 "cron": {
                     "type": "string",
                     "description": (
-                        "Cron expression (e.g. '0 9 * * *' for daily at 9am). "
-                        "Required if schedule_type is 'recurring'."
+                        "Cron expression (e.g. '0 9 * * *' for daily at 9am). Required if schedule_type is 'recurring'."
                     ),
                 },
                 "at": {
@@ -305,8 +287,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
                 "reset_context": {
                     "type": "boolean",
                     "description": (
-                        "If true, resets your conversation context when this "
-                        "schedule fires. Default: false."
+                        "If true, resets your conversation context when this schedule fires. Default: false."
                     ),
                 },
             },
@@ -323,10 +304,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": (
-                        "The name of the schedule to delete "
-                        "(as shown in schedule_list)."
-                    ),
+                    "description": ("The name of the schedule to delete (as shown in schedule_list)."),
                 },
             },
             "required": ["name"],

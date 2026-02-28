@@ -17,9 +17,31 @@ Architecture:
                                               ──stdio──> CLI 3
 """
 
+from bridge.client import BridgeConnection, BridgeTransport
+from bridge.helpers import build_cli_spawn_args, connect_to_bridge, ensure_bridge, start_bridge
 from bridge.protocol import (
-    CmdMsg, StdinMsg, ResultMsg, StdoutMsg, StderrMsg, ExitMsg,
+    CmdMsg,
+    ExitMsg,
+    ResultMsg,
+    StderrMsg,
+    StdinMsg,
+    StdoutMsg,
 )
 from bridge.server import BridgeServer, CliProcess
-from bridge.client import BridgeConnection, BridgeTransport
-from bridge.helpers import connect_to_bridge, ensure_bridge, start_bridge, build_cli_spawn_args
+
+__all__ = [
+    "BridgeConnection",
+    "BridgeServer",
+    "BridgeTransport",
+    "CliProcess",
+    "CmdMsg",
+    "ExitMsg",
+    "ResultMsg",
+    "StderrMsg",
+    "StdinMsg",
+    "StdoutMsg",
+    "build_cli_spawn_args",
+    "connect_to_bridge",
+    "ensure_bridge",
+    "start_bridge",
+]

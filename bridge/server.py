@@ -12,7 +12,13 @@ import time
 from dataclasses import dataclass, field
 
 from .protocol import (
-    CmdMsg, StdinMsg, ResultMsg, StdoutMsg, StderrMsg, ExitMsg, parse_client_msg,
+    CmdMsg,
+    ExitMsg,
+    ResultMsg,
+    StderrMsg,
+    StdinMsg,
+    StdoutMsg,
+    parse_client_msg,
 )
 
 log = logging.getLogger(__name__)
@@ -21,16 +27,17 @@ log = logging.getLogger(__name__)
 @dataclass
 class CliProcess:
     """A CLI subprocess managed by the bridge."""
+
     name: str
     proc: asyncio.subprocess.Process
-    status: str = "running"        # "running" | "exited"
+    status: str = "running"  # "running" | "exited"
     exit_code: int | None = None
     buffer: list[StdoutMsg | StderrMsg | ExitMsg] = field(default_factory=list)
-    subscribed: bool = False       # whether bot.py is receiving output
+    subscribed: bool = False  # whether bot.py is receiving output
     stdout_task: asyncio.Task | None = None
     stderr_task: asyncio.Task | None = None
-    last_stdin_at: float = 0.0     # monotonic timestamp of last stdin write
-    last_stdout_at: float = 0.0    # monotonic timestamp of last stdout message
+    last_stdin_at: float = 0.0  # monotonic timestamp of last stdin write
+    last_stdout_at: float = 0.0  # monotonic timestamp of last stdout message
 
     @property
     def idle(self) -> bool:
@@ -51,7 +58,7 @@ class BridgeServer:
         self._socket_path = socket_path
         self._cli_procs: dict[str, CliProcess] = {}
         self._client_writer: asyncio.StreamWriter | None = None
-        self._client_lock = asyncio.Lock()   # protects _client_writer
+        self._client_lock = asyncio.Lock()  # protects _client_writer
         self._server: asyncio.Server | None = None
         self._shutdown_event = asyncio.Event()
         self._start_time = time.monotonic()
@@ -63,7 +70,8 @@ class BridgeServer:
             os.unlink(self._socket_path)
 
         self._server = await asyncio.start_unix_server(
-            self._handle_client, path=self._socket_path,
+            self._handle_client,
+            path=self._socket_path,
             limit=10 * 1024 * 1024,  # 10 MB — match CLI subprocess limit
         )
         log.info("Bridge listening on %s", self._socket_path)
@@ -164,9 +172,14 @@ class BridgeServer:
 
         if name in self._cli_procs and self._cli_procs[name].status == "running":
             cp = self._cli_procs[name]
-            await self._send_result(ResultMsg(
-                ok=True, name=name, pid=cp.proc.pid, already_running=True,
-            ))
+            await self._send_result(
+                ResultMsg(
+                    ok=True,
+                    name=name,
+                    pid=cp.proc.pid,
+                    already_running=True,
+                )
+            )
             return
 
         # Clean up dead entry if exists
@@ -233,8 +246,7 @@ class BridgeServer:
         if writer is not None:
             for msg in cp.buffer:
                 payload = msg.model_dump_json().encode() + b"\n"
-                log.debug("[subscribe][%s] replay-write %s (%d bytes)",
-                          name, type(msg).__name__, len(payload))
+                log.debug("[subscribe][%s] replay-write %s (%d bytes)", name, type(msg).__name__, len(payload))
                 writer.write(payload)
         cp.buffer.clear()
         cp.subscribed = True  # NOW relay sends directly — after all buffered writes
@@ -252,10 +264,16 @@ class BridgeServer:
                             cp2.subscribed = False
                 return
 
-        await self._send_result(ResultMsg(
-            ok=True, name=name, replayed=buffered_count,
-            status=cp.status, exit_code=cp.exit_code, idle=cp.idle,
-        ))
+        await self._send_result(
+            ResultMsg(
+                ok=True,
+                name=name,
+                replayed=buffered_count,
+                status=cp.status,
+                exit_code=cp.exit_code,
+                idle=cp.idle,
+            )
+        )
 
     async def _cmd_unsubscribe(self, name: str):
         cp = self._cli_procs.get(name)
@@ -339,7 +357,7 @@ class BridgeServer:
                 # Process closed stdout normally — wait for exit (should be immediate)
                 try:
                     await asyncio.wait_for(cp.proc.wait(), timeout=10.0)
-                except (asyncio.TimeoutError, Exception):
+                except (TimeoutError, Exception):
                     pass
                 cp.status = "exited"
                 cp.exit_code = cp.proc.returncode
@@ -354,7 +372,8 @@ class BridgeServer:
                     "stdout relay for '%s' failed — process still running (pid=%s), "
                     "relay is dead. New queries will not receive responses until "
                     "the agent is killed and respawned.",
-                    cp.name, cp.proc.pid,
+                    cp.name,
+                    cp.proc.pid,
                 )
 
     async def _relay_stderr(self, cp: CliProcess):
@@ -381,7 +400,7 @@ class BridgeServer:
             cp.proc.terminate()
             try:
                 await asyncio.wait_for(cp.proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 cp.proc.kill()
                 await cp.proc.wait()
         except ProcessLookupError:

@@ -18,12 +18,11 @@ import uuid
 import pytest
 
 from bridge import (
-    CmdMsg,
-    StdoutMsg,
-    ExitMsg,
     BridgeConnection,
     BridgeServer,
     BridgeTransport,
+    ExitMsg,
+    StdoutMsg,
     connect_to_bridge,
     ensure_bridge,
 )
@@ -31,6 +30,7 @@ from bridge import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _tmp_sock() -> str:
     """Return a unique temporary socket path."""
@@ -78,39 +78,43 @@ async def _cleanup(server: BridgeServer, srv: asyncio.Server, conn: BridgeConnec
 # A CLI script that outputs N JSON messages with a delay, then exits.
 def _slow_cli_script(n: int, delay: float = 0.1) -> list[str]:
     return [
-        PYTHON, "-c",
+        PYTHON,
+        "-c",
         f"import json,sys,time\n"
         f"for i in range({n}):\n"
         f"    print(json.dumps({{'type':'msg','n':i}}),flush=True)\n"
-        f"    time.sleep({delay})\n"
+        f"    time.sleep({delay})\n",
     ]
 
 
 # A CLI script that echoes stdin lines back to stdout as JSON.
 def _echo_cli_script() -> list[str]:
     return [
-        PYTHON, "-c",
+        PYTHON,
+        "-c",
         "import json, sys\n"
         "for line in sys.stdin:\n"
         "    data = json.loads(line)\n"
-        "    print(json.dumps({'type':'echo','data':data}), flush=True)\n"
+        "    print(json.dumps({'type':'echo','data':data}), flush=True)\n",
     ]
 
 
 # A CLI that writes to stderr and stdout, then exits.
 def _stderr_cli_script() -> list[str]:
     return [
-        PYTHON, "-c",
+        PYTHON,
+        "-c",
         "import sys, json\n"
         "sys.stderr.write('warning: something\\n')\n"
         "sys.stderr.flush()\n"
-        "print(json.dumps({'type':'ok'}), flush=True)\n"
+        "print(json.dumps({'type':'ok'}), flush=True)\n",
     ]
 
 
 # ---------------------------------------------------------------------------
 # Server: list
 # ---------------------------------------------------------------------------
+
 
 class TestServerList:
     @pytest.mark.asyncio
@@ -132,8 +136,7 @@ class TestServerList:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="a", cli_args=_slow_cli_script(1, 5),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command("spawn", name="a", cli_args=_slow_cli_script(1, 5), env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
             result = await asyncio.wait_for(conn.send_command("list"), timeout=3)
@@ -147,6 +150,7 @@ class TestServerList:
 # Server: spawn
 # ---------------------------------------------------------------------------
 
+
 class TestServerSpawn:
     @pytest.mark.asyncio
     async def test_spawn_ok(self):
@@ -155,8 +159,7 @@ class TestServerSpawn:
         conn = await _connect(sock)
         try:
             result = await asyncio.wait_for(
-                conn.send_command("spawn", name="x", cli_args=_slow_cli_script(1, 5),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command("spawn", name="x", cli_args=_slow_cli_script(1, 5), env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
             assert result.ok is True
@@ -172,13 +175,15 @@ class TestServerSpawn:
         conn = await _connect(sock)
         try:
             r1 = await asyncio.wait_for(
-                conn.send_command("spawn", name="dup", cli_args=_slow_cli_script(1, 5),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="dup", cli_args=_slow_cli_script(1, 5), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             r2 = await asyncio.wait_for(
-                conn.send_command("spawn", name="dup", cli_args=_slow_cli_script(1, 5),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="dup", cli_args=_slow_cli_script(1, 5), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             assert r2.ok is True
@@ -194,9 +199,9 @@ class TestServerSpawn:
         conn = await _connect(sock)
         try:
             result = await asyncio.wait_for(
-                conn.send_command("spawn", name="bad",
-                                  cli_args=["/nonexistent/binary"],
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="bad", cli_args=["/nonexistent/binary"], env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             assert result.ok is False
@@ -209,6 +214,7 @@ class TestServerSpawn:
 # Server: kill
 # ---------------------------------------------------------------------------
 
+
 class TestServerKill:
     @pytest.mark.asyncio
     async def test_kill_running(self):
@@ -217,12 +223,14 @@ class TestServerKill:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="k", cli_args=_slow_cli_script(100, 1),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="k", cli_args=_slow_cli_script(100, 1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             result = await asyncio.wait_for(
-                conn.send_command("kill", name="k"), timeout=5,
+                conn.send_command("kill", name="k"),
+                timeout=5,
             )
             assert result.ok is True
             # Should be gone from list
@@ -238,7 +246,8 @@ class TestServerKill:
         conn = await _connect(sock)
         try:
             result = await asyncio.wait_for(
-                conn.send_command("kill", name="ghost"), timeout=3,
+                conn.send_command("kill", name="ghost"),
+                timeout=3,
             )
             assert result.ok is False
         finally:
@@ -249,6 +258,7 @@ class TestServerKill:
 # Server: interrupt
 # ---------------------------------------------------------------------------
 
+
 class TestServerInterrupt:
     @pytest.mark.asyncio
     async def test_interrupt_running(self):
@@ -257,12 +267,14 @@ class TestServerInterrupt:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="int", cli_args=_slow_cli_script(100, 1),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="int", cli_args=_slow_cli_script(100, 1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             result = await asyncio.wait_for(
-                conn.send_command("interrupt", name="int"), timeout=3,
+                conn.send_command("interrupt", name="int"),
+                timeout=3,
             )
             assert result.ok is True
         finally:
@@ -275,7 +287,8 @@ class TestServerInterrupt:
         conn = await _connect(sock)
         try:
             result = await asyncio.wait_for(
-                conn.send_command("interrupt", name="nope"), timeout=3,
+                conn.send_command("interrupt", name="nope"),
+                timeout=3,
             )
             assert result.ok is False
         finally:
@@ -286,6 +299,7 @@ class TestServerInterrupt:
 # Server: subscribe + relay
 # ---------------------------------------------------------------------------
 
+
 class TestServerSubscribeRelay:
     @pytest.mark.asyncio
     async def test_subscribe_streams_stdout(self):
@@ -295,8 +309,9 @@ class TestServerSubscribeRelay:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="sr", cli_args=_slow_cli_script(3, 0.1),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="sr", cli_args=_slow_cli_script(3, 0.1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             q = conn.register_agent("sr")
@@ -312,7 +327,7 @@ class TestServerSubscribeRelay:
                     msgs.append(msg)
                     if msg.type == "exit":
                         break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
             types = [m.type for m in msgs]
@@ -328,7 +343,8 @@ class TestServerSubscribeRelay:
         conn = await _connect(sock)
         try:
             result = await asyncio.wait_for(
-                conn.send_command("subscribe", name="nope"), timeout=3,
+                conn.send_command("subscribe", name="nope"),
+                timeout=3,
             )
             assert result.ok is False
         finally:
@@ -342,8 +358,7 @@ class TestServerSubscribeRelay:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="se", cli_args=_stderr_cli_script(),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command("spawn", name="se", cli_args=_stderr_cli_script(), env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
             q = conn.register_agent("se")
@@ -358,7 +373,7 @@ class TestServerSubscribeRelay:
                     msgs.append(msg)
                     if msg.type == "exit":
                         break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
             types = [m.type for m in msgs]
@@ -373,6 +388,7 @@ class TestServerSubscribeRelay:
 # Server: stdin forwarding
 # ---------------------------------------------------------------------------
 
+
 class TestServerStdin:
     @pytest.mark.asyncio
     async def test_stdin_forwarded(self):
@@ -382,8 +398,7 @@ class TestServerStdin:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="echo", cli_args=_echo_cli_script(),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command("spawn", name="echo", cli_args=_echo_cli_script(), env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
             q = conn.register_agent("echo")
@@ -405,6 +420,7 @@ class TestServerStdin:
 # Server: buffer replay on reconnect
 # ---------------------------------------------------------------------------
 
+
 class TestServerBufferReplay:
     @pytest.mark.asyncio
     async def test_buffer_and_replay(self):
@@ -417,8 +433,9 @@ class TestServerBufferReplay:
         try:
             # Spawn an agent that outputs 5 messages quickly
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="buf", cli_args=_slow_cli_script(5, 0.02),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="buf", cli_args=_slow_cli_script(5, 0.02), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             q1 = conn1.register_agent("buf")
@@ -456,7 +473,7 @@ class TestServerBufferReplay:
                     msgs.append(msg)
                     if msg.type == "exit":
                         break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
             assert len(msgs) >= buffered
@@ -481,8 +498,9 @@ class TestServerBufferReplay:
         conn1 = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="res", cli_args=_slow_cli_script(100, 1),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="res", cli_args=_slow_cli_script(100, 1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             conn1.register_agent("res")
@@ -508,6 +526,7 @@ class TestServerBufferReplay:
 # Server: unknown command
 # ---------------------------------------------------------------------------
 
+
 class TestServerUnknownCommand:
     @pytest.mark.asyncio
     async def test_unknown_command_returns_error(self):
@@ -516,7 +535,8 @@ class TestServerUnknownCommand:
         conn = await _connect(sock)
         try:
             result = await asyncio.wait_for(
-                conn.send_command("bogus"), timeout=3,
+                conn.send_command("bogus"),
+                timeout=3,
             )
             assert result.ok is False
             assert "unknown" in (result.error or "").lower()
@@ -528,6 +548,7 @@ class TestServerUnknownCommand:
 # BridgeConnection: demux
 # ---------------------------------------------------------------------------
 
+
 class TestBridgeConnectionDemux:
     @pytest.mark.asyncio
     async def test_routes_to_correct_agent_queue(self):
@@ -538,13 +559,15 @@ class TestBridgeConnectionDemux:
         try:
             # Spawn two agents
             await asyncio.wait_for(
-                conn.send_command("spawn", name="a1", cli_args=_slow_cli_script(2, 0.1),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="a1", cli_args=_slow_cli_script(2, 0.1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             await asyncio.wait_for(
-                conn.send_command("spawn", name="a2", cli_args=_slow_cli_script(2, 0.1),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="a2", cli_args=_slow_cli_script(2, 0.1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
 
@@ -609,6 +632,7 @@ class TestBridgeConnectionDemux:
 # BridgeTransport: initialize interception
 # ---------------------------------------------------------------------------
 
+
 class TestBridgeTransportInterception:
     @pytest.mark.asyncio
     async def test_intercepts_initialize_when_reconnecting(self):
@@ -619,8 +643,9 @@ class TestBridgeTransportInterception:
         try:
             # Spawn a long-running agent
             await asyncio.wait_for(
-                conn.send_command("spawn", name="rc", cli_args=_slow_cli_script(1, 10),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="rc", cli_args=_slow_cli_script(1, 10), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
 
@@ -629,11 +654,13 @@ class TestBridgeTransportInterception:
             await asyncio.wait_for(transport.subscribe(), timeout=3)
 
             # Write an initialize control_request
-            init_msg = json.dumps({
-                "type": "control_request",
-                "request_id": "test-init-42",
-                "request": {"subtype": "initialize"},
-            })
+            init_msg = json.dumps(
+                {
+                    "type": "control_request",
+                    "request_id": "test-init-42",
+                    "request": {"subtype": "initialize"},
+                }
+            )
             await transport.write(init_msg)
 
             # Should get a fake response from the queue
@@ -656,8 +683,7 @@ class TestBridgeTransportInterception:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="nr", cli_args=_echo_cli_script(),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command("spawn", name="nr", cli_args=_echo_cli_script(), env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
 
@@ -666,11 +692,13 @@ class TestBridgeTransportInterception:
             await asyncio.wait_for(transport.subscribe(), timeout=3)
 
             # Write an initialize — should be forwarded (echo will echo it back)
-            init_msg = json.dumps({
-                "type": "control_request",
-                "request_id": "test-init-99",
-                "request": {"subtype": "initialize"},
-            })
+            init_msg = json.dumps(
+                {
+                    "type": "control_request",
+                    "request_id": "test-init-99",
+                    "request": {"subtype": "initialize"},
+                }
+            )
             await transport.write(init_msg)
 
             # Should get the echo back (not a fake response)
@@ -685,6 +713,7 @@ class TestBridgeTransportInterception:
 # BridgeTransport: read_messages
 # ---------------------------------------------------------------------------
 
+
 class TestBridgeTransportReadMessages:
     @pytest.mark.asyncio
     async def test_yields_stdout_data(self):
@@ -694,8 +723,9 @@ class TestBridgeTransportReadMessages:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="rd", cli_args=_slow_cli_script(2, 0.1),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="rd", cli_args=_slow_cli_script(2, 0.1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
 
@@ -723,8 +753,9 @@ class TestBridgeTransportReadMessages:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="ex", cli_args=_slow_cli_script(1, 0),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="ex", cli_args=_slow_cli_script(1, 0), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
 
@@ -749,8 +780,7 @@ class TestBridgeTransportReadMessages:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="sc", cli_args=_stderr_cli_script(),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command("spawn", name="sc", cli_args=_stderr_cli_script(), env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
 
@@ -771,6 +801,7 @@ class TestBridgeTransportReadMessages:
 # ---------------------------------------------------------------------------
 # BridgeTransport: close / is_ready / end_input
 # ---------------------------------------------------------------------------
+
 
 class TestBridgeTransportLifecycle:
     @pytest.mark.asyncio
@@ -794,8 +825,9 @@ class TestBridgeTransportLifecycle:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="cl", cli_args=_slow_cli_script(100, 1),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="cl", cli_args=_slow_cli_script(100, 1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
 
@@ -830,14 +862,16 @@ class TestBridgeTransportLifecycle:
 # build_cli_spawn_args: permission_prompt_tool_name injection
 # ---------------------------------------------------------------------------
 
+
 class TestBuildCliSpawnArgs:
     """Verify build_cli_spawn_args replicates the permission_prompt_tool_name
     injection that ClaudeSDKClient.connect() does in direct mode."""
 
     def test_injects_permission_prompt_tool_stdio_when_can_use_tool_set(self):
         """When can_use_tool is set, --permission-prompt-tool stdio must appear."""
-        from bridge import build_cli_spawn_args
         from claude_agent_sdk import ClaudeAgentOptions
+
+        from bridge import build_cli_spawn_args
 
         async def _dummy_can_use_tool(tool_name, tool_input, ctx):
             pass
@@ -848,18 +882,15 @@ class TestBuildCliSpawnArgs:
         )
         cmd, env, cwd = build_cli_spawn_args(options)
 
-        assert "--permission-prompt-tool" in cmd, (
-            f"--permission-prompt-tool not found in cmd: {cmd}"
-        )
+        assert "--permission-prompt-tool" in cmd, f"--permission-prompt-tool not found in cmd: {cmd}"
         idx = cmd.index("--permission-prompt-tool")
-        assert cmd[idx + 1] == "stdio", (
-            f"Expected 'stdio' after --permission-prompt-tool, got: {cmd[idx + 1]}"
-        )
+        assert cmd[idx + 1] == "stdio", f"Expected 'stdio' after --permission-prompt-tool, got: {cmd[idx + 1]}"
 
     def test_no_injection_when_can_use_tool_not_set(self):
         """When can_use_tool is None, --permission-prompt-tool must NOT appear."""
-        from bridge import build_cli_spawn_args
         from claude_agent_sdk import ClaudeAgentOptions
+
+        from bridge import build_cli_spawn_args
 
         options = ClaudeAgentOptions(
             can_use_tool=None,
@@ -867,14 +898,13 @@ class TestBuildCliSpawnArgs:
         )
         cmd, env, cwd = build_cli_spawn_args(options)
 
-        assert "--permission-prompt-tool" not in cmd, (
-            f"--permission-prompt-tool should NOT be in cmd: {cmd}"
-        )
+        assert "--permission-prompt-tool" not in cmd, f"--permission-prompt-tool should NOT be in cmd: {cmd}"
 
     def test_no_override_when_permission_prompt_tool_already_set(self):
         """When permission_prompt_tool_name is already set, don't override it."""
-        from bridge import build_cli_spawn_args
         from claude_agent_sdk import ClaudeAgentOptions
+
+        from bridge import build_cli_spawn_args
 
         async def _dummy_can_use_tool(tool_name, tool_input, ctx):
             pass
@@ -887,14 +917,13 @@ class TestBuildCliSpawnArgs:
         cmd, env, cwd = build_cli_spawn_args(options)
 
         idx = cmd.index("--permission-prompt-tool")
-        assert cmd[idx + 1] == "custom_tool", (
-            f"Expected 'custom_tool', got: {cmd[idx + 1]}"
-        )
+        assert cmd[idx + 1] == "custom_tool", f"Expected 'custom_tool', got: {cmd[idx + 1]}"
 
     def test_sdk_mcp_server_serialized_without_instance(self):
         """SDK-type MCP server is serialized into --mcp-config without the live instance."""
-        from bridge import build_cli_spawn_args
         from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
+
+        from bridge import build_cli_spawn_args
 
         async def _dummy_can_use_tool(tool_name, tool_input, ctx):
             pass
@@ -925,8 +954,9 @@ class TestBuildCliSpawnArgs:
 
     def test_multiple_sdk_mcp_servers(self):
         """Multiple SDK MCP servers all appear in --mcp-config."""
-        from bridge import build_cli_spawn_args
         from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
+
+        from bridge import build_cli_spawn_args
 
         async def _dummy_can_use_tool(tool_name, tool_input, ctx):
             pass
@@ -959,8 +989,9 @@ class TestBuildCliSpawnArgs:
 
     def test_no_mcp_config_when_no_servers(self):
         """--mcp-config should not appear when mcp_servers is empty."""
-        from bridge import build_cli_spawn_args
         from claude_agent_sdk import ClaudeAgentOptions
+
+        from bridge import build_cli_spawn_args
 
         options = ClaudeAgentOptions(cwd="/tmp", mcp_servers={})
         cmd, env, cwd = build_cli_spawn_args(options)
@@ -971,6 +1002,7 @@ class TestBuildCliSpawnArgs:
 # ---------------------------------------------------------------------------
 # Lifecycle: ensure_bridge (starts a real bridge subprocess)
 # ---------------------------------------------------------------------------
+
 
 class TestEnsureBridge:
     @pytest.mark.asyncio
@@ -993,9 +1025,10 @@ class TestEnsureBridge:
             await conn2.close()
         finally:
             # Kill bridge process
-            import subprocess, signal
-            ps = subprocess.run(["pgrep", "-f", f"python -m bridge {sock}"],
-                                capture_output=True, text=True)
+            import signal
+            import subprocess
+
+            ps = subprocess.run(["pgrep", "-f", f"python -m bridge {sock}"], capture_output=True, text=True)
             for pid in ps.stdout.strip().split():
                 try:
                     os.kill(int(pid), signal.SIGTERM)
@@ -1029,6 +1062,7 @@ class TestEnsureBridge:
 # Lifecycle: connect_to_bridge
 # ---------------------------------------------------------------------------
 
+
 class TestConnectToBridge:
     @pytest.mark.asyncio
     async def test_returns_none_when_no_bridge(self):
@@ -1040,11 +1074,13 @@ class TestConnectToBridge:
 # Shutdown: bridge_mode on ShutdownCoordinator
 # ---------------------------------------------------------------------------
 
+
 class TestShutdownBridgeMode:
     @pytest.mark.asyncio
     async def test_bridge_mode_skips_sleep(self):
         """In bridge mode, graceful_shutdown skips sleep_all."""
         from unittest.mock import AsyncMock, MagicMock, patch
+
         from shutdown import ShutdownCoordinator
 
         sleep_fn = AsyncMock()
@@ -1052,8 +1088,7 @@ class TestShutdownBridgeMode:
 
         with patch("shutdown._start_deadline_thread"):
             c = ShutdownCoordinator(
-                agents={"a": type("A", (), {"name": "a", "client": "x",
-                                             "query_lock": asyncio.Lock()})()},
+                agents={"a": type("A", (), {"name": "a", "client": "x", "query_lock": asyncio.Lock()})()},
                 sleep_fn=sleep_fn,
                 close_bot_fn=AsyncMock(),
                 kill_fn=kill_fn,
@@ -1070,6 +1105,7 @@ class TestShutdownBridgeMode:
 # NEW TESTS: Client reconnection
 # ---------------------------------------------------------------------------
 
+
 class TestClientReconnection:
     @pytest.mark.asyncio
     async def test_disconnect_buffer_reconnect(self):
@@ -1081,8 +1117,9 @@ class TestClientReconnection:
         try:
             # Spawn agent that emits 10 messages quickly
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="rc", cli_args=_slow_cli_script(10, 0.02),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="rc", cli_args=_slow_cli_script(10, 0.02), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # Subscribe but immediately disconnect before reading
@@ -1114,7 +1151,7 @@ class TestClientReconnection:
                     if msg is None:
                         break
                     msgs.append(msg)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
             assert len(msgs) >= buffered
@@ -1136,6 +1173,7 @@ class TestClientReconnection:
 # NEW TESTS: Exit during disconnect
 # ---------------------------------------------------------------------------
 
+
 class TestExitDuringDisconnect:
     @pytest.mark.asyncio
     async def test_exit_buffered_and_replayed(self):
@@ -1147,8 +1185,9 @@ class TestExitDuringDisconnect:
         try:
             # Spawn a short-lived agent
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="de", cli_args=_slow_cli_script(1, 0),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="de", cli_args=_slow_cli_script(1, 0), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # Subscribe then disconnect immediately
@@ -1176,7 +1215,7 @@ class TestExitDuringDisconnect:
                     if msg is None:
                         break
                     msgs.append(msg)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
             exit_msgs = [m for m in msgs if m.type == "exit"]
@@ -1199,6 +1238,7 @@ class TestExitDuringDisconnect:
 # ---------------------------------------------------------------------------
 # NEW TESTS: Malformed JSON from client
 # ---------------------------------------------------------------------------
+
 
 class TestMalformedJson:
     @pytest.mark.asyncio
@@ -1237,6 +1277,7 @@ class TestMalformedJson:
 # NEW TESTS: Send to client failure
 # ---------------------------------------------------------------------------
 
+
 class TestSendToClientFailure:
     @pytest.mark.asyncio
     async def test_write_failure_routes_to_buffer(self):
@@ -1247,8 +1288,9 @@ class TestSendToClientFailure:
         try:
             # Spawn a slow agent
             await asyncio.wait_for(
-                conn.send_command("spawn", name="wf", cli_args=_slow_cli_script(20, 0.05),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="wf", cli_args=_slow_cli_script(20, 0.05), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             conn.register_agent("wf")
@@ -1283,6 +1325,7 @@ class TestSendToClientFailure:
 # NEW TESTS: Kill escalation (SIGTERM -> SIGKILL)
 # ---------------------------------------------------------------------------
 
+
 class TestKillEscalation:
     @pytest.mark.asyncio
     async def test_kill_terminates_process(self):
@@ -1293,8 +1336,9 @@ class TestKillEscalation:
         try:
             # Spawn a long-running agent
             await asyncio.wait_for(
-                conn.send_command("spawn", name="ke", cli_args=_slow_cli_script(1000, 0.1),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="ke", cli_args=_slow_cli_script(1000, 0.1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             cp = server._cli_procs["ke"]
@@ -1316,8 +1360,9 @@ class TestKillEscalation:
         try:
             # Spawn a fast-exiting agent
             await asyncio.wait_for(
-                conn.send_command("spawn", name="ae", cli_args=_slow_cli_script(1, 0),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="ae", cli_args=_slow_cli_script(1, 0), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             await asyncio.sleep(0.3)  # let it exit
@@ -1336,6 +1381,7 @@ class TestKillEscalation:
 # ---------------------------------------------------------------------------
 # NEW TESTS: Stdin edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestStdinEdgeCases:
     @pytest.mark.asyncio
@@ -1364,8 +1410,9 @@ class TestStdinEdgeCases:
         try:
             # Spawn a fast-exiting agent
             await asyncio.wait_for(
-                conn.send_command("spawn", name="ex", cli_args=_slow_cli_script(1, 0),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="ex", cli_args=_slow_cli_script(1, 0), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             await asyncio.sleep(0.3)  # let it exit
@@ -1385,6 +1432,7 @@ class TestStdinEdgeCases:
 # NEW TESTS: Buffer replay order
 # ---------------------------------------------------------------------------
 
+
 class TestBufferReplayOrder:
     @pytest.mark.asyncio
     async def test_messages_replayed_in_order(self):
@@ -1396,8 +1444,9 @@ class TestBufferReplayOrder:
         try:
             # Spawn agent that emits numbered messages
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="ord", cli_args=_slow_cli_script(5, 0.02),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="ord", cli_args=_slow_cli_script(5, 0.02), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # Don't subscribe — let everything buffer
@@ -1418,15 +1467,13 @@ class TestBufferReplayOrder:
                     if msg is None:
                         break
                     msgs.append(msg)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
             # Filter stdout messages and verify order
             stdout_msgs = [m for m in msgs if m.type == "stdout"]
             for i, m in enumerate(stdout_msgs):
-                assert m.data["n"] == i, (
-                    f"Expected message n={i}, got n={m.data['n']}"
-                )
+                assert m.data["n"] == i, f"Expected message n={i}, got n={m.data['n']}"
 
             # Exit should be last
             assert msgs[-1].type == "exit"
@@ -1448,6 +1495,7 @@ class TestBufferReplayOrder:
 # NEW TESTS: Subscribe to exited agent
 # ---------------------------------------------------------------------------
 
+
 class TestSubscribeToExited:
     @pytest.mark.asyncio
     async def test_subscribe_to_exited_returns_status(self):
@@ -1458,8 +1506,9 @@ class TestSubscribeToExited:
         try:
             # Spawn fast-exiting agent
             await asyncio.wait_for(
-                conn.send_command("spawn", name="se", cli_args=_slow_cli_script(1, 0),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="se", cli_args=_slow_cli_script(1, 0), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             await asyncio.sleep(0.5)  # let it exit
@@ -1478,6 +1527,7 @@ class TestSubscribeToExited:
 # ---------------------------------------------------------------------------
 # NEW TESTS: Command timeout
 # ---------------------------------------------------------------------------
+
 
 class TestCommandTimeout:
     @pytest.mark.asyncio
@@ -1520,10 +1570,12 @@ class TestCommandTimeout:
 # NEW TESTS: SDK MCP server through bridge spawn + reconnect
 # ---------------------------------------------------------------------------
 
+
 def _mcp_cli_args() -> tuple[list[str], dict]:
     """Build real CLI spawn args with an SDK MCP server, like bot.py does."""
-    from bridge import build_cli_spawn_args
     from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
+
+    from bridge import build_cli_spawn_args
 
     async def _dummy_can_use_tool(tool_name, tool_input, ctx):
         pass
@@ -1593,8 +1645,7 @@ class TestMcpBridgeSpawn:
 
             # Spawn through the bridge
             result = await asyncio.wait_for(
-                conn1.send_command("spawn", name="mcp_rc", cli_args=cli_args,
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command("spawn", name="mcp_rc", cli_args=cli_args, env=dict(os.environ), cwd="/tmp"),
                 timeout=10,
             )
             assert result.ok is True
@@ -1646,6 +1697,7 @@ class TestMcpBridgeSpawn:
 # Agent survives client reconnect (end-to-end polling test)
 # ---------------------------------------------------------------------------
 
+
 class TestAgentSurvivesReconnect:
     """Spawn a long-running agent that polls for a file, disconnect the client,
     reconnect a new client, then create the file.  The agent should notice the
@@ -1656,7 +1708,8 @@ class TestAgentSurvivesReconnect:
     def _polling_cli_script(path: str, poll_interval: float = 0.2, timeout: float = 30) -> list[str]:
         """CLI that polls for *path* to exist, emitting heartbeats and a final 'found' message."""
         return [
-            PYTHON, "-c",
+            PYTHON,
+            "-c",
             "import json, os, sys, time\n"
             f"target = {path!r}\n"
             f"poll = {poll_interval}\n"
@@ -1670,7 +1723,7 @@ class TestAgentSurvivesReconnect:
             "    seq += 1\n"
             "    time.sleep(poll)\n"
             "print(json.dumps({'type':'timeout'}), flush=True)\n"
-            "sys.exit(1)\n"
+            "sys.exit(1)\n",
         ]
 
     @pytest.mark.asyncio
@@ -1678,6 +1731,7 @@ class TestAgentSurvivesReconnect:
         """Agent keeps polling while client is disconnected; after reconnect
         we create the trigger file and receive the 'found' message."""
         import tempfile
+
         sock = _tmp_sock()
         trigger = tempfile.mktemp(prefix="bridge_test_trigger_")
 
@@ -1688,9 +1742,11 @@ class TestAgentSurvivesReconnect:
             # Spawn a poller that waits for the trigger file
             spawn = await asyncio.wait_for(
                 conn1.send_command(
-                    "spawn", name="poller",
+                    "spawn",
+                    name="poller",
                     cli_args=self._polling_cli_script(trigger, poll_interval=0.2, timeout=30),
-                    env=dict(os.environ), cwd="/tmp",
+                    env=dict(os.environ),
+                    cwd="/tmp",
                 ),
                 timeout=3,
             )
@@ -1775,26 +1831,27 @@ class TestAgentSurvivesReconnect:
 # Comprehensive reconnection scenario tests
 # ---------------------------------------------------------------------------
 
+
 # CLI that sleeps silently, then emits a "done" message and exits.
 def _silent_then_done_script(sleep_secs: float) -> list[str]:
     return [
-        PYTHON, "-c",
-        "import json, sys, time\n"
-        f"time.sleep({sleep_secs})\n"
-        "print(json.dumps({'type':'done'}), flush=True)\n"
+        PYTHON,
+        "-c",
+        f"import json, sys, time\ntime.sleep({sleep_secs})\nprint(json.dumps({{'type':'done'}}), flush=True)\n",
     ]
 
 
 # CLI that emits n_fast messages, then sleeps, then emits "done" and exits.
 def _burst_then_wait_script(n_fast: int, delay: float, wait_secs: float) -> list[str]:
     return [
-        PYTHON, "-c",
+        PYTHON,
+        "-c",
         "import json, sys, time\n"
         f"for i in range({n_fast}):\n"
         f"    print(json.dumps({{'type':'msg','n':i}}), flush=True)\n"
         f"    time.sleep({delay})\n"
         f"time.sleep({wait_secs})\n"
-        "print(json.dumps({'type':'done'}), flush=True)\n"
+        "print(json.dumps({'type':'done'}), flush=True)\n",
     ]
 
 
@@ -1802,23 +1859,19 @@ def _burst_then_wait_script(n_fast: int, delay: float, wait_secs: float) -> list
 # Stays alive between inputs (simulates idle-awaiting-input).
 def _multi_turn_script() -> list[str]:
     return [
-        PYTHON, "-c",
+        PYTHON,
+        "-c",
         "import json, sys\n"
         "print(json.dumps({'type':'ready'}), flush=True)\n"
         "for line in sys.stdin:\n"
         "    data = json.loads(line)\n"
-        "    print(json.dumps({'type':'result','data':data}), flush=True)\n"
+        "    print(json.dumps({'type':'result','data':data}), flush=True)\n",
     ]
 
 
 # CLI that exits immediately with a given code.
 def _exit_with_code_script(code: int) -> list[str]:
-    return [
-        PYTHON, "-c",
-        "import json, sys\n"
-        "print(json.dumps({'type':'bye'}), flush=True)\n"
-        f"sys.exit({code})\n"
-    ]
+    return [PYTHON, "-c", f"import json, sys\nprint(json.dumps({{'type':'bye'}}), flush=True)\nsys.exit({code})\n"]
 
 
 async def _cleanup_multi(server, srv, conns: list, sock: str):
@@ -1857,15 +1910,14 @@ class TestReconnectScenarios:
         try:
             # Spawn agent that sleeps 3s then emits "done"
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="silent",
-                                   cli_args=_silent_then_done_script(3),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="silent", cli_args=_silent_then_done_script(3), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # Subscribe briefly to confirm it's running
             conn1.register_agent("silent")
-            sub = await asyncio.wait_for(
-                conn1.send_command("subscribe", name="silent"), timeout=3)
+            sub = await asyncio.wait_for(conn1.send_command("subscribe", name="silent"), timeout=3)
             assert sub.status == "running"
 
             # Disconnect immediately (no output yet)
@@ -1882,8 +1934,7 @@ class TestReconnectScenarios:
 
             # Subscribe and wait for the "done" message
             q = conn2.register_agent("silent")
-            sub2 = await asyncio.wait_for(
-                conn2.send_command("subscribe", name="silent"), timeout=3)
+            sub2 = await asyncio.wait_for(conn2.send_command("subscribe", name="silent"), timeout=3)
             assert sub2.replayed == 0
             assert sub2.status == "running"
 
@@ -1916,15 +1967,18 @@ class TestReconnectScenarios:
         try:
             # Spawn: 10 fast messages, then 3s wait, then "done"
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="burst",
-                                   cli_args=_burst_then_wait_script(10, 0.05, 3),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn",
+                    name="burst",
+                    cli_args=_burst_then_wait_script(10, 0.05, 3),
+                    env=dict(os.environ),
+                    cwd="/tmp",
+                ),
                 timeout=3,
             )
             # Subscribe and read first 2 messages
             q1 = conn1.register_agent("burst")
-            await asyncio.wait_for(
-                conn1.send_command("subscribe", name="burst"), timeout=3)
+            await asyncio.wait_for(conn1.send_command("subscribe", name="burst"), timeout=3)
             for _ in range(2):
                 msg = await asyncio.wait_for(q1.get(), timeout=3)
                 assert msg.type == "stdout"
@@ -1943,8 +1997,7 @@ class TestReconnectScenarios:
 
             # Subscribe — get replayed messages
             q2 = conn2.register_agent("burst")
-            sub = await asyncio.wait_for(
-                conn2.send_command("subscribe", name="burst"), timeout=3)
+            sub = await asyncio.wait_for(conn2.send_command("subscribe", name="burst"), timeout=3)
             assert sub.replayed == buffered
 
             # Drain replayed messages
@@ -1987,15 +2040,14 @@ class TestReconnectScenarios:
         conn2 = None
         try:
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="idle",
-                                   cli_args=_multi_turn_script(),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="idle", cli_args=_multi_turn_script(), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # Subscribe and read "ready"
             q1 = conn1.register_agent("idle")
-            await asyncio.wait_for(
-                conn1.send_command("subscribe", name="idle"), timeout=3)
+            await asyncio.wait_for(conn1.send_command("subscribe", name="idle"), timeout=3)
             msg = await asyncio.wait_for(q1.get(), timeout=3)
             assert msg.data["type"] == "ready"
 
@@ -2018,8 +2070,7 @@ class TestReconnectScenarios:
 
             # Subscribe
             q2 = conn2.register_agent("idle")
-            sub = await asyncio.wait_for(
-                conn2.send_command("subscribe", name="idle"), timeout=3)
+            sub = await asyncio.wait_for(conn2.send_command("subscribe", name="idle"), timeout=3)
             assert sub.replayed == 0
             assert sub.status == "running"
 
@@ -2045,15 +2096,14 @@ class TestReconnectScenarios:
         try:
             # Spawn agent that emits 3 messages quickly then exits
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="short",
-                                   cli_args=_slow_cli_script(3, 0.05),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="short", cli_args=_slow_cli_script(3, 0.05), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # Subscribe and read 1 message
             q1 = conn1.register_agent("short")
-            await asyncio.wait_for(
-                conn1.send_command("subscribe", name="short"), timeout=3)
+            await asyncio.wait_for(conn1.send_command("subscribe", name="short"), timeout=3)
             msg = await asyncio.wait_for(q1.get(), timeout=3)
             assert msg.type == "stdout"
 
@@ -2071,8 +2121,7 @@ class TestReconnectScenarios:
 
             # Subscribe and verify exit message is in buffer
             q2 = conn2.register_agent("short")
-            sub = await asyncio.wait_for(
-                conn2.send_command("subscribe", name="short"), timeout=3)
+            sub = await asyncio.wait_for(conn2.send_command("subscribe", name="short"), timeout=3)
             assert sub.status == "exited"
             assert sub.exit_code == 0
             assert sub.replayed > 0
@@ -2098,9 +2147,9 @@ class TestReconnectScenarios:
         conn2 = None
         try:
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="crash",
-                                   cli_args=_exit_with_code_script(7),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="crash", cli_args=_exit_with_code_script(7), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # Don't subscribe — disconnect immediately
@@ -2116,8 +2165,7 @@ class TestReconnectScenarios:
 
             # Subscribe and verify
             q2 = conn2.register_agent("crash")
-            sub = await asyncio.wait_for(
-                conn2.send_command("subscribe", name="crash"), timeout=3)
+            sub = await asyncio.wait_for(conn2.send_command("subscribe", name="crash"), timeout=3)
             assert sub.exit_code == 7
 
             # Read buffered messages — last should be EXIT with code 7
@@ -2142,16 +2190,15 @@ class TestReconnectScenarios:
         try:
             for name in ("alpha", "beta"):
                 await asyncio.wait_for(
-                    conn1.send_command("spawn", name=name,
-                                       cli_args=_slow_cli_script(30, 0.2),
-                                       env=dict(os.environ), cwd="/tmp"),
+                    conn1.send_command(
+                        "spawn", name=name, cli_args=_slow_cli_script(30, 0.2), env=dict(os.environ), cwd="/tmp"
+                    ),
                     timeout=3,
                 )
             # Subscribe to both and read a heartbeat from each
             for name in ("alpha", "beta"):
                 conn1.register_agent(name)
-                await asyncio.wait_for(
-                    conn1.send_command("subscribe", name=name), timeout=3)
+                await asyncio.wait_for(conn1.send_command("subscribe", name=name), timeout=3)
 
             # Disconnect
             conn1._demux_task.cancel()
@@ -2170,8 +2217,7 @@ class TestReconnectScenarios:
             queues = {}
             for name in ("alpha", "beta"):
                 queues[name] = conn2.register_agent(name)
-                sub = await asyncio.wait_for(
-                    conn2.send_command("subscribe", name=name), timeout=3)
+                sub = await asyncio.wait_for(conn2.send_command("subscribe", name=name), timeout=3)
                 assert sub.ok is True
                 assert sub.status == "running"
 
@@ -2195,30 +2241,29 @@ class TestReconnectScenarios:
         try:
             # "active": long-running, will have buffered output
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="active",
-                                   cli_args=_slow_cli_script(50, 0.2),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="active", cli_args=_slow_cli_script(50, 0.2), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # "done": exits quickly
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="done",
-                                   cli_args=_slow_cli_script(2, 0.05),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="done", cli_args=_slow_cli_script(2, 0.05), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # "silent": runs long but produces no output yet
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="silent",
-                                   cli_args=_silent_then_done_script(10),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="silent", cli_args=_silent_then_done_script(10), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
 
             # Subscribe to "active" to start its output flowing
             conn1.register_agent("active")
-            await asyncio.wait_for(
-                conn1.send_command("subscribe", name="active"), timeout=3)
+            await asyncio.wait_for(conn1.send_command("subscribe", name="active"), timeout=3)
 
             # Disconnect
             conn1._demux_task.cancel()
@@ -2255,9 +2300,9 @@ class TestReconnectScenarios:
             conn = await _connect(sock)
             conns.append(conn)
             await asyncio.wait_for(
-                conn.send_command("spawn", name="multi",
-                                  cli_args=_slow_cli_script(100, 0.1),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="multi", cli_args=_slow_cli_script(100, 0.1), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
 
@@ -2265,14 +2310,13 @@ class TestReconnectScenarios:
 
             for cycle in range(3):
                 q = conn.register_agent("multi")
-                sub = await asyncio.wait_for(
-                    conn.send_command("subscribe", name="multi"), timeout=3)
+                sub = await asyncio.wait_for(conn.send_command("subscribe", name="multi"), timeout=3)
 
                 # Read some messages (replayed + live)
                 for _ in range(3 + sub.replayed):
                     try:
                         msg = await asyncio.wait_for(q.get(), timeout=2)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         break
                     if msg.type == "stdout" and "n" in msg.data:
                         all_ns.append(msg.data["n"])
@@ -2289,11 +2333,9 @@ class TestReconnectScenarios:
                 conns.append(conn)
 
             # Verify no duplicates
-            assert len(all_ns) == len(set(all_ns)), \
-                f"Duplicate message numbers found: {sorted(all_ns)}"
+            assert len(all_ns) == len(set(all_ns)), f"Duplicate message numbers found: {sorted(all_ns)}"
             # Verify monotonically increasing
-            assert all_ns == sorted(all_ns), \
-                f"Messages out of order: {all_ns}"
+            assert all_ns == sorted(all_ns), f"Messages out of order: {all_ns}"
         finally:
             await _cleanup_multi(server, srv, conns, sock)
 
@@ -2310,15 +2352,14 @@ class TestReconnectScenarios:
         try:
             n_msgs = 50
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="burst",
-                                   cli_args=_slow_cli_script(n_msgs, 0.01),
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command(
+                    "spawn", name="burst", cli_args=_slow_cli_script(n_msgs, 0.01), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             # Subscribe but disconnect immediately without reading
             conn1.register_agent("burst")
-            await asyncio.wait_for(
-                conn1.send_command("subscribe", name="burst"), timeout=3)
+            await asyncio.wait_for(conn1.send_command("subscribe", name="burst"), timeout=3)
             conn1._demux_task.cancel()
             conn1._writer.close()
             await asyncio.sleep(1.0)  # let all messages buffer
@@ -2331,8 +2372,7 @@ class TestReconnectScenarios:
             assert buffered > 0
 
             q2 = conn2.register_agent("burst")
-            sub = await asyncio.wait_for(
-                conn2.send_command("subscribe", name="burst"), timeout=3)
+            sub = await asyncio.wait_for(conn2.send_command("subscribe", name="burst"), timeout=3)
             assert sub.replayed == buffered
 
             # Read all messages
@@ -2341,12 +2381,11 @@ class TestReconnectScenarios:
                 try:
                     msg = await asyncio.wait_for(q2.get(), timeout=2)
                     msgs.append(msg)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
 
             # Extract message numbers from stdout messages
-            ns = [m.data["n"] for m in msgs
-                  if m.type == "stdout" and "n" in m.data]
+            ns = [m.data["n"] for m in msgs if m.type == "stdout" and "n" in m.data]
 
             # Verify order and no duplicates
             assert ns == sorted(ns), f"Out of order: {ns}"
@@ -2364,6 +2403,7 @@ class TestReconnectScenarios:
 # Idle field tests
 # ---------------------------------------------------------------------------
 
+
 class TestIdleField:
     """Tests for the `idle` field on list/subscribe responses.
 
@@ -2379,9 +2419,9 @@ class TestIdleField:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="fresh",
-                                  cli_args=_slow_cli_script(1, 10),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="fresh", cli_args=_slow_cli_script(1, 10), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
@@ -2398,14 +2438,13 @@ class TestIdleField:
         try:
             # multi_turn: emits "ready", then waits for stdin
             await asyncio.wait_for(
-                conn.send_command("spawn", name="turn",
-                                  cli_args=_multi_turn_script(),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="turn", cli_args=_multi_turn_script(), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             q = conn.register_agent("turn")
-            await asyncio.wait_for(
-                conn.send_command("subscribe", name="turn"), timeout=3)
+            await asyncio.wait_for(conn.send_command("subscribe", name="turn"), timeout=3)
 
             # Read "ready" — agent has produced stdout -> idle=True
             msg = await asyncio.wait_for(q.get(), timeout=3)
@@ -2438,22 +2477,20 @@ class TestIdleField:
         try:
             # Script: reads one stdin line, sleeps 5s, then responds
             script = [
-                PYTHON, "-c",
+                PYTHON,
+                "-c",
                 "import json, sys, time\n"
                 "print(json.dumps({'type':'ready'}), flush=True)\n"
                 "line = sys.stdin.readline()\n"
                 "time.sleep(5)\n"
-                "print(json.dumps({'type':'done'}), flush=True)\n"
+                "print(json.dumps({'type':'done'}), flush=True)\n",
             ]
             await asyncio.wait_for(
-                conn.send_command("spawn", name="slow",
-                                  cli_args=script,
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command("spawn", name="slow", cli_args=script, env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
             q = conn.register_agent("slow")
-            await asyncio.wait_for(
-                conn.send_command("subscribe", name="slow"), timeout=3)
+            await asyncio.wait_for(conn.send_command("subscribe", name="slow"), timeout=3)
 
             # Read "ready"
             msg = await asyncio.wait_for(q.get(), timeout=3)
@@ -2485,14 +2522,13 @@ class TestIdleField:
         conn = await _connect(sock)
         try:
             await asyncio.wait_for(
-                conn.send_command("spawn", name="sub",
-                                  cli_args=_slow_cli_script(1, 10),
-                                  env=dict(os.environ), cwd="/tmp"),
+                conn.send_command(
+                    "spawn", name="sub", cli_args=_slow_cli_script(1, 10), env=dict(os.environ), cwd="/tmp"
+                ),
                 timeout=3,
             )
             conn.register_agent("sub")
-            sub = await asyncio.wait_for(
-                conn.send_command("subscribe", name="sub"), timeout=3)
+            sub = await asyncio.wait_for(conn.send_command("subscribe", name="sub"), timeout=3)
             assert sub.idle is not None
             assert sub.idle is True  # never queried
         finally:
@@ -2508,22 +2544,20 @@ class TestIdleField:
         try:
             # Script: reads stdin, sleeps 10s, then responds
             script = [
-                PYTHON, "-c",
+                PYTHON,
+                "-c",
                 "import json, sys, time\n"
                 "print(json.dumps({'type':'ready'}), flush=True)\n"
                 "line = sys.stdin.readline()\n"
                 "time.sleep(10)\n"
-                "print(json.dumps({'type':'done'}), flush=True)\n"
+                "print(json.dumps({'type':'done'}), flush=True)\n",
             ]
             await asyncio.wait_for(
-                conn1.send_command("spawn", name="persist",
-                                   cli_args=script,
-                                   env=dict(os.environ), cwd="/tmp"),
+                conn1.send_command("spawn", name="persist", cli_args=script, env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
             q = conn1.register_agent("persist")
-            await asyncio.wait_for(
-                conn1.send_command("subscribe", name="persist"), timeout=3)
+            await asyncio.wait_for(conn1.send_command("subscribe", name="persist"), timeout=3)
 
             # Read "ready", send stdin to start long task
             msg = await asyncio.wait_for(q.get(), timeout=3)
@@ -2548,8 +2582,7 @@ class TestIdleField:
 
             # Subscribe also reports idle=False
             conn2.register_agent("persist")
-            sub = await asyncio.wait_for(
-                conn2.send_command("subscribe", name="persist"), timeout=3)
+            sub = await asyncio.wait_for(conn2.send_command("subscribe", name="persist"), timeout=3)
             assert sub.idle is False
         finally:
             await _cleanup_multi(server, srv, [conn1, conn2], sock)
@@ -2566,6 +2599,7 @@ class TestIdleField:
 
 # --- Bridge-level: unlimited agent spawning ---
 
+
 class TestUnlimitedAgentSpawning:
     @pytest.mark.asyncio
     async def test_spawn_many_agents_no_cap(self):
@@ -2578,9 +2612,11 @@ class TestUnlimitedAgentSpawning:
             for i in range(n_agents):
                 result = await asyncio.wait_for(
                     conn.send_command(
-                        "spawn", name=f"agent-{i}",
+                        "spawn",
+                        name=f"agent-{i}",
                         cli_args=_slow_cli_script(1, 10),
-                        env=dict(os.environ), cwd="/tmp",
+                        env=dict(os.environ),
+                        cwd="/tmp",
                     ),
                     timeout=3,
                 )
@@ -2602,25 +2638,27 @@ class TestUnlimitedAgentSpawning:
 # bot.py cannot be imported directly (it has Discord setup side effects),
 # so we replicate the core awake-limit logic here with minimal fakes.
 
+
 class _FakeClient:
     """Stands in for ClaudeSDKClient — just needs to be truthy."""
+
     pass
 
 
 class _FakeSession:
     """Minimal AgentSession stand-in for concurrency tests."""
+
     def __init__(self, name: str, awake: bool = False):
         self.name = name
         self.client = _FakeClient() if awake else None
-        self.last_activity = __import__("datetime").datetime.now(
-            __import__("datetime").timezone.utc
-        )
+        self.last_activity = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
         self.query_lock = asyncio.Lock()
         self._bridge_busy = False
 
 
 class ConcurrencyLimitError(Exception):
     """Mirrors bot.py's ConcurrencyLimitError."""
+
     pass
 
 
@@ -2639,9 +2677,7 @@ def _wake(session: _FakeSession, agents: dict[str, _FakeSession]) -> None:
     if session.client is not None:
         return
     if _count_awake(agents) >= MAX_AWAKE_AGENTS:
-        raise ConcurrencyLimitError(
-            f"Cannot wake '{session.name}': all {MAX_AWAKE_AGENTS} slots busy"
-        )
+        raise ConcurrencyLimitError(f"Cannot wake '{session.name}': all {MAX_AWAKE_AGENTS} slots busy")
     session.client = _FakeClient()
 
 
@@ -2734,11 +2770,13 @@ class TestAwakeAgentLimit:
 # Flowcoder engine integration tests
 # ---------------------------------------------------------------------------
 
+
 # A mock flowcoder engine: emits block_start, reads stdin for user/shutdown,
 # emits block_complete, then result, then exits.
 def _mock_flowcoder_engine_script() -> list[str]:
     return [
-        PYTHON, "-c",
+        PYTHON,
+        "-c",
         "import json, sys\n"
         "# Emit block_start\n"
         "print(json.dumps({'type':'system','subtype':'block_start','data':{'block_id':'b1','block_name':'Ask','block_type':'prompt'}}), flush=True)\n"
@@ -2751,20 +2789,21 @@ def _mock_flowcoder_engine_script() -> list[str]:
         "        # Echo it back as a block_complete\n"
         "        print(json.dumps({'type':'system','subtype':'block_complete','data':{'block_id':'b1','block_name':'Ask','success':True}}), flush=True)\n"
         "        print(json.dumps({'type':'result','status':'completed'}), flush=True)\n"
-        "        break\n"
+        "        break\n",
     ]
 
 
 # A mock engine that emits several messages slowly (for disconnect/reconnect tests).
 def _slow_flowcoder_engine_script(n: int = 3, delay: float = 0.2) -> list[str]:
     return [
-        PYTHON, "-c",
+        PYTHON,
+        "-c",
         f"import json, sys, time\n"
         f"for i in range({n}):\n"
         f"    print(json.dumps({{'type':'system','subtype':'block_start','data':{{'block_id':f'b{{i}}','block_name':f'Step {{i}}','block_type':'prompt'}}}}), flush=True)\n"
         f"    time.sleep({delay})\n"
         f"    print(json.dumps({{'type':'system','subtype':'block_complete','data':{{'block_id':f'b{{i}}','block_name':f'Step {{i}}','success':True}}}}), flush=True)\n"
-        f"print(json.dumps({{'type':'result','status':'completed'}}), flush=True)\n"
+        f"print(json.dumps({{'type':'result','status':'completed'}}), flush=True)\n",
     ]
 
 
@@ -2780,9 +2819,11 @@ class TestFlowcoderBridgeIntegration:
         try:
             result = await asyncio.wait_for(
                 conn.send_command(
-                    "spawn", name="agent-x:flowcoder",
+                    "spawn",
+                    name="agent-x:flowcoder",
                     cli_args=_slow_cli_script(1, 5),
-                    env=dict(os.environ), cwd="/tmp",
+                    env=dict(os.environ),
+                    cwd="/tmp",
                 ),
                 timeout=3,
             )
@@ -2804,16 +2845,19 @@ class TestFlowcoderBridgeIntegration:
             name = "test:flowcoder"
             await asyncio.wait_for(
                 conn.send_command(
-                    "spawn", name=name,
+                    "spawn",
+                    name=name,
                     cli_args=_mock_flowcoder_engine_script(),
-                    env=dict(os.environ), cwd="/tmp",
+                    env=dict(os.environ),
+                    cwd="/tmp",
                 ),
                 timeout=3,
             )
 
             q = conn.register_agent(name)
             await asyncio.wait_for(
-                conn.send_command("subscribe", name=name), timeout=3,
+                conn.send_command("subscribe", name=name),
+                timeout=3,
             )
 
             # Should receive block_start from engine startup
@@ -2847,9 +2891,11 @@ class TestFlowcoderBridgeIntegration:
             name = "persist:flowcoder"
             await asyncio.wait_for(
                 conn1.send_command(
-                    "spawn", name=name,
+                    "spawn",
+                    name=name,
                     cli_args=_slow_flowcoder_engine_script(5, 0.3),
-                    env=dict(os.environ), cwd="/tmp",
+                    env=dict(os.environ),
+                    cwd="/tmp",
                 ),
                 timeout=3,
             )
@@ -2857,7 +2903,8 @@ class TestFlowcoderBridgeIntegration:
             # Subscribe and read first message
             q1 = conn1.register_agent(name)
             await asyncio.wait_for(
-                conn1.send_command("subscribe", name=name), timeout=3,
+                conn1.send_command("subscribe", name=name),
+                timeout=3,
             )
             first_msg = await asyncio.wait_for(q1.get(), timeout=3)
             assert isinstance(first_msg, StdoutMsg)
@@ -2877,14 +2924,16 @@ class TestFlowcoderBridgeIntegration:
             try:
                 # Engine should still be listed
                 list_result = await asyncio.wait_for(
-                    conn2.send_command("list"), timeout=3,
+                    conn2.send_command("list"),
+                    timeout=3,
                 )
                 assert name in list_result.agents
 
                 # Subscribe should replay buffered messages
                 q2 = conn2.register_agent(name)
                 sub = await asyncio.wait_for(
-                    conn2.send_command("subscribe", name=name), timeout=3,
+                    conn2.send_command("subscribe", name=name),
+                    timeout=3,
                 )
                 assert sub.ok
                 assert (sub.replayed or 0) > 0  # some messages were buffered
@@ -2912,9 +2961,11 @@ class TestFlowcoderBridgeIntegration:
             # Spawn a "Claude CLI" agent
             r1 = await asyncio.wait_for(
                 conn.send_command(
-                    "spawn", name="agent-x",
+                    "spawn",
+                    name="agent-x",
                     cli_args=_slow_cli_script(1, 10),
-                    env=dict(os.environ), cwd="/tmp",
+                    env=dict(os.environ),
+                    cwd="/tmp",
                 ),
                 timeout=3,
             )
@@ -2923,9 +2974,11 @@ class TestFlowcoderBridgeIntegration:
             # Spawn a flowcoder engine for the same agent
             r2 = await asyncio.wait_for(
                 conn.send_command(
-                    "spawn", name="agent-x:flowcoder",
+                    "spawn",
+                    name="agent-x:flowcoder",
                     cli_args=_slow_cli_script(1, 10),
-                    env=dict(os.environ), cwd="/tmp",
+                    env=dict(os.environ),
+                    cwd="/tmp",
                 ),
                 timeout=3,
             )
@@ -2949,9 +3002,11 @@ class TestFlowcoderBridgeIntegration:
             name = "cleanup:flowcoder"
             await asyncio.wait_for(
                 conn.send_command(
-                    "spawn", name=name,
+                    "spawn",
+                    name=name,
                     cli_args=_mock_flowcoder_engine_script(),
-                    env=dict(os.environ), cwd="/tmp",
+                    env=dict(os.environ),
+                    cwd="/tmp",
                 ),
                 timeout=3,
             )
@@ -2962,7 +3017,8 @@ class TestFlowcoderBridgeIntegration:
 
             # Kill to clean up
             kill_result = await asyncio.wait_for(
-                conn.send_command("kill", name=name), timeout=3,
+                conn.send_command("kill", name=name),
+                timeout=3,
             )
             assert kill_result.ok
 

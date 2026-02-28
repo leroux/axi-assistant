@@ -15,17 +15,17 @@ Usage:
     axi-test clean <name> [--force] [--keep-channel] [--keep-branch]
     axi-test logs <name>
 """
+
 import argparse
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
-
-import re
+from datetime import UTC, datetime
 
 import httpx
 from dotenv import dotenv_values
@@ -81,7 +81,9 @@ def is_instance_running(name: str) -> bool:
     """
     result = subprocess.run(
         ["systemctl", "--user", "is-active", f"axi-test@{name}"],
-        capture_output=True, text=True, env=_systemctl_env(),
+        capture_output=True,
+        text=True,
+        env=_systemctl_env(),
     )
     stderr = result.stderr.strip()
     if "Failed to connect to bus" in stderr or "No medium found" in stderr:
@@ -103,7 +105,9 @@ def get_worktree_branch(worktree_path: str) -> str:
     """Get the branch name for a worktree."""
     result = subprocess.run(
         ["git", "branch", "--show-current"],
-        cwd=worktree_path, capture_output=True, text=True,
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
     )
     branch = result.stdout.strip()
     if branch:
@@ -111,7 +115,9 @@ def get_worktree_branch(worktree_path: str) -> str:
     # Detached HEAD — show short hash
     result = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"],
-        cwd=worktree_path, capture_output=True, text=True,
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
     )
     return result.stdout.strip() or "unknown"
 
@@ -213,7 +219,7 @@ def _migrate_from_env(config: dict) -> dict:
             "guild": guild_name,
             "guild_id": guild_id,
             "token_id": bot_name,
-            "reserved_at": datetime.now(timezone.utc).isoformat(),
+            "reserved_at": datetime.now(UTC).isoformat(),
             "worktree": path,
         }
 
@@ -235,7 +241,8 @@ def _health_check(slots: dict, config: dict) -> None:
             if is_instance_running(name):
                 subprocess.run(
                     ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                    capture_output=True, env=_systemctl_env(),
+                    capture_output=True,
+                    env=_systemctl_env(),
                 )
 
     for name in to_remove:
@@ -243,8 +250,7 @@ def _health_check(slots: dict, config: dict) -> None:
         print(f"Cleaned up orphaned reservation: '{name}' (worktree removed)")
 
 
-def _find_free_guild(slots: dict, config: dict, instance_name: str,
-                     explicit_guild: str | None) -> str | None:
+def _find_free_guild(slots: dict, config: dict, instance_name: str, explicit_guild: str | None) -> str | None:
     """Find a free guild whose bot token is not in use. Caller must hold slot lock."""
     used_tokens = set()
     for name, slot in slots.items():
@@ -276,7 +282,7 @@ def _make_slot(guild_name: str, config: dict, worktree: str) -> dict:
         "guild": guild_name,
         "guild_id": guild_info["guild_id"],
         "token_id": guild_info.get("bot"),
-        "reserved_at": datetime.now(timezone.utc).isoformat(),
+        "reserved_at": datetime.now(UTC).isoformat(),
         "worktree": worktree,
     }
 
@@ -312,8 +318,7 @@ def _write_env(guild_name: str, config: dict, instance_path: str, data_path: str
                 json.dump([], f)
 
 
-def _try_reserve(config: dict, name: str, instance_path: str,
-                 explicit_guild: str | None) -> str | None:
+def _try_reserve(config: dict, name: str, instance_path: str, explicit_guild: str | None) -> str | None:
     """Attempt to reserve a slot atomically. Returns guild name or None."""
     with _flock(SLOTS_LOCK):
         slots = _load_slots(config)
@@ -328,7 +333,8 @@ def _try_reserve(config: dict, name: str, instance_path: str,
                 print(f"Cleaning up stale reservation for '{name}' (not running)")
                 subprocess.run(
                     ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                    capture_output=True, env=_systemctl_env(),
+                    capture_output=True,
+                    env=_systemctl_env(),
                 )
                 env_path = os.path.join(instance_path, ".env")
                 if os.path.isfile(env_path):
@@ -345,28 +351,26 @@ def _try_reserve(config: dict, name: str, instance_path: str,
         return None
 
 
-def _wait_and_reserve(config: dict, name: str, instance_path: str,
-                      explicit_guild: str | None, timeout: int,
-                      poll_interval: int = 10) -> str:
+def _wait_and_reserve(
+    config: dict, name: str, instance_path: str, explicit_guild: str | None, timeout: int, poll_interval: int = 10
+) -> str:
     """Poll until a slot is available and reserve it atomically."""
     deadline = time.monotonic() + timeout
     total = len(config["guilds"])
 
     if explicit_guild:
         bot_name = config["guilds"][explicit_guild].get("bot", "?")
-        print(f"Bot '{bot_name}' (guild '{explicit_guild}') is in use. "
-              f"Waiting for it to free up (timeout: {timeout}s)...")
+        print(
+            f"Bot '{bot_name}' (guild '{explicit_guild}') is in use. Waiting for it to free up (timeout: {timeout}s)..."
+        )
     else:
-        print(f"All {total} bot token(s) are in use. "
-              f"Waiting for a slot (timeout: {timeout}s)...")
+        print(f"All {total} bot token(s) are in use. Waiting for a slot (timeout: {timeout}s)...")
 
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            print(f"\nCould not reserve a bot token slot after waiting {timeout}s.",
-                  file=sys.stderr)
-            print("All bot tokens are still in use. Please ask the user how to proceed.",
-                  file=sys.stderr)
+            print(f"\nCould not reserve a bot token slot after waiting {timeout}s.", file=sys.stderr)
+            print("All bot tokens are still in use. Please ask the user how to proceed.", file=sys.stderr)
             sys.exit(1)
 
         time.sleep(min(poll_interval, remaining))
@@ -399,9 +403,10 @@ def cleanup_orphan_services() -> int:
     slots = _read_slots()
     env = _systemctl_env()
     result = subprocess.run(
-        ["systemctl", "--user", "list-units", "--all", "--plain",
-         "--no-legend", "axi-test@*"],
-        capture_output=True, text=True, env=env,
+        ["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "axi-test@*"],
+        capture_output=True,
+        text=True,
+        env=env,
     )
     cleaned = 0
     for line in result.stdout.strip().splitlines():
@@ -410,7 +415,7 @@ def cleanup_orphan_services() -> int:
         unit = line.split()[0]
         if not unit.startswith("axi-test@") or not unit.endswith(".service"):
             continue
-        name = unit[len("axi-test@"):-len(".service")]
+        name = unit[len("axi-test@") : -len(".service")]
 
         # Has a reservation → legitimate
         if name in slots:
@@ -423,11 +428,13 @@ def cleanup_orphan_services() -> int:
 
         subprocess.run(
             ["systemctl", "--user", "stop", unit],
-            capture_output=True, env=env,
+            capture_output=True,
+            env=env,
         )
         subprocess.run(
             ["systemctl", "--user", "reset-failed", unit],
-            capture_output=True, env=env,
+            capture_output=True,
+            env=env,
         )
         print(f"Cleaned up orphan service: {unit}")
         cleaned += 1
@@ -442,7 +449,8 @@ def _find_main_repo() -> str:
     """Find the main repo path via git's common dir."""
     result = subprocess.run(
         ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         print("Error: Not inside a git repository", file=sys.stderr)
@@ -482,7 +490,7 @@ def _write_queue(main_repo: str, entries: list[dict]) -> None:
 
 def _cleanup_stale(entries: list[dict]) -> None:
     """Remove entries with dead processes. Modifies list in place."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     to_remove = []
     for i, entry in enumerate(entries):
         pid = entry.get("pid")
@@ -519,7 +527,8 @@ def _git(main_repo: str, *args: str) -> subprocess.CompletedProcess:
     """Run a git command in the main repo."""
     return subprocess.run(
         ["git", "-C", main_repo, *args],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -605,7 +614,11 @@ def cmd_up(args):
     if guild_name is None:
         if args.wait:
             guild_name = _wait_and_reserve(
-                config, name, instance_path, args.guild, args.wait_timeout,
+                config,
+                name,
+                instance_path,
+                args.guild,
+                args.wait_timeout,
             )
         else:
             total = len(config["guilds"])
@@ -640,7 +653,8 @@ def cmd_down(args):
             print(f"Stopping axi-test@{name}...")
             subprocess.run(
                 ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                check=True, env=_systemctl_env(),
+                check=True,
+                env=_systemctl_env(),
             )
 
         if os.path.isfile(env_path):
@@ -661,7 +675,8 @@ def cmd_restart(args):
     print(f"Restarting axi-test@{name}...")
     subprocess.run(
         ["systemctl", "--user", "restart", f"axi-test@{name}"],
-        check=True, env=_systemctl_env(),
+        check=True,
+        env=_systemctl_env(),
     )
     print("Done")
 
@@ -685,8 +700,7 @@ def cmd_list(args):
         worktree = slot.get("worktree", os.path.join(TESTS_DIR, name))
         status = "running" if is_instance_running(name) else "stopped"
 
-        is_git = (os.path.isdir(os.path.join(worktree, ".git"))
-                  or os.path.isfile(os.path.join(worktree, ".git")))
+        is_git = os.path.isdir(os.path.join(worktree, ".git")) or os.path.isfile(os.path.join(worktree, ".git"))
         branch = get_worktree_branch(worktree) if is_git else "-"
 
         reserved_at = slot.get("reserved_at", "?")[:19]
@@ -714,7 +728,7 @@ def api_get(client: httpx.Client, path: str, params: dict | None = None):
             time.sleep(retry_after)
             continue
         if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
             continue
         print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
         sys.exit(1)
@@ -733,7 +747,7 @@ def api_post(client: httpx.Client, path: str, json_data: dict):
             time.sleep(retry_after)
             continue
         if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
             continue
         print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
         sys.exit(1)
@@ -752,7 +766,7 @@ def api_patch(client: httpx.Client, path: str, json_data: dict):
             time.sleep(retry_after)
             continue
         if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
             continue
         print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
         sys.exit(1)
@@ -771,7 +785,7 @@ def api_delete(client: httpx.Client, path: str):
             time.sleep(retry_after)
             continue
         if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
             continue
         print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
         sys.exit(1)
@@ -791,8 +805,7 @@ def _normalize_channel_name(name: str) -> str:
     return re.sub(r"[^a-z0-9\-_]", "", name)
 
 
-def _find_channel_by_name(client: httpx.Client, guild_id: str,
-                          name: str) -> dict | None:
+def _find_channel_by_name(client: httpx.Client, guild_id: str, name: str) -> dict | None:
     """Find a text channel by name in the Active category."""
     normalized = _normalize_channel_name(name)
     channels = api_get(client, f"/guilds/{guild_id}/channels")
@@ -803,8 +816,11 @@ def _find_channel_by_name(client: httpx.Client, guild_id: str,
             active_cat_id = ch["id"]
             break
     for ch in channels:
-        if (ch.get("name") == normalized and ch.get("type") == 0
-                and (active_cat_id is None or ch.get("parent_id") == active_cat_id)):
+        if (
+            ch.get("name") == normalized
+            and ch.get("type") == 0
+            and (active_cat_id is None or ch.get("parent_id") == active_cat_id)
+        ):
             return ch
     return None
 
@@ -976,8 +992,8 @@ def cmd_merge(args):
         "branch": branch,
         "worktree": cwd,
         "pid": os.getpid(),
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-        "heartbeat": datetime.now(timezone.utc).isoformat(),
+        "submitted_at": datetime.now(UTC).isoformat(),
+        "heartbeat": datetime.now(UTC).isoformat(),
         "status": "queued",
     }
 
@@ -1011,7 +1027,7 @@ def cmd_merge(args):
                 # Update heartbeat
                 for e in entries:
                     if e["branch"] == branch:
-                        e["heartbeat"] = datetime.now(timezone.utc).isoformat()
+                        e["heartbeat"] = datetime.now(UTC).isoformat()
                         break
                 # Check if first
                 first = entries and entries[0]["branch"] == branch
@@ -1120,14 +1136,15 @@ def cmd_clean(args):
     # 1. Check for uncommitted changes
     result = subprocess.run(
         ["git", "-C", worktree_path, "status", "--porcelain"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.stdout.strip():
         if not force:
             print("Error: Worktree has uncommitted changes:", file=sys.stderr)
             for line in result.stdout.strip().splitlines():
                 print(f"  {line}", file=sys.stderr)
-            print(f"\nUse --force to clean anyway", file=sys.stderr)
+            print("\nUse --force to clean anyway", file=sys.stderr)
             sys.exit(1)
         else:
             print("Warning: Discarding uncommitted changes (--force)")
@@ -1144,7 +1161,8 @@ def cmd_clean(args):
                 print(f"Stopping axi-test@{name}...")
                 subprocess.run(
                     ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                    capture_output=True, env=_systemctl_env(),
+                    capture_output=True,
+                    env=_systemctl_env(),
                 )
             env_path = os.path.join(worktree_path, ".env")
             if os.path.isfile(env_path):
@@ -1155,12 +1173,12 @@ def cmd_clean(args):
 
     # 4. Remove git worktree
     main_repo_result = subprocess.run(
-        ["git", "-C", worktree_path, "rev-parse", "--path-format=absolute",
-         "--git-common-dir"],
-        capture_output=True, text=True,
+        ["git", "-C", worktree_path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True,
+        text=True,
     )
     if main_repo_result.returncode != 0:
-        print(f"Error: Cannot determine main repo from worktree", file=sys.stderr)
+        print("Error: Cannot determine main repo from worktree", file=sys.stderr)
         sys.exit(1)
     main_repo = os.path.dirname(main_repo_result.stdout.strip())
 
@@ -1178,13 +1196,15 @@ def cmd_clean(args):
         # Check if branch is merged into main
         result = subprocess.run(
             ["git", "-C", main_repo, "branch", "--merged", "main"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         merged_branches = [b.strip().removeprefix("* ") for b in result.stdout.splitlines()]
         if branch in merged_branches:
             subprocess.run(
                 ["git", "-C", main_repo, "branch", "-d", branch],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             print(f"Deleted merged branch: {branch}")
         else:
@@ -1205,8 +1225,7 @@ def cmd_clean(args):
                 if ch:
                     killed_cat = _find_killed_category(client, guild_id)
                     if killed_cat:
-                        api_patch(client, f"/channels/{ch['id']}",
-                                  {"parent_id": killed_cat})
+                        api_patch(client, f"/channels/{ch['id']}", {"parent_id": killed_cat})
                         print(f"Moved channel #{ch['name']} to Killed")
                     else:
                         api_delete(client, f"/channels/{ch['id']}")
@@ -1220,9 +1239,16 @@ def cmd_clean(args):
 
 
 def cmd_logs(args):
-    os.execvp("journalctl", [
-        "journalctl", "--user", "-u", f"axi-test@{args.name}", "-f",
-    ])
+    os.execvp(
+        "journalctl",
+        [
+            "journalctl",
+            "--user",
+            "-u",
+            f"axi-test@{args.name}",
+            "-f",
+        ],
+    )
 
 
 def main():
@@ -1236,10 +1262,8 @@ def main():
     p_up = sub.add_parser("up", help="Reserve a bot/guild slot for a test instance")
     p_up.add_argument("name", help="Instance name")
     p_up.add_argument("--guild", help="Guild name from config (default: auto-pick)")
-    p_up.add_argument("--wait", action="store_true",
-                       help="Wait for a bot token slot if all are in use")
-    p_up.add_argument("--wait-timeout", type=int, default=7200,
-                       help="Max seconds to wait for a slot (default: 7200)")
+    p_up.add_argument("--wait", action="store_true", help="Wait for a bot token slot if all are in use")
+    p_up.add_argument("--wait-timeout", type=int, default=7200, help="Max seconds to wait for a slot (default: 7200)")
     p_up.set_defaults(func=cmd_up)
 
     # down
@@ -1271,20 +1295,18 @@ def main():
 
     # queue
     p_queue = sub.add_parser("queue", help="Show or manage merge queue")
-    p_queue.add_argument("action", nargs="?", default="show", choices=["show", "drop"],
-                          help="Action: show (default) or drop")
+    p_queue.add_argument(
+        "action", nargs="?", default="show", choices=["show", "drop"], help="Action: show (default) or drop"
+    )
     p_queue.add_argument("--all", action="store_true", help="Drop all entries (with 'drop')")
     p_queue.set_defaults(func=cmd_queue)
 
     # clean
     p_clean = sub.add_parser("clean", help="Remove worktree, release slot, kill channel")
     p_clean.add_argument("name", help="Worktree/agent name")
-    p_clean.add_argument("--force", action="store_true",
-                          help="Clean even with uncommitted changes")
-    p_clean.add_argument("--keep-channel", action="store_true",
-                          help="Don't move Discord channel to Killed")
-    p_clean.add_argument("--keep-branch", action="store_true",
-                          help="Don't delete merged feature branch")
+    p_clean.add_argument("--force", action="store_true", help="Clean even with uncommitted changes")
+    p_clean.add_argument("--keep-channel", action="store_true", help="Don't move Discord channel to Killed")
+    p_clean.add_argument("--keep-branch", action="store_true", help="Don't delete merged feature branch")
     p_clean.set_defaults(func=cmd_clean)
 
     # cleanup

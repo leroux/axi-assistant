@@ -14,13 +14,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bridge.protocol import StdoutMsg, StderrMsg, ExitMsg, ResultMsg
-from flowcoder import FlowcoderProcess, BridgeFlowcoderProcess
-
+from bridge.protocol import ExitMsg, ResultMsg, StderrMsg, StdoutMsg
+from flowcoder import BridgeFlowcoderProcess, FlowcoderProcess
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def make_result(**kwargs) -> ResultMsg:
     """Build a ResultMsg with defaults."""
@@ -57,6 +57,7 @@ def make_proc(conn=None, **kwargs) -> BridgeFlowcoderProcess:
 # BridgeFlowcoderProcess: start
 # ---------------------------------------------------------------------------
 
+
 class TestBridgeStart:
     @pytest.mark.asyncio
     async def test_start_spawns_and_subscribes(self):
@@ -90,9 +91,7 @@ class TestBridgeStart:
     async def test_start_already_running(self):
         """Handles already_running=True from bridge."""
         conn = make_conn()
-        conn.send_command = AsyncMock(
-            return_value=make_result(already_running=True)
-        )
+        conn.send_command = AsyncMock(return_value=make_result(already_running=True))
         proc = make_proc(conn=conn)
 
         await proc.start()
@@ -102,9 +101,7 @@ class TestBridgeStart:
     async def test_start_spawn_failure_raises(self):
         """RuntimeError on ok=False from spawn."""
         conn = make_conn()
-        conn.send_command = AsyncMock(
-            return_value=make_result(ok=False, error="spawn failed")
-        )
+        conn.send_command = AsyncMock(return_value=make_result(ok=False, error="spawn failed"))
         proc = make_proc(conn=conn)
 
         with pytest.raises(RuntimeError, match="spawn failed"):
@@ -118,14 +115,13 @@ class TestBridgeStart:
 # BridgeFlowcoderProcess: subscribe (reconnect)
 # ---------------------------------------------------------------------------
 
+
 class TestBridgeSubscribe:
     @pytest.mark.asyncio
     async def test_subscribe_registers_and_subscribes(self):
         """subscribe() registers agent and sends subscribe command."""
         conn = make_conn()
-        conn.send_command = AsyncMock(
-            return_value=make_result(replayed=5, status="running")
-        )
+        conn.send_command = AsyncMock(return_value=make_result(replayed=5, status="running"))
         proc = make_proc(conn=conn)
 
         result = await proc.subscribe()
@@ -139,9 +135,7 @@ class TestBridgeSubscribe:
     async def test_subscribe_failure_raises(self):
         """RuntimeError on subscribe failure."""
         conn = make_conn()
-        conn.send_command = AsyncMock(
-            return_value=make_result(ok=False, error="not found")
-        )
+        conn.send_command = AsyncMock(return_value=make_result(ok=False, error="not found"))
         proc = make_proc(conn=conn)
 
         with pytest.raises(RuntimeError, match="not found"):
@@ -152,6 +146,7 @@ class TestBridgeSubscribe:
 # ---------------------------------------------------------------------------
 # BridgeFlowcoderProcess: messages
 # ---------------------------------------------------------------------------
+
 
 class TestBridgeMessages:
     @pytest.mark.asyncio
@@ -237,6 +232,7 @@ class TestBridgeMessages:
 # BridgeFlowcoderProcess: send
 # ---------------------------------------------------------------------------
 
+
 class TestBridgeSend:
     @pytest.mark.asyncio
     async def test_send_forwards_to_bridge(self):
@@ -256,6 +252,7 @@ class TestBridgeSend:
 # ---------------------------------------------------------------------------
 # BridgeFlowcoderProcess: stop / detach
 # ---------------------------------------------------------------------------
+
 
 class TestBridgeStopDetach:
     @pytest.mark.asyncio
@@ -316,6 +313,7 @@ class TestBridgeStopDetach:
 # is_bridge_backed property
 # ---------------------------------------------------------------------------
 
+
 class TestIsBridgeBacked:
     def test_direct_process_not_bridge_backed(self):
         proc = FlowcoderProcess(command="test")
@@ -331,15 +329,18 @@ class TestIsBridgeBacked:
 # Helper functions
 # ---------------------------------------------------------------------------
 
+
 class TestBuildEngineCmd:
     def test_basic_command(self):
         from flowcoder import build_engine_cmd
+
         cmd = build_engine_cmd("my-flow")
         assert "--command" in cmd
         assert "my-flow" in cmd
 
     def test_with_args(self):
         from flowcoder import build_engine_cmd
+
         cmd = build_engine_cmd("my-flow", args="hello world")
         assert "--args" in cmd
         idx = cmd.index("--args")
@@ -347,6 +348,7 @@ class TestBuildEngineCmd:
 
     def test_with_search_paths(self):
         from flowcoder import build_engine_cmd
+
         cmd = build_engine_cmd("my-flow", search_paths=["/extra/path"])
         # Should have default search path + the extra one
         sp_indices = [i for i, x in enumerate(cmd) if x == "--search-path"]
@@ -354,6 +356,7 @@ class TestBuildEngineCmd:
 
     def test_without_args(self):
         from flowcoder import build_engine_cmd
+
         cmd = build_engine_cmd("my-flow")
         assert "--args" not in cmd
 
@@ -361,6 +364,7 @@ class TestBuildEngineCmd:
 class TestBuildEngineEnv:
     def test_strips_claude_vars(self):
         from flowcoder import build_engine_env
+
         with patch.dict("os.environ", {"CLAUDECODE": "1", "PATH": "/usr/bin"}):
             env = build_engine_env()
             assert "CLAUDECODE" not in env
@@ -371,9 +375,11 @@ class TestBuildEngineEnv:
 # Sleep/wake behavior
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class FakeAgent:
     """Minimal agent session for sleep tests."""
+
     name: str
     agent_type: str = "flowcoder"
     flowcoder_process: object = None
@@ -404,7 +410,7 @@ class TestSleepFlowcoder:
             # Simulate sleep_agent logic for bridge-backed flowcoder
             if agent.flowcoder_process:
                 p = agent.flowcoder_process
-                if getattr(p, 'is_bridge_backed', False) and agent.query_lock.locked():
+                if getattr(p, "is_bridge_backed", False) and agent.query_lock.locked():
                     await p.detach()
                 else:
                     await p.stop()
@@ -435,7 +441,7 @@ class TestSleepFlowcoder:
         # Simulate sleep_agent logic
         if agent.flowcoder_process:
             p = agent.flowcoder_process
-            if getattr(p, 'is_bridge_backed', False) and agent.query_lock.locked():
+            if getattr(p, "is_bridge_backed", False) and agent.query_lock.locked():
                 await p.detach()
             else:
                 await p.stop()
@@ -469,7 +475,7 @@ class TestSleepFlowcoder:
         try:
             if agent.flowcoder_process:
                 p = agent.flowcoder_process
-                if getattr(p, 'is_bridge_backed', False) and agent.query_lock.locked():
+                if getattr(p, "is_bridge_backed", False) and agent.query_lock.locked():
                     await p.detach()
                 else:
                     await p.stop()
@@ -498,7 +504,7 @@ class TestSleepFlowcoder:
         # Handle flowcoder process first
         if agent.flowcoder_process:
             p = agent.flowcoder_process
-            if getattr(p, 'is_bridge_backed', False) and agent.query_lock.locked():
+            if getattr(p, "is_bridge_backed", False) and agent.query_lock.locked():
                 await p.detach()
             else:
                 await p.stop()
@@ -514,6 +520,7 @@ class TestSleepFlowcoder:
 # Reconnect with status_request
 # ---------------------------------------------------------------------------
 
+
 class TestReconnectStatusRequest:
     """Tests for reconnect using engine status_request instead of bridge idle flag."""
 
@@ -521,9 +528,7 @@ class TestReconnectStatusRequest:
     async def test_reconnect_sends_status_request(self):
         """subscribe() + send(status_request) is the reconnect flow."""
         conn = make_conn()
-        conn.send_command = AsyncMock(
-            return_value=make_result(replayed=0, status="running")
-        )
+        conn.send_command = AsyncMock(return_value=make_result(replayed=0, status="running"))
         proc = make_proc(conn=conn)
 
         # Simulate reconnect: subscribe, then send status_request
@@ -567,7 +572,12 @@ class TestReconnectStatusRequest:
 
         # Engine is busy, then sends some output, then result, then idle status
         await q.put(StdoutMsg(name="test-agent:flowcoder", data={"type": "status_response", "busy": True}))
-        await q.put(StdoutMsg(name="test-agent:flowcoder", data={"type": "system", "subtype": "block_start", "data": {"block_name": "step1"}}))
+        await q.put(
+            StdoutMsg(
+                name="test-agent:flowcoder",
+                data={"type": "system", "subtype": "block_start", "data": {"block_name": "step1"}},
+            )
+        )
         await q.put(StdoutMsg(name="test-agent:flowcoder", data={"type": "result", "result": "done"}))
         await q.put(StdoutMsg(name="test-agent:flowcoder", data={"type": "status_response", "busy": False}))
 
@@ -588,9 +598,7 @@ class TestReconnectStatusRequest:
         conn = make_conn()
         q = asyncio.Queue()
         conn.register_agent = MagicMock(return_value=q)
-        conn.send_command = AsyncMock(
-            return_value=make_result(replayed=2, status="running")
-        )
+        conn.send_command = AsyncMock(return_value=make_result(replayed=2, status="running"))
         proc = make_proc(conn=conn)
 
         # Simulate reconnect

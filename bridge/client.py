@@ -5,10 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .protocol import (
-    CmdMsg, StdinMsg, ResultMsg, StdoutMsg, StderrMsg, ExitMsg,
+    CmdMsg,
+    ExitMsg,
+    ResultMsg,
+    StderrMsg,
+    StdinMsg,
+    StdoutMsg,
     parse_server_msg,
 )
 
@@ -147,7 +153,11 @@ class BridgeTransport:
     async def spawn(self, cli_args: list[str], env: dict[str, str], cwd: str) -> ResultMsg:
         """Tell the bridge to spawn a new CLI process for this agent."""
         result = await self._conn.send_command(
-            "spawn", name=self._name, cli_args=cli_args, env=env, cwd=cwd,
+            "spawn",
+            name=self._name,
+            cli_args=cli_args,
+            env=env,
+            cwd=cwd,
         )
         if not result.ok:
             raise RuntimeError(f"Bridge spawn failed for '{self._name}': {result}")
@@ -167,9 +177,11 @@ class BridgeTransport:
         msg = json.loads(data)
 
         # Intercept initialize for reconnecting agents — fake success
-        if (self._reconnecting
-                and msg.get("type") == "control_request"
-                and msg.get("request", {}).get("subtype") == "initialize"):
+        if (
+            self._reconnecting
+            and msg.get("type") == "control_request"
+            and msg.get("request", {}).get("subtype") == "initialize"
+        ):
             request_id = msg.get("request_id")
             fake_response = {
                 "type": "control_response",

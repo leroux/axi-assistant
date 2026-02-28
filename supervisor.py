@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 LOG_LEVEL = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -44,8 +44,8 @@ DIR = Path(__file__).resolve().parent
 # ---------------------------------------------------------------------------
 
 _bot_proc: subprocess.Popen | None = None
-_stopping = False      # full stop requested (SIGTERM/SIGINT)
-_hot_restart = False   # hot restart requested (SIGHUP)
+_stopping = False  # full stop requested (SIGTERM/SIGINT)
+_hot_restart = False  # hot restart requested (SIGHUP)
 
 
 def _stop_handler(signum, _frame):
@@ -71,7 +71,8 @@ def _kill_bridge():
     try:
         result = subprocess.run(
             ["pgrep", "-f", f"bridge.*{sock_path}"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         pids = result.stdout.strip().split()
         for pid_str in pids:
@@ -171,7 +172,7 @@ def write_crash_marker(code: int, elapsed: int, crash_log: str):
     marker = {
         "exit_code": code,
         "uptime_seconds": elapsed,
-        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+        "timestamp": datetime.now(UTC).astimezone().isoformat(),
         "crash_log": crash_log,
     }
     (DIR / CRASH_ANALYSIS_MARKER).write_text(json.dumps(marker, indent=4) + "\n")
@@ -193,7 +194,7 @@ def write_rollback_marker(
         "rollback_details": rollback_details,
         "pre_launch_commit": pre_launch_commit,
         "crashed_commit": crashed_commit,
-        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+        "timestamp": datetime.now(UTC).astimezone().isoformat(),
         "crash_log": crash_log,
     }
     (DIR / ROLLBACK_MARKER).write_text(json.dumps(marker, indent=4) + "\n")
@@ -253,9 +254,11 @@ def main():
         if elapsed >= CRASH_THRESHOLD:
             runtime_crash_count += 1
             log.warning(
-                "Runtime crash detected (%ds >= %ds threshold). "
-                "Consecutive count: %d/%d.",
-                elapsed, CRASH_THRESHOLD, runtime_crash_count, MAX_RUNTIME_CRASHES,
+                "Runtime crash detected (%ds >= %ds threshold). Consecutive count: %d/%d.",
+                elapsed,
+                CRASH_THRESHOLD,
+                runtime_crash_count,
+                MAX_RUNTIME_CRASHES,
             )
 
             if runtime_crash_count >= MAX_RUNTIME_CRASHES:
@@ -304,8 +307,7 @@ def main():
         # Stash uncommitted changes
         if uncommitted:
             log.info("Stashing uncommitted changes...")
-            r = git("stash", "push", "--include-untracked", "-m",
-                     f"auto-rollback: crash with exit code {code}")
+            r = git("stash", "push", "--include-untracked", "-m", f"auto-rollback: crash with exit code {code}")
             stash_output = (r.stdout + r.stderr).strip()
             log.info("%s", stash_output)
             rollback_details = "uncommitted changes stashed"
@@ -316,15 +318,22 @@ def main():
             new_commits = r.stdout.strip() if r.returncode == 0 else "?"
             log.warning(
                 "HEAD moved from %s to %s (%s new commit(s)). Resetting...",
-                pre_launch_commit[:7], current_commit[:7], new_commits,
+                pre_launch_commit[:7],
+                current_commit[:7],
+                new_commits,
             )
             git("reset", "--hard", pre_launch_commit)
             detail = f"{new_commits} commit(s) reverted"
             rollback_details = f"{rollback_details} + {detail}" if rollback_details else detail
 
         write_rollback_marker(
-            code, elapsed, stash_output, rollback_details,
-            pre_launch_commit, current_commit, crash_log,
+            code,
+            elapsed,
+            stash_output,
+            rollback_details,
+            pre_launch_commit,
+            current_commit,
+            crash_log,
         )
 
         log.info("Rollback marker written. Relaunching with pre-launch code (%s)...", pre_launch_commit[:7])

@@ -10,8 +10,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-
 # -- Bot.py → Bridge ----------------------------------------------------------
+
 
 class CmdMsg(BaseModel):
     type: Literal["cmd"] = "cmd"
@@ -21,6 +21,7 @@ class CmdMsg(BaseModel):
     env: dict[str, str] = {}
     cwd: str | None = None
 
+
 class StdinMsg(BaseModel):
     type: Literal["stdin"] = "stdin"
     name: str
@@ -28,6 +29,7 @@ class StdinMsg(BaseModel):
 
 
 # -- Bridge → Bot.py ----------------------------------------------------------
+
 
 class ResultMsg(BaseModel):
     type: Literal["result"] = "result"
@@ -47,15 +49,18 @@ class ResultMsg(BaseModel):
     # status
     uptime_seconds: int | None = None
 
+
 class StdoutMsg(BaseModel):
     type: Literal["stdout"] = "stdout"
     name: str
     data: dict[str, Any]  # opaque Claude SDK message
 
+
 class StderrMsg(BaseModel):
     type: Literal["stderr"] = "stderr"
     name: str
     text: str
+
 
 class ExitMsg(BaseModel):
     type: Literal["exit"] = "exit"

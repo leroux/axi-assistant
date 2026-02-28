@@ -22,6 +22,7 @@ Examples:
     # Wait for next message (auto-detects latest as baseline)
     wait_for_message.py 123456789
 """
+
 import argparse
 import json
 import os
@@ -57,7 +58,7 @@ def api_get(client: httpx.Client, path: str, params: dict | None = None) -> list
             time.sleep(retry_after)
             continue
         if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
             continue
         print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
         sys.exit(1)
@@ -77,13 +78,15 @@ def format_message(msg: dict) -> str:
     """Format a message for output."""
     ts = msg.get("timestamp", "")
     author = msg.get("author", {})
-    return json.dumps({
-        "id": msg.get("id"),
-        "ts": ts,
-        "author": author.get("username", "unknown"),
-        "author_id": author.get("id"),
-        "content": msg.get("content", ""),
-    })
+    return json.dumps(
+        {
+            "id": msg.get("id"),
+            "ts": ts,
+            "author": author.get("username", "unknown"),
+            "author_id": author.get("id"),
+            "content": msg.get("content", ""),
+        }
+    )
 
 
 def is_system_message(msg: dict) -> bool:
@@ -159,23 +162,31 @@ def main():
         help="Wait for messages after this message ID. If omitted, uses the latest message.",
     )
     parser.add_argument(
-        "--timeout", type=float, default=DEFAULT_TIMEOUT,
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
         help=f"Max seconds to wait (default {DEFAULT_TIMEOUT}).",
     )
     parser.add_argument(
-        "--ignore-author-id", action="append", default=[],
+        "--ignore-author-id",
+        action="append",
+        default=[],
         help="Ignore messages from this author ID (can be repeated).",
     )
     parser.add_argument(
-        "--include-system", action="store_true",
+        "--include-system",
+        action="store_true",
         help="Include system messages (default: skip *System:* messages).",
     )
     parser.add_argument(
-        "--poll-interval", type=float, default=POLL_INTERVAL,
+        "--poll-interval",
+        type=float,
+        default=POLL_INTERVAL,
         help=f"Seconds between polls (default {POLL_INTERVAL}).",
     )
     parser.add_argument(
-        "--no-cursor", action="store_true",
+        "--no-cursor",
+        action="store_true",
         help="Don't emit cursor line at end of output.",
     )
 

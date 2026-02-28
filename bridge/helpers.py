@@ -36,7 +36,10 @@ async def start_bridge(socket_path: str) -> asyncio.subprocess.Process:
     log_path = _bridge_log_path(socket_path)
     log_file = open(log_path, "a")
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "bridge", socket_path,
+        sys.executable,
+        "-m",
+        "bridge",
+        socket_path,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=log_file,
         start_new_session=True,
@@ -74,9 +77,7 @@ async def ensure_bridge(socket_path: str, timeout: float = 10.0) -> BridgeConnec
                 stderr = open(log_path).read()[-500:]
             except OSError:
                 pass
-            raise RuntimeError(
-                f"Bridge process died (exit code {bridge_proc.returncode}): {stderr}"
-            )
+            raise RuntimeError(f"Bridge process died (exit code {bridge_proc.returncode}): {stderr}")
 
     raise RuntimeError(f"Timed out waiting for bridge at {socket_path}")
 
@@ -88,6 +89,7 @@ def build_cli_spawn_args(options) -> tuple[list[str], dict[str, str], str]:
     the SDK's command building logic.
     """
     from dataclasses import replace
+
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
     from claude_agent_sdk._version import __version__ as sdk_version
 

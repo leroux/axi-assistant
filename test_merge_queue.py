@@ -3,12 +3,10 @@
 Covers: queue file I/O, stale cleanup, locking, and merge execution.
 All git tests use throwaway repos in tmp_path — never touches the real repo.
 """
-import json
+
 import os
 import subprocess
-import time
-
-import pytest
+from datetime import UTC
 
 from axi_test import (
     _cleanup_stale,
@@ -21,7 +19,6 @@ from axi_test import (
     _write_queue,
 )
 
-
 # --- Helpers ---
 
 
@@ -29,7 +26,8 @@ def git(repo, *args):
     """Run git command in a repo, assert success."""
     r = subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert r.returncode == 0, f"git {' '.join(args)} failed: {r.stderr}"
     return r.stdout.strip()
@@ -108,9 +106,7 @@ class TestQueueReadWrite:
         with _flock(_queue_lock(repo)):
             _write_queue(repo, entries)
             result = _read_queue(repo)
-        assert [e["branch"] for e in result] == [
-            "feature/first", "feature/second", "feature/third"
-        ]
+        assert [e["branch"] for e in result] == ["feature/first", "feature/second", "feature/third"]
 
 
 # --- Stale Cleanup ---
@@ -118,46 +114,55 @@ class TestQueueReadWrite:
 
 class TestStaleCleanup:
     def test_dead_pid_removed(self):
-        entries = [{
-            "branch": "feature/dead",
-            "pid": 99999,  # Almost certainly not running
-            "submitted_at": "2026-01-01T00:00:00+00:00",
-            "heartbeat": "2026-01-01T00:00:00+00:00",
-        }]
+        entries = [
+            {
+                "branch": "feature/dead",
+                "pid": 99999,  # Almost certainly not running
+                "submitted_at": "2026-01-01T00:00:00+00:00",
+                "heartbeat": "2026-01-01T00:00:00+00:00",
+            }
+        ]
         _cleanup_stale(entries)
         assert len(entries) == 0
 
     def test_alive_pid_kept(self):
-        entries = [{
-            "branch": "feature/alive",
-            "pid": os.getpid(),  # This process is alive
-            "submitted_at": "2099-01-01T00:00:00+00:00",
-            "heartbeat": "2099-01-01T00:00:00+00:00",
-        }]
+        entries = [
+            {
+                "branch": "feature/alive",
+                "pid": os.getpid(),  # This process is alive
+                "submitted_at": "2099-01-01T00:00:00+00:00",
+                "heartbeat": "2099-01-01T00:00:00+00:00",
+            }
+        ]
         _cleanup_stale(entries)
         assert len(entries) == 1
 
     def test_alive_but_stale_heartbeat_removed(self):
         """Process alive but heartbeat old + submitted long ago → stale."""
-        entries = [{
-            "branch": "feature/stale",
-            "pid": os.getpid(),
-            "submitted_at": "2020-01-01T00:00:00+00:00",
-            "heartbeat": "2020-01-01T00:00:00+00:00",
-        }]
+        entries = [
+            {
+                "branch": "feature/stale",
+                "pid": os.getpid(),
+                "submitted_at": "2020-01-01T00:00:00+00:00",
+                "heartbeat": "2020-01-01T00:00:00+00:00",
+            }
+        ]
         _cleanup_stale(entries)
         assert len(entries) == 0
 
     def test_alive_recent_heartbeat_kept(self):
         """Process alive with recent heartbeat → keep."""
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-        entries = [{
-            "branch": "feature/fresh",
-            "pid": os.getpid(),
-            "submitted_at": now,
-            "heartbeat": now,
-        }]
+        from datetime import datetime
+
+        now = datetime.now(UTC).isoformat()
+        entries = [
+            {
+                "branch": "feature/fresh",
+                "pid": os.getpid(),
+                "submitted_at": now,
+                "heartbeat": now,
+            }
+        ]
         _cleanup_stale(entries)
         assert len(entries) == 1
 
@@ -167,8 +172,9 @@ class TestStaleCleanup:
         assert len(entries) == 1
 
     def test_mixed_stale_and_alive(self):
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        from datetime import datetime
+
+        now = datetime.now(UTC).isoformat()
         entries = [
             {"branch": "dead", "pid": 99999, "submitted_at": now, "heartbeat": now},
             {"branch": "alive", "pid": os.getpid(), "submitted_at": now, "heartbeat": now},
@@ -186,10 +192,13 @@ class TestRemoveFromQueue:
     def test_remove_existing(self, tmp_path):
         repo = str(tmp_path)
         with _flock(_queue_lock(repo)):
-            _write_queue(repo, [
-                {"branch": "feature/a"},
-                {"branch": "feature/b"},
-            ])
+            _write_queue(
+                repo,
+                [
+                    {"branch": "feature/a"},
+                    {"branch": "feature/b"},
+                ],
+            )
         _remove_from_queue(repo, "feature/a")
         with _flock(_queue_lock(repo)):
             result = _read_queue(repo)
@@ -226,9 +235,8 @@ class TestFlock:
     def test_lock_reentrant_same_process(self, tmp_path):
         """flock is per-process, so same process can re-acquire."""
         lock_path = str(tmp_path / "test.lock")
-        with _flock(lock_path):
-            with _flock(lock_path):
-                pass  # Should not deadlock
+        with _flock(lock_path), _flock(lock_path):
+            pass  # Should not deadlock
 
 
 # --- Merge Execution (real git repos) ---
@@ -293,10 +301,14 @@ class TestExecuteMerge:
 
     def test_default_commit_message_includes_branch_and_commits(self, tmp_path):
         repo = make_repo(tmp_path)
-        make_feature_branch(repo, "feature/test", {
-            "a.txt": "a",
-            "b.txt": "b",
-        })
+        make_feature_branch(
+            repo,
+            "feature/test",
+            {
+                "a.txt": "a",
+                "b.txt": "b",
+            },
+        )
 
         status, _ = _execute_merge(str(repo), "feature/test")
 
@@ -309,11 +321,15 @@ class TestExecuteMerge:
     def test_squash_produces_single_commit(self, tmp_path):
         """Multiple commits on feature branch → one squash commit on main."""
         repo = make_repo(tmp_path)
-        make_feature_branch(repo, "feature/multi", {
-            "a.txt": "a",
-            "b.txt": "b",
-            "c.txt": "c",
-        })
+        make_feature_branch(
+            repo,
+            "feature/multi",
+            {
+                "a.txt": "a",
+                "b.txt": "b",
+                "c.txt": "c",
+            },
+        )
         main_head_before = git(repo, "rev-parse", "main")
 
         status, _ = _execute_merge(str(repo), "feature/multi")
