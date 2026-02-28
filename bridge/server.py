@@ -78,7 +78,7 @@ class BridgeServer:
         log.info("Bridge listening on %s", self._socket_path)
 
         # Install signal handlers
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: self._shutdown_event.set())
 
@@ -312,7 +312,7 @@ class BridgeServer:
             log.debug("[stdin][%s] forwarding %d bytes: %.200s", msg.name, len(line), line.rstrip())
             cp.proc.stdin.write(line.encode())
             await cp.proc.stdin.drain()
-            cp.last_stdin_at = asyncio.get_event_loop().time()
+            cp.last_stdin_at = asyncio.get_running_loop().time()
         except (ConnectionError, OSError):
             log.warning("Failed to write to CLI '%s' stdin", msg.name)
 
@@ -349,7 +349,7 @@ class BridgeServer:
                     continue
 
                 log.debug("[stdout][%s] parsed msg", cp.name)
-                cp.last_stdout_at = asyncio.get_event_loop().time()
+                cp.last_stdout_at = asyncio.get_running_loop().time()
                 stdout_data = cast("dict[str, Any]", data) if isinstance(data, dict) else {"raw": data}
                 await self._relay_or_buffer(cp, StdoutMsg(name=cp.name, data=stdout_data))
         except Exception:

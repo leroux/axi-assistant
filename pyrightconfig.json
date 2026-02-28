@@ -5,10 +5,14 @@
 
   "include": [
     "bot.py",
+    "config.py",
+    "axi_types.py",
+    "prompts.py",
+    "agents.py",
+    "tools.py",
     "supervisor.py",
     "axi_test.py",
     "discord_query.py",
-    "handlers.py",
     "schedule_tools.py",
     "shutdown.py",
     "flowcoder.py",

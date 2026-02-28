@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -33,14 +34,14 @@ def build_engine_cmd(
     search_paths: list[str] | None = None,
 ) -> list[str]:
     """Build flowcoder-engine argv (binary resolution + flags)."""
-    import shutil
+
+    flowcoder_home = os.environ.get(
+        "FLOWCODER_HOME",
+        os.path.expanduser("~/flowcoder-rewrite"),
+    )
 
     engine_bin = shutil.which("flowcoder-engine")
     if not engine_bin:
-        flowcoder_home = os.environ.get(
-            "FLOWCODER_HOME",
-            os.path.expanduser("~/flowcoder-rewrite"),
-        )
         engine_bin = os.path.join(
             flowcoder_home,
             "packages",
@@ -50,10 +51,6 @@ def build_engine_cmd(
             "flowcoder-engine",
         )
 
-    flowcoder_home = os.environ.get(
-        "FLOWCODER_HOME",
-        os.path.expanduser("~/flowcoder-rewrite"),
-    )
     default_search = os.path.join(flowcoder_home, "examples", "commands")
 
     cmd: list[str] = [engine_bin, "--command", command]
@@ -370,6 +367,7 @@ class BridgeFlowcoderProcess:
             pass
         self._conn.unregister_agent(self.bridge_name)
         self._queue = None
+        self._running = False
         log.info("Bridge flowcoder '%s' detached (bridge buffering)", self.bridge_name)
 
     # ------------------------------------------------------------------

@@ -78,7 +78,7 @@ ignore = [
 "lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
 
 [tool.ruff.lint.isort]
-known-first-party = ["bot", "supervisor", "handlers", "schedule_tools", "shutdown", "flowcoder", "bridge"]
+known-first-party = ["bot", "config", "axi_types", "prompts", "agents", "tools", "supervisor", "schedule_tools", "shutdown", "flowcoder", "bridge"]
 
 [tool.ruff.format]
 quote-style = "double"

@@ -181,7 +181,7 @@ class ShutdownCoordinator:
         for name, session in list(self._agents.items()):
             if name == skip:
                 continue
-            if session.client is not None:
+            if session.client is not None or getattr(session, "flowcoder_process", None) is not None:
                 try:
                     await self._sleep_fn(session)
                 except Exception:
@@ -266,23 +266,23 @@ class ShutdownCoordinator:
             await self._notify(name, f"Restart pending — waiting for **{name}** to finish current task...")
 
         # Wait indefinitely for agents to finish
-        elapsed = 0
-        last_status = 0
+        start = time.monotonic()
+        last_status = 0.0
 
         while True:
             await asyncio.sleep(POLL_INTERVAL)
-            elapsed += POLL_INTERVAL
+            elapsed = time.monotonic() - start
 
             still_busy = self.get_busy_agents(skip=skip_agent)
             if not still_busy:
-                log.info("All agents finished after %ds — exiting", elapsed)
+                log.info("All agents finished after %ds — exiting", int(elapsed))
                 break
 
             # Periodic status updates
             if elapsed - last_status >= STATUS_INTERVAL:
                 last_status = elapsed
                 for name in still_busy:
-                    await self._notify(name, f"Still waiting for **{name}** to finish... ({elapsed}s)")
+                    await self._notify(name, f"Still waiting for **{name}** to finish... ({int(elapsed)}s)")
 
         await self._execute_exit(skip_agent=skip_agent)
 

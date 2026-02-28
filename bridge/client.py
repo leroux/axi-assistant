@@ -113,6 +113,10 @@ class BridgeConnection:
         self._closed = True
         self._demux_task.cancel()
         try:
+            await self._demux_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
             self._writer.close()
             await self._writer.wait_closed()
         except Exception:
