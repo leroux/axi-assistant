@@ -419,7 +419,7 @@ async def _recover_stranded_messages() -> None:
                 content, ch, stranded_msg = session.message_queue.popleft()
                 log.info("Stranded message found for sleeping agent '%s', waking", _agent_name)
                 await agents.remove_reaction(stranded_msg, "📨")
-                asyncio.create_task(agents.run_initial_prompt(session, content, ch))
+                agents.fire_and_forget(agents.run_initial_prompt(session, content, ch))
                 break
 
 
@@ -1426,7 +1426,7 @@ async def flowchart_cmd(interaction: discord.Interaction, name: str, args: str |
     assert session.discord_channel_id is not None
     ch = bot.get_channel(session.discord_channel_id)
     assert isinstance(ch, TextChannel)
-    asyncio.create_task(agents.run_inline_flowchart(session, ch, name, args or ""))
+    agents.fire_and_forget(agents.run_inline_flowchart(session, ch, name, args or ""))
 
     await interaction.followup.send(f"*System:* Flowchart `{name}` started on **{agent_name}**.")
 

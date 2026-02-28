@@ -14,7 +14,6 @@ __all__ = [
     "utils_mcp_server",
 ]
 
-import asyncio
 import json
 import logging
 import os
@@ -211,7 +210,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     # BEFORE the background task runs, so the guard is already set when the
     # gateway event fires.  spawn_agent will discard it after agents[name] is set.
     channels.bot_creating_channels.add(agents.normalize_channel_name(agent_name))
-    asyncio.create_task(_do_spawn())
+    agents.fire_and_forget(_do_spawn())
     return {
         "content": [
             {
@@ -274,7 +273,7 @@ async def axi_kill_agent(args: McpArgs) -> McpResult:
             log.exception("Error in background kill of agent '%s'", agent_name)
 
     log.info("Killing agent '%s' via MCP tool (session=%s)", agent_name, session_id)
-    asyncio.create_task(_do_kill())
+    agents.fire_and_forget(_do_kill())
 
     if session_id:
         return {"content": [{"type": "text", "text": f"Agent '{agent_name}' killed. Session ID: {session_id}"}]}
@@ -291,7 +290,7 @@ async def axi_restart(args: McpArgs) -> McpResult:
     log.info("Restart requested via MCP tool")
     if agents.shutdown_coordinator is None:
         return {"content": [{"type": "text", "text": "Bot is not fully initialized yet."}]}
-    asyncio.create_task(
+    agents.fire_and_forget(
         agents.shutdown_coordinator.graceful_shutdown("MCP tool", skip_agent=config.MASTER_AGENT_NAME)
     )
     return {"content": [{"type": "text", "text": "Graceful restart initiated. Waiting for busy agents to finish..."}]}

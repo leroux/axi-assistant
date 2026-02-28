@@ -112,6 +112,26 @@ _stream_counter = 0
 # MCP server injection (set by bot.py after tools.py creates them)
 _utils_mcp_server: Any = None
 
+# Background task references — prevents GC of fire-and-forget tasks.
+# In Python 3.12+ the event loop only keeps weak references to tasks,
+# so untracked tasks may be collected before completion.
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
+def _on_background_task_done(task: asyncio.Task[None]) -> None:
+    """Remove finished task from tracking set and log any unhandled exception."""
+    _background_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        log.error("Background task %s failed: %s", task.get_name(), task.exception(), exc_info=task.exception())
+
+
+def fire_and_forget(coro: Any) -> asyncio.Task[None]:
+    """Schedule a coroutine as a background task, preventing GC before completion."""
+    task: asyncio.Task[None] = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_on_background_task_done)
+    return task
+
 
 # ---------------------------------------------------------------------------
 # Initialization — called once from bot.py after Bot creation
@@ -569,7 +589,7 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel: Te
                     log.warning("Failed to notify channel %s about rate limit", ch.id)
 
     def _schedule_expiry(delay: float) -> None:
-        asyncio.create_task(
+        fire_and_forget(
             notify_rate_limit_expired(delay, get_master_channel, send_system)
         )
 
@@ -1117,7 +1137,14 @@ async def _set_session_id(session: AgentSession, msg_or_sid: Any, channel: TextC
                 desired_topic = format_channel_topic(session.cwd, sid, session.system_prompt_hash)
                 if ch.topic != desired_topic:
                     log.info("Updating topic on #%s: %r -> %r", ch.name, ch.topic, desired_topic)
-                    await ch.edit(topic=desired_topic)
+
+                    async def _update_topic(c: Any, t: str) -> None:
+                        try:
+                            await c.edit(topic=t)
+                        except Exception:
+                            log.warning("Failed to update topic on #%s", c.name, exc_info=True)
+
+                    fire_and_forget(_update_topic(ch, desired_topic))
     else:
         session.session_id = sid
 
@@ -1746,20 +1773,31 @@ async def spawn_agent(
     _channels_mod.bot_creating_channels.discard(normalized)
     log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)
 
+    # Update channel topic — fire-and-forget to avoid blocking on Discord's
+    # strict channel-edit rate limit (2 per 10 min).  A category move during
+    # kill/respawn already consumes the budget, so a synchronous topic edit
+    # would stall spawn_agent and prevent the initial prompt from launching.
     desired_topic = format_channel_topic(cwd, resume, session.system_prompt_hash)
     if channel.topic != desired_topic:
         log.info("Updating topic on #%s: %r -> %r", channel.name, channel.topic, desired_topic)
-        await channel.edit(topic=desired_topic)
+
+        async def _update_topic(ch: Any, topic: str) -> None:
+            try:
+                await ch.edit(topic=topic)
+            except Exception:
+                log.warning("Failed to update topic on #%s", ch.name, exc_info=True)
+
+        fire_and_forget(_update_topic(channel, desired_topic))
 
     if agent_type == "flowcoder":
-        asyncio.create_task(_run_flowcoder(session, channel))
+        fire_and_forget(_run_flowcoder(session, channel))
         return
 
     if not initial_prompt:
         await send_system(channel, f"Agent **{name}** is ready (sleeping).")
         return
 
-    asyncio.create_task(run_initial_prompt(session, initial_prompt, channel))
+    fire_and_forget(run_initial_prompt(session, initial_prompt, channel))
 
 
 async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
@@ -1777,7 +1815,7 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
     ts_prefix = datetime.now(UTC).strftime("[%Y-%m-%d %H:%M:%S UTC] ")
     prompt = ts_prefix + prompt
 
-    asyncio.create_task(run_initial_prompt(session, prompt, channel))
+    fire_and_forget(run_initial_prompt(session, prompt, channel))
 
 
 # ---------------------------------------------------------------------------
@@ -1864,7 +1902,6 @@ async def process_message_queue(session: AgentSession) -> None:
             if not is_awake(session):
                 try:
                     await wake_agent(session)
-                    await _post_model_warning(session)
                 except Exception:
                     log.exception("Failed to wake agent '%s' for queued message", session.name)
                     await add_reaction(orig_message, "\u274c")
@@ -1953,7 +1990,7 @@ async def deliver_inter_agent_message(
             )
         return f"delivered to busy agent '{target_session.name}' (interrupted, will process next)"
     else:
-        asyncio.create_task(_process_inter_agent_prompt(target_session, prompt, channel))
+        fire_and_forget(_process_inter_agent_prompt(target_session, prompt, channel))
         return f"delivered to agent '{target_session.name}'"
 
 
@@ -1968,7 +2005,6 @@ async def _process_inter_agent_prompt(
             if not is_awake(session):
                 try:
                     await wake_agent(session)
-                    await _post_model_warning(session)
                 except ConcurrencyLimitError:
                     session.message_queue.append((content, channel, None))
                     awake = count_awake_agents()
@@ -2078,7 +2114,7 @@ async def connect_bridge() -> None:
                     pass
                 continue
             session.reconnecting = True
-            asyncio.create_task(_reconnect_flowcoder(session, agent_name, info))
+            fire_and_forget(_reconnect_flowcoder(session, agent_name, info))
             continue
 
         session = agents.get(agent_name)
@@ -2100,7 +2136,7 @@ async def connect_bridge() -> None:
         )
 
         session.reconnecting = True
-        asyncio.create_task(_reconnect_and_drain(session, info))
+        fire_and_forget(_reconnect_and_drain(session, info))
 
 
 async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any]) -> None:
