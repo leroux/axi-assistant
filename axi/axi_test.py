@@ -32,12 +32,13 @@ from typing import Any, cast
 import httpx
 from dotenv import dotenv_values
 
+from axi.discord_rest import API_BASE, api_get
+
 TESTS_DIR = "/home/ubuntu/axi-tests"
 CONFIG_PATH = os.path.expanduser("~/.config/axi/test-config.json")
 CONFIG_DIR = os.path.expanduser("~/.config/axi")
 SLOTS_FILE = os.path.join(CONFIG_DIR, ".test-slots.json")
 SLOTS_LOCK = os.path.join(CONFIG_DIR, ".test-slots.lock")
-API_BASE = "https://discord.com/api/v10"
 SENTINEL = "Bot has finished responding"
 
 
@@ -720,24 +721,6 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 # --- Discord API helpers ---
 
-
-def api_get(client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> Any:
-    """GET with rate-limit retry."""
-    for attempt in range(3):
-        resp = client.get(path, params=params)
-        if resp.status_code == 200:
-            return resp.json()
-        if resp.status_code == 429:
-            retry_after = float(resp.json().get("retry_after", 1.0))
-            time.sleep(retry_after)
-            continue
-        if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2**attempt)
-            continue
-        print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
-        sys.exit(1)
-    print("Error: Exhausted retries.", file=sys.stderr)
-    sys.exit(1)
 
 
 def api_post(client: httpx.Client, path: str, json_data: dict[str, Any]) -> Any:

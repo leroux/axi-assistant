@@ -33,38 +33,12 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
+from axi.discord_rest import api_get, get_token, make_client
+
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
-API_BASE = "https://discord.com/api/v10"
 DEFAULT_TIMEOUT = 120
 POLL_INTERVAL = 2.0  # seconds between polls
-
-
-def get_token() -> str:
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        print("Error: DISCORD_TOKEN not set in environment.", file=sys.stderr)
-        sys.exit(1)
-    return token
-
-
-def api_get(client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> Any:
-    """GET with rate-limit retry."""
-    for attempt in range(3):
-        resp = client.get(path, params=params)
-        if resp.status_code == 200:
-            return resp.json()
-        if resp.status_code == 429:
-            retry_after = float(resp.json().get("retry_after", 1.0))
-            time.sleep(retry_after)
-            continue
-        if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2**attempt)
-            continue
-        print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
-        sys.exit(1)
-    print("Error: Exhausted retries.", file=sys.stderr)
-    sys.exit(1)
 
 
 def get_latest_message_id(client: httpx.Client, channel_id: str) -> str | None:
@@ -195,11 +169,7 @@ def main():
     token = get_token()
     ignore_ids = set(args.ignore_author_id)
 
-    with httpx.Client(
-        base_url=API_BASE,
-        headers={"Authorization": f"Bot {token}"},
-        timeout=httpx.Timeout(10.0),
-    ) as client:
+    with make_client(token, timeout=10.0) as client:
         # Determine baseline message ID
         after_id = args.after
         if not after_id:

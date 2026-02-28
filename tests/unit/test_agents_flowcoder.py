@@ -6,7 +6,7 @@ from typing import ClassVar
 
 import pytest
 
-from axi.agents.flowcoder import (
+from axi.agents import (
     _FlowcoderCtx,
     _handle_block_complete,
     _handle_block_start,

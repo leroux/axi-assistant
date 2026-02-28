@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from axi.agents.streaming import _StreamCtx, _update_activity, extract_tool_preview
+from axi.agents import _StreamCtx, _update_activity, extract_tool_preview
 from axi.axi_types import AgentSession
 
 

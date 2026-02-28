@@ -12,7 +12,7 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 
-from axi.agents.permissions import make_cwd_permission_callback
+from axi.agents import make_cwd_permission_callback
 
 
 class TestMakeCwdPermissionCallback:
