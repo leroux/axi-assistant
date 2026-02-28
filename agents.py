@@ -11,18 +11,14 @@ Nothing imports from this module except tools.py and bot.py.
 from __future__ import annotations
 
 __all__ = [
-    "active_category",
     # Discord helpers
     "add_reaction",
     # Module-level state
     "agents",
-    "append_history",
     # Streaming
     "as_stream",
-    "bot_creating_channels",
     "bridge_conn",
     "channel_to_agent",
-    "check_skip",
     # Bridge
     "connect_bridge",
     "content_summary",
@@ -32,6 +28,7 @@ __all__ = [
     "drain_sdk_buffer",
     "drain_stderr",
     "end_session",
+    # Channel/guild management (re-exported from channels module)
     "ensure_agent_channel",
     "ensure_guild_infrastructure",
     # Message handling
@@ -51,19 +48,12 @@ __all__ = [
     "is_processing",
     # Rate limiting
     "is_rate_limited",
-    "killed_category",
-    "load_history",
-    # Schedule helpers
-    "load_schedules",
-    "load_skips",
     "make_cwd_permission_callback",
     "make_stderr_callback",
     "move_channel_to_killed",
     "normalize_channel_name",
     "process_message",
     "process_message_queue",
-    "prune_history",
-    "prune_skips",
     "rate_limit_quotas",
     "rate_limit_remaining_seconds",
     "rate_limited_until",
@@ -74,8 +64,6 @@ __all__ = [
     "run_initial_prompt",
     # Flowcoder
     "run_inline_flowchart",
-    "save_schedules",
-    "save_skips",
     "schedule_last_fired",
     "send_long",
     "send_prompt_to_agent",
@@ -89,7 +77,6 @@ __all__ = [
     "split_message",
     "stream_response_to_channel",
     "stream_with_retry",
-    "target_guild",
     "wake_agent",
     "wake_or_queue",
 ]
@@ -104,7 +91,7 @@ import re
 import signal
 import time
 import traceback
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import anyio
@@ -122,8 +109,9 @@ from claude_agent_sdk.types import (
     SystemMessage,
     ToolPermissionContext,
 )
-from discord import CategoryChannel, TextChannel
+from discord import TextChannel
 
+import channels as _channels_mod
 import config
 from axi_types import (
     ActivityState,
@@ -131,14 +119,42 @@ from axi_types import (
     ConcurrencyLimitError,
     ContentBlock,
     MessageContent,
-    RateLimitQuota,
-    SessionUsage,
 )
 from bridge import BridgeConnection, BridgeTransport, ensure_bridge
+from channels import (
+    ensure_agent_channel,
+    ensure_guild_infrastructure,
+    format_channel_topic,
+    get_agent_channel,
+    get_master_channel,
+    move_channel_to_killed,
+    normalize_channel_name,
+)
+from channels import (
+    parse_channel_topic as _parse_channel_topic,
+)
 from prompts import (
     compute_prompt_hash,
     make_spawned_agent_system_prompt,
     post_system_prompt_to_channel,
+)
+from rate_limits import (
+    format_time_remaining,
+    is_rate_limited,
+    notify_rate_limit_expired,
+    rate_limit_quotas,
+    rate_limit_remaining_seconds,
+    rate_limited_until,
+    session_usage,
+)
+from rate_limits import (
+    handle_rate_limit as _rl_handle_rate_limit,
+)
+from rate_limits import (
+    record_session_usage as _recordsession_usage,
+)
+from rate_limits import (
+    update_rate_limit_quota as _update_rate_limit_quota,
 )
 from schedule_tools import make_schedule_mcp_server
 from shutdown import ShutdownCoordinator, exit_for_restart, kill_supervisor
@@ -170,16 +186,9 @@ bridge_conn: BridgeConnection | None = None
 # Shutdown coordinator — initialized via init_shutdown_coordinator() from on_ready
 shutdown_coordinator: ShutdownCoordinator | None = None
 
-# Global rate limit state (all agents share the same API account)
-rate_limited_until: datetime | None = None
-session_usage: dict[str, SessionUsage] = {}
-rate_limit_quotas: dict[str, RateLimitQuota] = {}
+# Rate limit state is in rate_limits module (imported below)
 
-# Guild infrastructure (populated in on_ready)
-target_guild: discord.Guild | None = None
-active_category: CategoryChannel | None = None
-killed_category: CategoryChannel | None = None
-bot_creating_channels: set[str] = set()  # channel names currently being created
+# Guild infrastructure lives in channels module
 
 # Exceptions channel (REST-based, works in any context)
 _exceptions_channel_id: str | None = None
@@ -200,6 +209,7 @@ def init(bot_instance: Bot) -> None:
     """Inject the Bot reference. Called once from bot.py."""
     global _bot
     _bot = bot_instance
+    _channels_mod.init(bot_instance, agents, channel_to_agent, send_to_exceptions)
 
 
 # ---------------------------------------------------------------------------
@@ -520,123 +530,6 @@ async def _handle_exit_plan_mode(
         return PermissionResultDeny(message=message)
 
 
-# ---------------------------------------------------------------------------
-# Schedule helpers
-# ---------------------------------------------------------------------------
-
-
-def load_schedules() -> list[dict[str, Any]]:
-    try:
-        with open(config.SCHEDULES_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-
-def save_schedules(entries: list[dict[str, Any]]) -> None:
-    with open(config.SCHEDULES_PATH, "w") as f:
-        json.dump(entries, f, indent=2)
-        f.write("\n")
-
-
-def load_history() -> list[dict[str, Any]]:
-    try:
-        with open(config.HISTORY_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-
-def append_history(entry: dict[str, Any], fired_at: datetime) -> None:
-    history = load_history()
-    history.append(
-        {
-            "name": entry["name"],
-            "prompt": entry["prompt"],
-            "fired_at": fired_at.isoformat(),
-        }
-    )
-    with open(config.HISTORY_PATH, "w") as f:
-        json.dump(history, f, indent=2)
-        f.write("\n")
-
-
-def prune_history() -> None:
-    history = load_history()
-    cutoff = datetime.now(UTC) - timedelta(days=7)
-    pruned = [h for h in history if datetime.fromisoformat(h["fired_at"]) > cutoff]
-    if len(pruned) != len(history):
-        with open(config.HISTORY_PATH, "w") as f:
-            json.dump(pruned, f, indent=2)
-            f.write("\n")
-
-
-def load_skips() -> list[dict[str, Any]]:
-    try:
-        with open(config.SKIPS_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-
-def save_skips(skips: list[dict[str, Any]]) -> None:
-    with open(config.SKIPS_PATH, "w") as f:
-        json.dump(skips, f, indent=2)
-        f.write("\n")
-
-
-def prune_skips() -> None:
-    """Remove skip entries whose date has passed."""
-    skips = load_skips()
-    today = datetime.now(config.SCHEDULE_TIMEZONE).date()
-    pruned = [s for s in skips if datetime.strptime(s["skip_date"], "%Y-%m-%d").replace(tzinfo=UTC).date() >= today]
-    if len(pruned) != len(skips):
-        save_skips(pruned)
-
-
-def check_skip(name: str) -> bool:
-    """Check if a recurring event should be skipped today."""
-    skips = load_skips()
-    today = datetime.now(config.SCHEDULE_TIMEZONE).strftime("%Y-%m-%d")
-    for skip in skips:
-        if skip.get("name") == name and skip.get("skip_date") == today:
-            skips.remove(skip)
-            save_skips(skips)
-            return True
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Channel topic helpers
-# ---------------------------------------------------------------------------
-
-
-def format_channel_topic(cwd: str, session_id: str | None = None, prompt_hash: str | None = None) -> str:
-    """Format agent metadata for a Discord channel topic."""
-    parts = [f"cwd: {cwd}"]
-    if session_id:
-        parts.append(f"session: {session_id}")
-    if prompt_hash:
-        parts.append(f"prompt_hash: {prompt_hash}")
-    return " | ".join(parts)
-
-
-def _parse_channel_topic(topic: str | None) -> tuple[str | None, str | None, str | None]:
-    """Parse cwd, session_id, and prompt_hash from a channel topic."""
-    if not topic:
-        return None, None, None
-    cwd = None
-    session_id = None
-    prompt_hash = None
-    for part in topic.split("|"):
-        key, _, value = part.strip().partition(": ")
-        if key == "cwd":
-            cwd = value.strip()
-        elif key == "session":
-            session_id = value.strip()
-        elif key == "prompt_hash":
-            prompt_hash = value.strip()
-    return cwd, session_id, prompt_hash
 
 
 async def _set_session_id(session: AgentSession, msg_or_sid: ResultMessage | str, channel: TextChannel | None = None) -> None:
@@ -797,177 +690,23 @@ async def send_system(channel: TextChannel, text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Rate limit handling
+# Rate limit handling (delegated to rate_limits module)
 # ---------------------------------------------------------------------------
 
-
-def _parse_rate_limit_seconds(text: str) -> int:
-    """Parse wait duration from rate limit error text. Returns seconds."""
-    text_lower = text.lower()
-
-    match = re.search(r"(?:in|after)\s+(\d+)\s*(seconds?|minutes?|mins?|hours?|hrs?)", text_lower)
-    if match:
-        value = int(match.group(1))
-        unit = match.group(2)
-        if unit.startswith("min"):
-            return value * 60
-        elif unit.startswith(("hour", "hr")):
-            return value * 3600
-        return value
-
-    match = re.search(r"retry\s+after\s+(\d+)", text_lower)
-    if match:
-        return int(match.group(1))
-
-    match = re.search(r"(\d+)\s*(?:seconds?|secs?)", text_lower)
-    if match:
-        return int(match.group(1))
-
-    match = re.search(r"(\d+)\s*(?:minutes?|mins?)", text_lower)
-    if match:
-        return int(match.group(1)) * 60
-
-    return 300
-
-
-def format_time_remaining(seconds: int) -> str:
-    """Format seconds into a human-readable duration string."""
-    if seconds < 60:
-        return f"{seconds}s"
-    elif seconds < 3600:
-        minutes = seconds // 60
-        secs = seconds % 60
-        return f"{minutes}m {secs}s" if secs else f"{minutes}m"
-    else:
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
-
-
-def is_rate_limited() -> bool:
-    """Check if we're currently rate limited."""
-    global rate_limited_until
-    if rate_limited_until is None:
-        return False
-    if datetime.now(UTC) >= rate_limited_until:
-        rate_limited_until = None
-        return False
-    return True
-
-
-def rate_limit_remaining_seconds() -> int:
-    """Get remaining rate limit time in seconds."""
-    if rate_limited_until is None:
-        return 0
-    remaining = (rate_limited_until - datetime.now(UTC)).total_seconds()
-    return max(0, int(remaining))
-
-
-def _recordsession_usage(agent_name: str, msg: ResultMessage) -> None:
-    sid = msg.session_id
-    if not sid:
-        return
-    now = datetime.now(UTC)
-    usage: dict[str, Any] = getattr(msg, "usage", None) or {}
-    input_tokens: int = usage.get("input_tokens", 0)
-    output_tokens: int = usage.get("output_tokens", 0)
-
-    if sid not in session_usage:
-        session_usage[sid] = SessionUsage(agent_name=agent_name, first_query=now)
-    entry = session_usage[sid]
-    entry.queries += 1
-    entry.total_cost_usd += msg.total_cost_usd or 0.0
-    entry.total_turns += msg.num_turns or 0
-    entry.total_duration_ms += msg.duration_ms or 0
-    entry.total_input_tokens += input_tokens
-    entry.total_output_tokens += output_tokens
-    entry.last_query = now
-
-    try:
-        record: dict[str, Any] = {
-            "ts": now.isoformat(),
-            "agent": agent_name,
-            "session_id": sid,
-            "cost_usd": msg.total_cost_usd,
-            "turns": msg.num_turns,
-            "duration_ms": msg.duration_ms,
-            "duration_api_ms": msg.duration_api_ms,
-            "is_error": msg.is_error,
-            "usage": usage or None,
-        }
-        with open(config.USAGE_HISTORY_PATH, "a") as f:
-            f.write(json.dumps(record) + "\n")
-    except Exception:
-        log.warning("Failed to write usage history", exc_info=True)
-
-
-def _update_rate_limit_quota(data: dict[str, Any]) -> None:
-    info = data.get("rate_limit_info", {})
-    resets_at_unix = info.get("resetsAt")
-    if resets_at_unix is None:
-        return
-    rl_type = info.get("rateLimitType", "unknown")
-    new_status = info.get("status", "unknown")
-    new_resets_at = datetime.fromtimestamp(resets_at_unix, tz=UTC)
-    new_utilization = info.get("utilization")
-
-    existing = rate_limit_quotas.get(rl_type)
-    if existing is not None and new_utilization is None and existing.resets_at == new_resets_at:
-        new_utilization = existing.utilization
-
-    rate_limit_quotas[rl_type] = RateLimitQuota(
-        status=new_status,
-        resets_at=new_resets_at,
-        rate_limit_type=rl_type,
-        utilization=new_utilization,
-    )
-
-    try:
-        record = {
-            "ts": datetime.now(UTC).isoformat(),
-            "type": rl_type,
-            "status": new_status,
-            "utilization": new_utilization,
-        }
-        with open(config.RATE_LIMIT_HISTORY_PATH, "a") as f:
-            f.write(json.dumps(record) + "\n")
-    except Exception:
-        log.warning("Failed to write rate limit history", exc_info=True)
+# Re-exports from rate_limits are at the top of the file with other first-party imports
 
 
 async def _handle_rate_limit(error_text: str, session: AgentSession, channel: TextChannel) -> None:
     """Handle a rate limit error: set global state, notify all agent channels."""
-    global rate_limited_until
     assert _bot is not None
+    bot_ref = _bot
 
-    wait_seconds = _parse_rate_limit_seconds(error_text)
-    new_limit = datetime.now(UTC) + timedelta(seconds=wait_seconds)
-    already_limited = is_rate_limited()
-
-    if rate_limited_until is None or new_limit > rate_limited_until:
-        rate_limited_until = new_limit
-
-    log.warning("Rate limited — waiting %ds (until %s)", wait_seconds, rate_limited_until.isoformat())
-
-    if not already_limited:
-        remaining = format_time_remaining(wait_seconds)
-        reset_time = rate_limited_until.strftime("%H:%M:%S UTC")
-
-        quota_lines = ""
-        if rate_limit_quotas:
-            rl_parts: list[str] = []
-            for rl_type, quota in rate_limit_quotas.items():
-                pct = f"{quota.utilization:.0%}" if quota.utilization is not None else "?"
-                rl_parts.append(f"{rl_type}: {pct}")
-            quota_lines = "\nUtilization: " + " · ".join(rl_parts)
-
-        msg_text = f"⚠️ **Rate limited by Claude API.** Resets in ~**{remaining}** (at {reset_time}).{quota_lines}"
-
+    async def _broadcast(msg_text: str) -> None:
         notified_channels: set[int] = set()
         for agent_session in agents.values():
             if not agent_session.discord_channel_id:
                 continue
-            ch = _bot.get_channel(agent_session.discord_channel_id)
+            ch = bot_ref.get_channel(agent_session.discord_channel_id)
             if isinstance(ch, TextChannel) and ch.id not in notified_channels:
                 notified_channels.add(ch.id)
                 try:
@@ -975,21 +714,12 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel: Te
                 except Exception:
                     log.warning("Failed to notify channel %s about rate limit", ch.id)
 
-        asyncio.create_task(_notify_rate_limit_expired(wait_seconds))
+    def _schedule_expiry(delay: float) -> None:
+        asyncio.create_task(
+            notify_rate_limit_expired(delay, get_master_channel, send_system)
+        )
 
-
-async def _notify_rate_limit_expired(delay: float) -> None:
-    """Sleep until rate limit expires, then notify master channel."""
-    try:
-        await asyncio.sleep(delay)
-        if not is_rate_limited():
-            ch = await get_master_channel()
-            if ch:
-                await send_system(ch, "✅ Rate limit expired — usage available again.")
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        log.warning("Failed to send rate limit expiry notification", exc_info=True)
+    await _rl_handle_rate_limit(error_text, _broadcast, _schedule_expiry)
 
 
 # ---------------------------------------------------------------------------
@@ -1318,26 +1048,38 @@ async def end_session(name: str) -> None:
     log.info("Session '%s' ended", name)
 
 
-async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
-    """Reset a named session. Preserves system prompt, channel mapping, and MCP servers."""
+async def _rebuild_session(
+    name: str, *, cwd: str | None = None, session_id: str | None = None
+) -> AgentSession:
+    """End an existing session and create a fresh sleeping AgentSession.
+
+    Preserves system prompt, channel mapping, and MCP servers from the old session.
+    """
     session = agents.get(name)
     old_cwd = session.cwd if session else config.DEFAULT_CWD
     old_channel_id = session.discord_channel_id if session else None
     old_mcp = getattr(session, "mcp_servers", None)
     resolved_cwd = cwd or old_cwd
     prompt = session.system_prompt if session and session.system_prompt else make_spawned_agent_system_prompt(resolved_cwd)
+    prompt_hash = session.system_prompt_hash if session and session.system_prompt_hash else compute_prompt_hash(prompt)
     await end_session(name)
     new_session = AgentSession(
         name=name,
         cwd=resolved_cwd,
         system_prompt=prompt,
-        system_prompt_hash=compute_prompt_hash(prompt),
+        system_prompt_hash=prompt_hash,
         client=None,
-        session_id=None,
+        session_id=session_id,
         discord_channel_id=old_channel_id,
         mcp_servers=old_mcp,
     )
     agents[name] = new_session
+    return new_session
+
+
+async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
+    """Reset a named session. Preserves system prompt, channel mapping, and MCP servers."""
+    new_session = await _rebuild_session(name, cwd=cwd)
     log.info("Session '%s' reset (sleeping, cwd=%s)", name, new_session.cwd)
     return new_session
 
@@ -1347,117 +1089,13 @@ def get_master_session() -> AgentSession | None:
     return agents.get(config.MASTER_AGENT_NAME)
 
 
-# ---------------------------------------------------------------------------
-# Guild channel management
-# ---------------------------------------------------------------------------
-
-
-def normalize_channel_name(name: str) -> str:
-    """Normalize an agent name to a valid Discord channel name."""
-    name = name.lower().replace(" ", "-")
-    name = re.sub(r"[^a-z0-9\-_]", "", name)
-    return name[:100]
-
-
-def _build_category_overwrites(
-    guild: discord.Guild,
-) -> dict[discord.Object | discord.Member | discord.Role, discord.PermissionOverwrite]:
-    """Build permission overwrites for Axi categories."""
-    overwrites: dict[discord.Object | discord.Member | discord.Role, discord.PermissionOverwrite] = {
-        guild.default_role: discord.PermissionOverwrite(
-            send_messages=False,
-            add_reactions=False,
-            create_public_threads=False,
-            create_private_threads=False,
-            send_messages_in_threads=False,
-            view_channel=True,
-            read_message_history=True,
-        ),
-        guild.me: discord.PermissionOverwrite(
-            send_messages=True,
-            add_reactions=True,
-            manage_channels=True,
-            manage_messages=True,
-            manage_threads=True,
-            create_public_threads=True,
-            create_private_threads=True,
-            send_messages_in_threads=True,
-            view_channel=True,
-            read_message_history=True,
-        ),
-    }
-    for uid in config.ALLOWED_USER_IDS:
-        overwrites[discord.Object(id=uid)] = discord.PermissionOverwrite(
-            send_messages=True,
-            add_reactions=True,
-            create_public_threads=True,
-            create_private_threads=True,
-            send_messages_in_threads=True,
-            view_channel=True,
-            read_message_history=True,
-        )
-    return overwrites
-
-
-async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel, CategoryChannel]:
-    """Ensure the guild has Active and Killed categories. Called once during on_ready()."""
-    global target_guild, active_category, killed_category
-    assert _bot is not None
-
-    guild = _bot.get_guild(config.DISCORD_GUILD_ID)
-    if guild is None:
-        guild = await _bot.fetch_guild(config.DISCORD_GUILD_ID)
-    target_guild = guild
-
-    overwrites = _build_category_overwrites(guild)
-
-    active_cat = None
-    killed_cat = None
-    for cat in guild.categories:
-        if cat.name == config.ACTIVE_CATEGORY_NAME:
-            active_cat = cat
-        elif cat.name == config.KILLED_CATEGORY_NAME:
-            killed_cat = cat
-
-    def _overwrites_match(
-        existing: dict[discord.Role | discord.Member | discord.Object, discord.PermissionOverwrite],
-        desired: dict[discord.Object | discord.Member | discord.Role, discord.PermissionOverwrite],
-    ) -> bool:
-        a = {getattr(k, "id", k): v for k, v in existing.items()}
-        b = {getattr(k, "id", k): v for k, v in desired.items()}
-        return a == b
-
-    for name, cat in [
-        (config.ACTIVE_CATEGORY_NAME, active_cat),
-        (config.KILLED_CATEGORY_NAME, killed_cat),
-    ]:
-        if cat is None:
-            cat = await guild.create_category(name, overwrites=overwrites)
-            log.info("Created '%s' category", name)
-        elif not _overwrites_match(cat.overwrites, overwrites):
-            await cat.edit(overwrites=overwrites)
-            log.info("Synced permissions on '%s' category", name)
-        else:
-            log.info("Permissions already current on '%s' category", name)
-        if name == config.ACTIVE_CATEGORY_NAME:
-            active_cat = cat
-        else:
-            killed_cat = cat
-    active_category = active_cat
-    killed_category = killed_cat
-
-    assert active_cat is not None
-    assert killed_cat is not None
-    return guild, active_cat, killed_cat
-
-
 async def reconstruct_agents_from_channels() -> int:
     """Reconstruct sleeping AgentSession entries from existing Discord channels."""
     reconstructed = 0
-    if not active_category:
+    if not _channels_mod.active_category:
         return reconstructed
 
-    for cat in [active_category]:
+    for cat in [_channels_mod.active_category]:
         for ch in cat.text_channels:
             agent_name = ch.name
 
@@ -1504,84 +1142,6 @@ async def reconstruct_agents_from_channels() -> int:
 
     log.info("Reconstructed %d agent(s) from channels", reconstructed)
     return reconstructed
-
-
-async def ensure_agent_channel(agent_name: str) -> TextChannel:
-    """Find or create a text channel for an agent. Moves from Killed to Active if needed."""
-    normalized = normalize_channel_name(agent_name)
-
-    if active_category:
-        for ch in active_category.text_channels:
-            if ch.name == normalized:
-                channel_to_agent[ch.id] = agent_name
-                return ch
-
-    if killed_category:
-        for ch in killed_category.text_channels:
-            if ch.name == normalized:
-                try:
-                    await ch.move(category=active_category, beginning=True, sync_permissions=True)
-                except discord.HTTPException as e:
-                    log.warning("Failed to move channel #%s from Killed to Active: %s", normalized, e)
-                    await send_to_exceptions(f"Failed to move #**{normalized}** from Killed → Active: `{e}`")
-                channel_to_agent[ch.id] = agent_name
-                log.info("Moved channel #%s from Killed to Active", normalized)
-                return ch
-
-    already_guarded = normalized in bot_creating_channels
-    bot_creating_channels.add(normalized)
-    try:
-        assert target_guild is not None
-        channel = await target_guild.create_text_channel(normalized, category=active_category)
-    except discord.HTTPException as e:
-        log.warning("Failed to create channel #%s: %s", normalized, e)
-        await send_to_exceptions(f"Failed to create channel #**{normalized}**: `{e}`")
-        raise
-    finally:
-        if not already_guarded:
-            bot_creating_channels.discard(normalized)
-    channel_to_agent[channel.id] = agent_name
-    log.info("Created channel #%s in Active category", normalized)
-    return channel
-
-
-async def move_channel_to_killed(agent_name: str) -> None:
-    """Move an agent's channel from Active to Killed category."""
-    if agent_name == config.MASTER_AGENT_NAME:
-        return
-
-    normalized = normalize_channel_name(agent_name)
-    if active_category:
-        for ch in active_category.text_channels:
-            if ch.name == normalized:
-                try:
-                    await ch.move(category=killed_category, end=True, sync_permissions=True)
-                    log.info("Moved channel #%s to Killed category", normalized)
-                except discord.HTTPException as e:
-                    log.warning("Failed to move channel #%s to Killed: %s", normalized, e)
-                    await send_to_exceptions(f"Failed to move #**{normalized}** to Killed category: `{e}`")
-                break
-
-
-async def get_agent_channel(agent_name: str) -> TextChannel | None:
-    """Get the Discord channel for an agent, if it exists."""
-    assert _bot is not None
-    session = agents.get(agent_name)
-    if session and session.discord_channel_id:
-        ch = _bot.get_channel(session.discord_channel_id)
-        if isinstance(ch, TextChannel):
-            return ch
-    normalized = normalize_channel_name(agent_name)
-    if active_category:
-        for ch in active_category.text_channels:
-            if ch.name == normalized:
-                return ch
-    return None
-
-
-async def get_master_channel() -> TextChannel | None:
-    """Get the axi-master channel."""
-    return await get_agent_channel(config.MASTER_AGENT_NAME)
 
 
 # ---------------------------------------------------------------------------
@@ -1711,6 +1271,191 @@ async def _query_agent(
     await stream_response_to_channel(session, channel, show_awaiting_input=show_awaiting_input)
 
 
+class _StreamCtx:
+    """Mutable state for a single stream_response_to_channel invocation."""
+
+    __slots__ = ("flush_count", "hit_rate_limit", "hit_transient_error", "msg_total", "text_buffer", "typing_stopped")
+
+    def __init__(self) -> None:
+        self.text_buffer: str = ""
+        self.hit_rate_limit: bool = False
+        self.hit_transient_error: str | None = None
+        self.typing_stopped: bool = False
+        self.flush_count: int = 0
+        self.msg_total: int = 0
+
+
+async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChannel, reason: str = "?") -> None:
+    """Flush accumulated text buffer to Discord."""
+    text = ctx.text_buffer
+    if not text.strip():
+        return
+    ctx.flush_count += 1
+    log.info("FLUSH[%s] #%d reason=%s len=%d text=%r", session.name, ctx.flush_count, reason, len(text.strip()), text.strip()[:120])
+    await send_long(channel, text.lstrip())
+
+
+def _stop_typing(ctx: _StreamCtx, typing_ctx: Any) -> None:
+    """Cancel the typing indicator."""
+    if not ctx.typing_stopped and typing_ctx and typing_ctx.task:
+        typing_ctx.task.cancel()
+        ctx.typing_stopped = True
+
+
+async def _drain_stderr_to_channel(session: AgentSession, channel: TextChannel) -> None:
+    """Send any accumulated stderr to the channel."""
+    for stderr_msg in drain_stderr(session):
+        stderr_text = stderr_msg.strip()
+        if stderr_text:
+            for part in split_message(f"```\n{stderr_text}\n```"):
+                await channel.send(part)
+
+
+async def _handle_stream_event(
+    ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: StreamEvent, typing_ctx: Any
+) -> None:
+    """Handle a StreamEvent during response streaming."""
+    event = msg.event
+    event_type = event.get("type", "")
+
+    if msg.session_id and msg.session_id != session.session_id:
+        await _set_session_id(session, msg.session_id, channel=channel)
+
+    _update_activity(session, event)
+
+    # Debug output
+    if session.debug and event_type == "content_block_stop":
+        if session.activity.phase == "thinking" and session.activity.thinking_text:
+            thinking = session.activity.thinking_text.strip()
+            if thinking:
+                file = discord.File(io.BytesIO(thinking.encode("utf-8")), filename="thinking.md")
+                await channel.send("💭", file=file)
+                session.activity.thinking_text = ""
+        elif session.activity.phase == "waiting" and session.activity.tool_name:
+            tool = session.activity.tool_name
+            preview = extract_tool_preview(tool, session.activity.tool_input_preview)
+            if preview:
+                await channel.send(f"`🔧 {tool}: {preview[:120]}`")
+            else:
+                await channel.send(f"`🔧 {tool}`")
+
+    # Log stream events
+    if session.agent_log:
+        _log_stream_event(session, event_type, event)
+
+    if ctx.hit_rate_limit:
+        return
+
+    if event_type == "content_block_delta":
+        delta = event.get("delta", {})
+        if delta.get("type") == "text_delta":
+            ctx.text_buffer += delta.get("text", "")
+    elif event_type == "message_delta":
+        stop_reason = event.get("delta", {}).get("stop_reason")
+        if stop_reason == "end_turn":
+            await _flush_text(ctx, session, channel, "end_turn")
+            ctx.text_buffer = ""
+            _stop_typing(ctx, typing_ctx)
+
+
+def _log_stream_event(session: AgentSession, event_type: str, event: dict[str, Any]) -> None:
+    """Log a stream event to the agent's log."""
+    assert session.agent_log is not None
+    if event_type == "content_block_delta":
+        delta = event.get("delta", {})
+        delta_type = delta.get("type", "")
+        if delta_type not in ("text_delta", "thinking_delta", "signature_delta"):
+            session.agent_log.debug("STREAM: %s delta=%s", event_type, delta_type)
+    elif event_type in ("content_block_start", "content_block_stop"):
+        block = event.get("content_block", {})
+        session.agent_log.debug("STREAM: %s type=%s index=%s", event_type, block.get("type", "?"), event.get("index"))
+    elif event_type == "message_start":
+        msg_data = event.get("message", {})
+        session.agent_log.debug("STREAM: message_start model=%s", msg_data.get("model", "?"))
+    elif event_type == "message_delta":
+        delta = event.get("delta", {})
+        session.agent_log.debug("STREAM: message_delta stop_reason=%s", delta.get("stop_reason"))
+    elif event_type == "message_stop":
+        session.agent_log.debug("STREAM: message_stop")
+    else:
+        session.agent_log.debug("STREAM: %s %s", event_type, json.dumps(event)[:300])
+
+
+async def _handle_assistant_message(
+    ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: AssistantMessage, typing_ctx: Any
+) -> None:
+    """Handle an AssistantMessage during response streaming."""
+    if msg.error in ("rate_limit", "billing_error"):
+        error_text = ctx.text_buffer
+        for block in msg.content or []:
+            if hasattr(block, "text"):
+                error_text += " " + cast("str", getattr(block, "text", ""))
+        log.warning("Agent '%s' hit %s error: %s", session.name, msg.error, error_text[:200])
+        _stop_typing(ctx, typing_ctx)
+        await _handle_rate_limit(error_text, session, channel)
+        ctx.text_buffer = ""
+        ctx.hit_rate_limit = True
+    elif msg.error:
+        error_text = ctx.text_buffer
+        for block in msg.content or []:
+            if hasattr(block, "text"):
+                error_text += " " + cast("str", getattr(block, "text", ""))
+        log.warning("Agent '%s' hit API error (%s): %s", session.name, msg.error, error_text[:200])
+        _stop_typing(ctx, typing_ctx)
+        await _flush_text(ctx, session, channel, "assistant_error")
+        ctx.text_buffer = ""
+        ctx.hit_transient_error = msg.error
+    else:
+        await _flush_text(ctx, session, channel, "assistant_msg")
+        ctx.text_buffer = ""
+        _stop_typing(ctx, typing_ctx)
+
+    if session.agent_log:
+        for block in msg.content or []:
+            block_any: Any = block
+            if hasattr(block, "text"):
+                session.agent_log.info("ASSISTANT: %s", block_any.text[:2000])
+            elif hasattr(block, "type") and block_any.type == "tool_use":
+                session.agent_log.info(
+                    "TOOL_USE: %s(%s)",
+                    block_any.name,
+                    json.dumps(block_any.input)[:500] if hasattr(block, "input") else "",
+                )
+
+
+async def _handle_result_message(
+    ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: ResultMessage, typing_ctx: Any
+) -> None:
+    """Handle a ResultMessage during response streaming."""
+    _stop_typing(ctx, typing_ctx)
+    await _set_session_id(session, msg, channel=channel)
+    if not ctx.hit_rate_limit:
+        await _flush_text(ctx, session, channel, "result_msg")
+    ctx.text_buffer = ""
+    if session.agent_log:
+        session.agent_log.info(
+            "RESULT: cost=$%s turns=%d duration=%dms session=%s",
+            msg.total_cost_usd,
+            msg.num_turns,
+            msg.duration_ms,
+            msg.session_id,
+        )
+    _recordsession_usage(session.name, msg)
+
+
+async def _handle_system_message(session: AgentSession, channel: TextChannel, msg: SystemMessage) -> None:
+    """Handle a SystemMessage during response streaming."""
+    if session.agent_log:
+        session.agent_log.debug("SYSTEM_MSG: subtype=%s data=%s", msg.subtype, json.dumps(msg.data)[:500])
+    if msg.subtype == "compact_boundary":
+        metadata = msg.data.get("compact_metadata", {})
+        trigger = metadata.get("trigger", "unknown")
+        pre_tokens = metadata.get("pre_tokens")
+        log.info("Agent '%s' context compacted: trigger=%s pre_tokens=%s", session.name, trigger, pre_tokens)
+        token_info = f" ({pre_tokens:,} tokens)" if pre_tokens else ""
+        await channel.send(f"🔄 Context compacted{token_info}")
+
+
 async def stream_response_to_channel(session: AgentSession, channel: TextChannel, show_awaiting_input: bool = True) -> str | None:
     """Stream Claude's response from an agent session to a Discord channel.
 
@@ -1723,219 +1468,58 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         "".join(f.name or "?" for f in traceback.extract_stack(limit=4)[:-1]),
     )
 
-    text_buffer = ""
-    hit_rate_limit = False
-    hit_transient_error: str | None = None
-    typing_stopped = False
+    ctx = _StreamCtx()
 
-    _flush_count = 0
-    _msg_total = 0
-
-    async def flush_text(text: str, reason: str = "?") -> None:
-        nonlocal _flush_count
-        if not text.strip():
-            return
-        _flush_count += 1
-        log.info(
-            "FLUSH[%s] #%d reason=%s len=%d text=%r",
-            session.name,
-            _flush_count,
-            reason,
-            len(text.strip()),
-            text.strip()[:120],
-        )
-        await send_long(channel, text.lstrip())
-
-    def stop_typing() -> None:
-        nonlocal typing_stopped
-        if not typing_stopped and _typing_ctx and _typing_ctx.task:
-            _typing_ctx.task.cancel()
-            typing_stopped = True
-
-    async with channel.typing() as _typing_ctx:
+    async with channel.typing() as typing_ctx:
         async for msg in _receive_response_safe(session):
-            _msg_total += 1
+            ctx.msg_total += 1
             if session.agent_log:
                 session.agent_log.debug(
-                    "MSG_SEQ[%s][%d] type=%s buf_len=%d", stream_id, _msg_total, type(msg).__name__, len(text_buffer)
+                    "MSG_SEQ[%s][%d] type=%s buf_len=%d", stream_id, ctx.msg_total, type(msg).__name__, len(ctx.text_buffer)
                 )
 
-            for stderr_msg in drain_stderr(session):
-                stderr_text = stderr_msg.strip()
-                if stderr_text:
-                    for part in split_message(f"```\n{stderr_text}\n```"):
-                        await channel.send(part)
+            await _drain_stderr_to_channel(session, channel)
 
             if isinstance(msg, StreamEvent):
-                event = msg.event
-                event_type = event.get("type", "")
-
-                if msg.session_id and msg.session_id != session.session_id:
-                    await _set_session_id(session, msg.session_id, channel=channel)
-
-                _update_activity(session, event)
-
-                # Debug output
-                if session.debug:
-                    if event_type == "content_block_stop":
-                        if session.activity.phase == "thinking" and session.activity.thinking_text:
-                            thinking = session.activity.thinking_text.strip()
-                            if thinking:
-                                file = discord.File(
-                                    io.BytesIO(thinking.encode("utf-8")),
-                                    filename="thinking.md",
-                                )
-                                await channel.send("💭", file=file)
-                                session.activity.thinking_text = ""
-                        elif session.activity.phase == "waiting" and session.activity.tool_name:
-                            tool = session.activity.tool_name
-                            preview = extract_tool_preview(tool, session.activity.tool_input_preview)
-                            if preview:
-                                await channel.send(f"`🔧 {tool}: {preview[:120]}`")
-                            else:
-                                await channel.send(f"`🔧 {tool}`")
-
-                # Log stream events
-                if session.agent_log:
-                    if event_type == "content_block_delta":
-                        delta = event.get("delta", {})
-                        delta_type = delta.get("type", "")
-                        if delta_type not in ("text_delta", "thinking_delta", "signature_delta"):
-                            session.agent_log.debug("STREAM: %s delta=%s", event_type, delta_type)
-                    elif event_type in ("content_block_start", "content_block_stop"):
-                        block = event.get("content_block", {})
-                        session.agent_log.debug(
-                            "STREAM: %s type=%s index=%s", event_type, block.get("type", "?"), event.get("index")
-                        )
-                    elif event_type == "message_start":
-                        msg_data = event.get("message", {})
-                        session.agent_log.debug("STREAM: message_start model=%s", msg_data.get("model", "?"))
-                    elif event_type == "message_delta":
-                        delta = event.get("delta", {})
-                        session.agent_log.debug("STREAM: message_delta stop_reason=%s", delta.get("stop_reason"))
-                    elif event_type == "message_stop":
-                        session.agent_log.debug("STREAM: message_stop")
-                    else:
-                        session.agent_log.debug("STREAM: %s %s", event_type, json.dumps(event)[:300])
-
-                if hit_rate_limit:
-                    continue
-
-                if event_type == "content_block_delta":
-                    delta = event.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        text_buffer += delta.get("text", "")
-
-                elif event_type == "message_delta":
-                    stop_reason = event.get("delta", {}).get("stop_reason")
-                    if stop_reason == "end_turn":
-                        await flush_text(text_buffer, "end_turn")
-                        text_buffer = ""
-                        stop_typing()
-
+                await _handle_stream_event(ctx, session, channel, msg, typing_ctx)
             elif isinstance(msg, AssistantMessage):
-                if msg.error in ("rate_limit", "billing_error"):
-                    error_text = text_buffer
-                    for block in msg.content or []:
-                        if hasattr(block, "text"):
-                            error_text += " " + cast("str", getattr(block, "text", ""))
-                    log.warning("Agent '%s' hit %s error: %s", session.name, msg.error, error_text[:200])
-                    stop_typing()
-                    await _handle_rate_limit(error_text, session, channel)
-                    text_buffer = ""
-                    hit_rate_limit = True
-                elif msg.error:
-                    error_text = text_buffer
-                    for block in msg.content or []:
-                        if hasattr(block, "text"):
-                            error_text += " " + cast("str", getattr(block, "text", ""))
-                    log.warning("Agent '%s' hit API error (%s): %s", session.name, msg.error, error_text[:200])
-                    stop_typing()
-                    await flush_text(text_buffer, "assistant_error")
-                    text_buffer = ""
-                    hit_transient_error = msg.error
-                else:
-                    await flush_text(text_buffer, "assistant_msg")
-                    text_buffer = ""
-                    stop_typing()
-
-                if session.agent_log:
-                    for block in msg.content or []:
-                        block_any: Any = block
-                        if hasattr(block, "text"):
-                            session.agent_log.info("ASSISTANT: %s", block_any.text[:2000])
-                        elif hasattr(block, "type") and block_any.type == "tool_use":
-                            session.agent_log.info(
-                                "TOOL_USE: %s(%s)",
-                                block_any.name,
-                                json.dumps(block_any.input)[:500] if hasattr(block, "input") else "",
-                            )
-
+                await _handle_assistant_message(ctx, session, channel, msg, typing_ctx)
             elif isinstance(msg, ResultMessage):
-                stop_typing()
-                await _set_session_id(session, msg, channel=channel)
-                if not hit_rate_limit:
-                    await flush_text(text_buffer, "result_msg")
-                text_buffer = ""
-                if session.agent_log:
-                    session.agent_log.info(
-                        "RESULT: cost=$%s turns=%d duration=%dms session=%s",
-                        msg.total_cost_usd,
-                        msg.num_turns,
-                        msg.duration_ms,
-                        msg.session_id,
-                    )
-                _recordsession_usage(session.name, msg)
-
+                await _handle_result_message(ctx, session, channel, msg, typing_ctx)
             elif isinstance(msg, SystemMessage):
-                if session.agent_log:
-                    session.agent_log.debug("SYSTEM_MSG: subtype=%s data=%s", msg.subtype, json.dumps(msg.data)[:500])
-                if msg.subtype == "compact_boundary":
-                    metadata = msg.data.get("compact_metadata", {})
-                    trigger = metadata.get("trigger", "unknown")
-                    pre_tokens = metadata.get("pre_tokens")
-                    log.info(
-                        "Agent '%s' context compacted: trigger=%s pre_tokens=%s", session.name, trigger, pre_tokens
-                    )
-                    token_info = f" ({pre_tokens:,} tokens)" if pre_tokens else ""
-                    await channel.send(f"🔄 Context compacted{token_info}")
-
-            else:
-                if session.agent_log:
-                    session.agent_log.debug("OTHER_MSG: %s", type(msg).__name__)
+                await _handle_system_message(session, channel, msg)
+            elif session.agent_log:
+                session.agent_log.debug("OTHER_MSG: %s", type(msg).__name__)
 
             # Mid-turn flush
-            if not hit_rate_limit and len(text_buffer) >= 1800:
-                split_at = text_buffer.rfind("\n", 0, 1800)
+            if not ctx.hit_rate_limit and len(ctx.text_buffer) >= 1800:
+                split_at = ctx.text_buffer.rfind("\n", 0, 1800)
                 if split_at == -1:
                     split_at = 1800
-                to_send = text_buffer[:split_at]
-                text_buffer = text_buffer[split_at:].lstrip("\n")
-                await flush_text(to_send, "mid_turn_split")
+                remainder = ctx.text_buffer[split_at:].lstrip("\n")
+                ctx.text_buffer = ctx.text_buffer[:split_at]
+                await _flush_text(ctx, session, channel, "mid_turn_split")
+                ctx.text_buffer = remainder
 
     # Flush remaining stderr
-    for stderr_msg in drain_stderr(session):
-        stderr_text = stderr_msg.strip()
-        if stderr_text:
-            for part in split_message(f"```\n{stderr_text}\n```"):
-                await channel.send(part)
+    await _drain_stderr_to_channel(session, channel)
 
-    if hit_rate_limit:
-        log.info("STREAM_END[%s] result=rate_limit msgs=%d flushes=%d", stream_id, _msg_total, _flush_count)
+    if ctx.hit_rate_limit:
+        log.info("STREAM_END[%s] result=rate_limit msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
         return None
 
-    if hit_transient_error:
+    if ctx.hit_transient_error:
         log.info(
             "STREAM_END[%s] result=transient_error(%s) msgs=%d flushes=%d",
             stream_id,
-            hit_transient_error,
-            _msg_total,
-            _flush_count,
+            ctx.hit_transient_error,
+            ctx.msg_total,
+            ctx.flush_count,
         )
-        return hit_transient_error
+        return ctx.hit_transient_error
 
-    await flush_text(text_buffer, "post_loop")
-    log.info("STREAM_END[%s] result=ok msgs=%d flushes=%d", stream_id, _msg_total, _flush_count)
+    await _flush_text(ctx, session, channel, "post_loop")
+    log.info("STREAM_END[%s] result=ok msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
 
     if config.SHOW_AWAITING_INPUT:
         mentions = " ".join(f"<@{uid}>" for uid in config.ALLOWED_USER_IDS)
@@ -2022,30 +1606,12 @@ async def handle_query_timeout(session: AgentSession, channel: TextChannel) -> N
         log.warning("Interrupt failed for agent '%s', killing and resuming session", session.name)
 
     old_session_id = session.session_id
-    old_name = session.name
-    old_cwd = session.cwd
-    old_prompt = session.system_prompt or make_spawned_agent_system_prompt(session.cwd)
-    old_prompt_hash = session.system_prompt_hash or compute_prompt_hash(old_prompt)
-    old_channel_id = session.discord_channel_id
-    old_mcp = session.mcp_servers
-    await end_session(old_name)
-
-    new_session = AgentSession(
-        name=old_name,
-        cwd=old_cwd,
-        system_prompt=old_prompt,
-        system_prompt_hash=old_prompt_hash,
-        client=None,
-        session_id=old_session_id,
-        discord_channel_id=old_channel_id,
-        mcp_servers=old_mcp,
-    )
-    agents[old_name] = new_session
+    new_session = await _rebuild_session(session.name, session_id=old_session_id)
 
     if old_session_id:
-        await send_system(channel, f"Agent **{old_name}** timed out and was recovered (sleeping). Context preserved.")
+        await send_system(channel, f"Agent **{new_session.name}** timed out and was recovered (sleeping). Context preserved.")
     else:
-        await send_system(channel, f"Agent **{old_name}** timed out and was reset (sleeping). Context lost.")
+        await send_system(channel, f"Agent **{new_session.name}** timed out and was reset (sleeping). Context lost.")
 
 
 # ---------------------------------------------------------------------------
@@ -2135,7 +1701,7 @@ async def spawn_agent(
         log.info("Auto-created working directory: %s", cwd)
 
     normalized = normalize_channel_name(name)
-    bot_creating_channels.add(normalized)
+    _channels_mod.bot_creating_channels.add(normalized)
     channel = await ensure_agent_channel(name)
 
     if agent_type == "flowcoder":
@@ -2176,7 +1742,7 @@ async def spawn_agent(
 
     agents[name] = session
     channel_to_agent[channel.id] = name
-    bot_creating_channels.discard(normalized)
+    _channels_mod.bot_creating_channels.discard(normalized)
     log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)
 
     desired_topic = format_channel_topic(cwd, resume, session.system_prompt_hash)
@@ -2874,6 +2440,32 @@ async def _reconnect_flowcoder(session: AgentSession, bridge_name: str, bridge_i
 # ---------------------------------------------------------------------------
 
 
+async def _notify_agent_channel(agent_name: str, message: str) -> None:
+    """Notify an agent's Discord channel with a system message."""
+    channel = await get_agent_channel(agent_name)
+    if channel:
+        await send_system(channel, message)
+
+
+def make_shutdown_coordinator(
+    *,
+    close_bot_fn: Any,
+    kill_fn: Any,
+    goodbye_fn: Any,
+    bridge_mode: bool,
+) -> ShutdownCoordinator:
+    """Create a ShutdownCoordinator with standard agents/sleep/notify wiring."""
+    return ShutdownCoordinator(
+        agents=agents,
+        sleep_fn=lambda s: sleep_agent(s, force=True),
+        close_bot_fn=close_bot_fn,
+        kill_fn=kill_fn,
+        notify_fn=_notify_agent_channel,
+        goodbye_fn=goodbye_fn,
+        bridge_mode=bridge_mode,
+    )
+
+
 def init_shutdown_coordinator() -> None:
     """Wire up the ShutdownCoordinator with real bot callbacks.
 
@@ -2881,11 +2473,6 @@ def init_shutdown_coordinator() -> None:
     """
     global shutdown_coordinator
     assert _bot is not None
-
-    async def _notify_agent_channel(agent_name: str, message: str) -> None:
-        channel = await get_agent_channel(agent_name)
-        if channel:
-            await send_system(channel, message)
 
     async def _send_goodbye() -> None:
         for s in agents.values():
@@ -2899,12 +2486,9 @@ def init_shutdown_coordinator() -> None:
             await master_ch.send("*System:* Shutting down — see you soon!")
 
     use_bridge = bridge_conn is not None and bridge_conn.is_alive
-    shutdown_coordinator = ShutdownCoordinator(
-        agents=agents,
-        sleep_fn=lambda s: sleep_agent(s, force=True),
+    shutdown_coordinator = make_shutdown_coordinator(
         close_bot_fn=_bot.close,
         kill_fn=exit_for_restart if use_bridge else kill_supervisor,
-        notify_fn=_notify_agent_channel,
         goodbye_fn=_send_goodbye,
         bridge_mode=use_bridge,
     )

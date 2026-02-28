@@ -16,11 +16,13 @@ import asyncio
 import json
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
 from croniter import croniter
+
+import config
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -67,6 +69,72 @@ def _save(path: str, entries: list[dict[str, Any]]) -> None:
     with open(path, "w") as f:
         json.dump(entries, f, indent=2)
         f.write("\n")
+
+
+# ---------------------------------------------------------------------------
+# Schedule persistence (moved from agents.py — pure file I/O, no agent state)
+# ---------------------------------------------------------------------------
+
+
+def load_schedules() -> list[dict[str, Any]]:
+    return _load(config.SCHEDULES_PATH)
+
+
+def save_schedules(entries: list[dict[str, Any]]) -> None:
+    _save(config.SCHEDULES_PATH, entries)
+
+
+def load_history() -> list[dict[str, Any]]:
+    return _load(config.HISTORY_PATH)
+
+
+def append_history(entry: dict[str, Any], fired_at: datetime) -> None:
+    history = load_history()
+    history.append(
+        {
+            "name": entry["name"],
+            "prompt": entry["prompt"],
+            "fired_at": fired_at.isoformat(),
+        }
+    )
+    _save(config.HISTORY_PATH, history)
+
+
+def prune_history() -> None:
+    history = load_history()
+    cutoff = datetime.now(UTC) - timedelta(days=7)
+    pruned = [h for h in history if datetime.fromisoformat(h["fired_at"]) > cutoff]
+    if len(pruned) != len(history):
+        _save(config.HISTORY_PATH, pruned)
+
+
+def load_skips() -> list[dict[str, Any]]:
+    return _load(config.SKIPS_PATH)
+
+
+def save_skips(skips: list[dict[str, Any]]) -> None:
+    _save(config.SKIPS_PATH, skips)
+
+
+def prune_skips() -> None:
+    """Remove skip entries whose date has passed."""
+    skips = load_skips()
+    today = datetime.now(config.SCHEDULE_TIMEZONE).date()
+    pruned = [s for s in skips if datetime.strptime(s["skip_date"], "%Y-%m-%d").replace(tzinfo=UTC).date() >= today]
+    if len(pruned) != len(skips):
+        save_skips(pruned)
+
+
+def check_skip(name: str) -> bool:
+    """Check if a recurring event should be skipped today."""
+    skips = load_skips()
+    today = datetime.now(config.SCHEDULE_TIMEZONE).strftime("%Y-%m-%d")
+    for skip in skips:
+        if skip.get("name") == name and skip.get("skip_date") == today:
+            skips.remove(skip)
+            save_skips(skips)
+            return True
+    return False
 
 
 def _text(msg: str) -> dict[str, Any]:

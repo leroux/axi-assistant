@@ -13,6 +13,8 @@
     "supervisor.py",
     "axi_test.py",
     "discord_query.py",
+    "channels.py",
+    "rate_limits.py",
     "schedule_tools.py",
     "shutdown.py",
     "flowcoder.py",

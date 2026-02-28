@@ -24,6 +24,7 @@ from discord.ext import tasks
 from discord.ext.commands import Bot
 
 import agents
+import channels
 import config
 import tools
 from axi_types import ActivityState, AgentSession, tool_display
@@ -32,8 +33,18 @@ from prompts import (
     compute_prompt_hash,
     make_spawned_agent_system_prompt,
 )
-from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
-from shutdown import ShutdownCoordinator, kill_supervisor
+from schedule_tools import (
+    append_history,
+    check_skip,
+    load_schedules,
+    make_schedule_mcp_server,
+    prune_history,
+    prune_skips,
+    save_schedules,
+    schedule_key,
+    schedules_lock,
+)
+from shutdown import kill_supervisor
 
 log = logging.getLogger("axi")
 
@@ -143,7 +154,7 @@ async def on_message(message: discord.Message) -> None:
 
     session = agents.agents.get(agent_name)
     if session is None:
-        if agents.killed_category and channel.category_id == agents.killed_category.id:
+        if channels.killed_category and channel.category_id == channels.killed_category.id:
             await agents.send_system(
                 channel,
                 "This agent has been killed. Use `/spawn` to create a new one.",
@@ -151,7 +162,7 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # Block killed agents
-    if agents.killed_category and channel.category_id == agents.killed_category.id:
+    if channels.killed_category and channel.category_id == channels.killed_category.id:
         await agents.send_system(
             channel,
             "This agent has been killed. Use `/spawn` to create a new one.",
@@ -283,22 +294,11 @@ async def on_message(message: discord.Message) -> None:
 # ---------------------------------------------------------------------------
 
 
-@tasks.loop(seconds=10)
-async def check_schedules() -> None:
-    if agents.shutdown_coordinator and agents.shutdown_coordinator.requested:
-        return
-
-    agents.prune_history()
-    agents.prune_skips()
-
-    now_utc = datetime.now(UTC)
-    now_local = datetime.now(config.SCHEDULE_TIMEZONE)
-    entries = agents.load_schedules()
+async def _fire_schedules(
+    entries: list[dict[str, Any]], now_utc: datetime, now_local: datetime
+) -> None:
+    """Fire due cron/one-off schedules and clean up consumed one-offs."""
     fired_one_off_keys: set[str] = set()
-
-    log.debug("Scheduler tick: %d entries, %d agents awake", len(entries), agents.count_awake_agents())
-
-    master_ch = await agents.get_master_channel()
 
     for entry in list(entries):
         name = entry.get("name")
@@ -321,7 +321,7 @@ async def check_schedules() -> None:
                 if last_occurrence > agents.schedule_last_fired[skey]:
                     agents.schedule_last_fired[skey] = last_occurrence
 
-                    if agents.check_skip(skey):
+                    if check_skip(skey):
                         log.info("Skipping recurring event (one-off skip): %s", name)
                         continue
 
@@ -360,27 +360,29 @@ async def check_schedules() -> None:
                         await agents.spawn_agent(agent_name, agent_cwd, entry["prompt"])
 
                     fired_one_off_keys.add(schedule_key(entry))
-                    agents.append_history(entry, now_utc)
+                    append_history(entry, now_utc)
 
         except Exception:
             log.exception("Error processing scheduled event %s", name)
 
     if fired_one_off_keys:
         async with schedules_lock:
-            current = agents.load_schedules()
+            current = load_schedules()
             current = [e for e in current if schedule_key(e) not in fired_one_off_keys]
-            agents.save_schedules(current)
+            save_schedules(current)
 
-    # --- Idle agent detection ---
+
+async def _check_idle_agents(now_utc: datetime, master_ch: TextChannel | None) -> None:
+    """Send idle reminders to agents that have been inactive too long."""
     idle_agents: list[tuple[AgentSession, str, int]] = []
     for agent_name, session in list(agents.agents.items()):
         if session.client is None:
             continue
         if session.query_lock.locked():
             continue
-        if agents.killed_category and session.discord_channel_id:
+        if channels.killed_category and session.discord_channel_id:
             ch = bot.get_channel(session.discord_channel_id)
-            if isinstance(ch, TextChannel) and ch.category_id == agents.killed_category.id:
+            if isinstance(ch, TextChannel) and ch.category_id == channels.killed_category.id:
                 continue
         if session.idle_reminder_count >= len(config.IDLE_REMINDER_THRESHOLDS):
             continue
@@ -409,17 +411,21 @@ async def check_schedules() -> None:
         session.idle_reminder_count += 1
         session.last_idle_notified = datetime.now(UTC)
 
-    # --- Stranded-message safety net ---
+
+async def _recover_stranded_messages() -> None:
+    """Wake sleeping agents that have queued messages (stranded-message safety net)."""
     if agents.count_awake_agents() < config.MAX_AWAKE_AGENTS:
-        for agent_name, session in list(agents.agents.items()):
+        for _agent_name, session in list(agents.agents.items()):
             if session.client is None and session.message_queue and not session.query_lock.locked():
                 content, ch, stranded_msg = session.message_queue.popleft()
-                log.info("Stranded message found for sleeping agent '%s', waking", agent_name)
+                log.info("Stranded message found for sleeping agent '%s', waking", _agent_name)
                 await agents.remove_reaction(stranded_msg, "📨")
                 asyncio.create_task(agents.run_initial_prompt(session, content, ch))
                 break
 
-    # --- Delayed sleep for idle awake agents ---
+
+async def _auto_sleep_idle_agents(now_utc: datetime) -> None:
+    """Put idle awake agents to sleep, aggressively when under concurrency pressure."""
     awake_count = agents.count_awake_agents()
     under_pressure = awake_count >= config.MAX_AWAKE_AGENTS
     idle_threshold = timedelta(seconds=0) if under_pressure else timedelta(minutes=1)
@@ -445,6 +451,28 @@ async def check_schedules() -> None:
                 await agents.sleep_agent(session)
             except Exception:
                 log.exception("Error auto-sleeping agent '%s'", agent_name)
+
+
+@tasks.loop(seconds=10)
+async def check_schedules() -> None:
+    if agents.shutdown_coordinator and agents.shutdown_coordinator.requested:
+        return
+
+    prune_history()
+    prune_skips()
+
+    now_utc = datetime.now(UTC)
+    now_local = datetime.now(config.SCHEDULE_TIMEZONE)
+    entries = load_schedules()
+
+    log.debug("Scheduler tick: %d entries, %d agents awake", len(entries), agents.count_awake_agents())
+
+    master_ch = await agents.get_master_channel()
+
+    await _fire_schedules(entries, now_utc, now_local)
+    await _check_idle_agents(now_utc, master_ch)
+    await _recover_stranded_messages()
+    await _auto_sleep_idle_agents(now_utc)
 
 
 @check_schedules.before_loop
@@ -487,6 +515,35 @@ async def killable_agent_autocomplete(interaction: discord.Interaction, current:
 async def agent_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     """Autocomplete callback for agent name parameters (all agents)."""
     return [app_commands.Choice(name=name, value=name) for name in agents.agents if current.lower() in name.lower()][:25]
+
+
+# ---------------------------------------------------------------------------
+# Agent resolution helper
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_agent(
+    interaction: discord.Interaction, agent_name: str | None
+) -> tuple[str, AgentSession] | None:
+    """Resolve an agent name (or infer from channel) and look up its session.
+
+    Returns ``(name, session)`` on success, or ``None`` after sending an
+    ephemeral error to the user.
+    """
+    if agent_name is None:
+        agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
+        if agent_name is None:
+            await interaction.response.send_message(
+                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
+            )
+            return None
+
+    session = agents.agents.get(agent_name)
+    if session is None:
+        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+        return None
+
+    return agent_name, session
 
 
 # ---------------------------------------------------------------------------
@@ -687,9 +744,9 @@ async def list_agents(interaction: discord.Interaction) -> None:
         else:
             status = " [sleeping]"
         is_killed = False
-        if agents.killed_category and session.discord_channel_id:
+        if channels.killed_category and session.discord_channel_id:
             ch = bot.get_channel(session.discord_channel_id)
-            if isinstance(ch, TextChannel) and ch.category_id == agents.killed_category.id:
+            if isinstance(ch, TextChannel) and ch.category_id == channels.killed_category.id:
                 is_killed = True
         killed_tag = " [killed]" if is_killed else ""
         protected = " [protected]" if name == config.MASTER_AGENT_NAME else ""
@@ -817,40 +874,45 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
     return "\n".join(lines)
 
 
+def _agent_state_summary(session: AgentSession) -> str:
+    """Return a short state string for an agent (e.g. 'sleeping (5m)', 'thinking...')."""
+    now = datetime.now(UTC)
+    if session.client is None:
+        idle = int((now - session.last_activity).total_seconds())
+        return f"sleeping ({agents.format_time_remaining(idle)})"
+    if session.bridge_busy:
+        return "busy (running in bridge)"
+    if not session.query_lock.locked():
+        idle = int((now - session.last_activity).total_seconds())
+        return f"idle ({agents.format_time_remaining(idle)})"
+
+    activity = session.activity
+    if activity.phase == "thinking":
+        status = "thinking..."
+    elif activity.phase == "writing":
+        status = "writing response..."
+    elif activity.phase == "tool_use" and activity.tool_name:
+        status = tool_display(activity.tool_name)
+    elif activity.phase == "waiting":
+        status = "processing tool results..."
+    else:
+        status = "busy"
+
+    if activity.query_started:
+        elapsed = int((now - activity.query_started).total_seconds())
+        status += f" ({agents.format_time_remaining(elapsed)})"
+    return status
+
+
 async def _show_all_agents_status(interaction: discord.Interaction) -> None:
     """Show a summary of all agents when /status is used without an agent name."""
     if not agents.agents:
         await interaction.response.send_message("No active agents.", ephemeral=True)
         return
 
-    now = datetime.now(UTC)
     lines: list[str] = []
     for name, session in agents.agents.items():
-        if session.client is None:
-            idle = int((now - session.last_activity).total_seconds())
-            status = f"sleeping ({agents.format_time_remaining(idle)})"
-        elif session.bridge_busy:
-            status = "busy (running in bridge)"
-        elif not session.query_lock.locked():
-            idle = int((now - session.last_activity).total_seconds())
-            status = f"idle ({agents.format_time_remaining(idle)})"
-        else:
-            activity = session.activity
-            if activity.phase == "thinking":
-                status = "thinking..."
-            elif activity.phase == "writing":
-                status = "writing response..."
-            elif activity.phase == "tool_use" and activity.tool_name:
-                status = tool_display(activity.tool_name)
-            elif activity.phase == "waiting":
-                status = "processing tool results..."
-            else:
-                status = "busy"
-
-            if activity.query_started:
-                elapsed = int((now - activity.query_started).total_seconds())
-                status += f" ({agents.format_time_remaining(elapsed)})"
-
+        status = _agent_state_summary(session)
         queue = len(session.message_queue)
         queue_str = f" | {queue} queued" if queue > 0 else ""
         lines.append(f"- **{name}**: {status}{queue_str}")
@@ -869,16 +931,10 @@ async def _show_all_agents_status(interaction: discord.Interaction) -> None:
 async def debug_command(interaction: discord.Interaction, mode: str | None = None) -> None:
     log.info("Slash command /debug mode=%s from %s", mode, interaction.user)
 
-
-    agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
-    if agent_name is None:
-        await interaction.response.send_message("Not in an agent channel.", ephemeral=True)
+    resolved = await _resolve_agent(interaction, None)
+    if resolved is None:
         return
-
-    session = agents.agents.get(agent_name)
-    if session is None:
-        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
-        return
+    agent_name, session = resolved
 
     if mode is not None:
         mode_lower = mode.strip().lower()
@@ -903,25 +959,16 @@ async def debug_command(interaction: discord.Interaction, mode: str | None = Non
 async def kill_agent(interaction: discord.Interaction, agent_name: str | None = None) -> None:
     log.info("Slash command /kill-agent %s from %s", agent_name, interaction.user)
 
-
-    if agent_name is None:
-        agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
-        if agent_name is None:
-            await interaction.response.send_message(
-                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
-            )
-            return
+    resolved = await _resolve_agent(interaction, agent_name)
+    if resolved is None:
+        return
+    agent_name, session = resolved
 
     if agent_name == config.MASTER_AGENT_NAME:
         await interaction.response.send_message("Cannot kill the axi-master session.", ephemeral=True)
         return
 
-    if agent_name not in agents.agents:
-        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
-        return
-
     await interaction.response.defer()
-    session = agents.agents[agent_name]
     session_id = session.session_id
 
     agent_ch = await agents.get_agent_channel(agent_name)
@@ -951,19 +998,10 @@ async def kill_agent(interaction: discord.Interaction, agent_name: str | None = 
 async def stop_agent(interaction: discord.Interaction, agent_name: str | None = None) -> None:
     log.info("Slash command /stop agent=%s from %s", agent_name, interaction.user)
 
-
-    if agent_name is None:
-        agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
-        if agent_name is None:
-            await interaction.response.send_message(
-                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
-            )
-            return
-
-    session = agents.agents.get(agent_name)
-    if session is None:
-        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+    resolved = await _resolve_agent(interaction, agent_name)
+    if resolved is None:
         return
+    agent_name, session = resolved
 
     if session.client is None or not session.query_lock.locked():
         await interaction.response.send_message(f"Agent **{agent_name}** is not busy.", ephemeral=True)
@@ -1007,19 +1045,10 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
 async def skip_agent(interaction: discord.Interaction, agent_name: str | None = None) -> None:
     log.info("Slash command /skip agent=%s from %s", agent_name, interaction.user)
 
-
-    if agent_name is None:
-        agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
-        if agent_name is None:
-            await interaction.response.send_message(
-                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
-            )
-            return
-
-    session = agents.agents.get(agent_name)
-    if session is None:
-        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+    resolved = await _resolve_agent(interaction, agent_name)
+    if resolved is None:
         return
+    agent_name, session = resolved
 
     if session.client is None or not session.query_lock.locked():
         await interaction.response.send_message(f"Agent **{agent_name}** is not busy.", ephemeral=True)
@@ -1051,19 +1080,10 @@ async def skip_agent(interaction: discord.Interaction, agent_name: str | None = 
 async def toggle_plan_mode(interaction: discord.Interaction, agent_name: str | None = None) -> None:
     log.info("Slash command /plan agent=%s from %s", agent_name, interaction.user)
 
-
-    if agent_name is None:
-        agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
-        if agent_name is None:
-            await interaction.response.send_message(
-                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
-            )
-            return
-
-    session = agents.agents.get(agent_name)
-    if session is None:
-        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+    resolved = await _resolve_agent(interaction, agent_name)
+    if resolved is None:
         return
+    agent_name, session = resolved
 
     new_mode = not session.plan_mode
     session.plan_mode = new_mode
@@ -1098,18 +1118,10 @@ async def toggle_plan_mode(interaction: discord.Interaction, agent_name: str | N
 async def reset_context(interaction: discord.Interaction, agent_name: str | None = None, working_dir: str | None = None) -> None:
     log.info("Slash command /reset-context agent=%s cwd=%s from %s", agent_name, working_dir, interaction.user)
 
-
-    if agent_name is None:
-        agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
-        if agent_name is None:
-            await interaction.response.send_message(
-                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
-            )
-            return
-
-    if agent_name not in agents.agents:
-        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+    resolved = await _resolve_agent(interaction, agent_name)
+    if resolved is None:
         return
+    agent_name, _ = resolved
 
     await interaction.response.defer()
     session = await agents.reset_session(agent_name, cwd=working_dir)
@@ -1204,20 +1216,10 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
 
 async def _run_agent_sdk_command(interaction: discord.Interaction, agent_name: str | None, command: str, label: str) -> None:
     """Run a Claude Code CLI slash command on an agent via the SDK."""
-
-
-    if agent_name is None:
-        agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
-        if agent_name is None:
-            await interaction.response.send_message(
-                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
-            )
-            return
-
-    session = agents.agents.get(agent_name)
-    if session is None:
-        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+    resolved = await _resolve_agent(interaction, agent_name)
+    if resolved is None:
         return
+    agent_name, session = resolved
 
     if session.query_lock.locked():
         await interaction.response.send_message(f"Agent **{agent_name}** is busy.", ephemeral=True)
@@ -1315,20 +1317,10 @@ async def _run_telos_interview(session: AgentSession, channel: TextChannel) -> N
 async def telos_interview_cmd(interaction: discord.Interaction, agent_name: str | None = None) -> None:
     log.info("Slash command /telos agent=%s from %s", agent_name, interaction.user)
 
-
-
-    if agent_name is None:
-        agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
-        if agent_name is None:
-            await interaction.response.send_message(
-                "Could not determine agent for this channel. Specify an agent name.", ephemeral=True
-            )
-            return
-
-    session = agents.agents.get(agent_name)
-    if session is None:
-        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
+    resolved = await _resolve_agent(interaction, agent_name)
+    if resolved is None:
         return
+    agent_name, session = resolved
 
     if session.query_lock.locked():
         await interaction.response.send_message(
@@ -1413,18 +1405,10 @@ async def flowchart_name_autocomplete(interaction: discord.Interaction, current:
 async def flowchart_cmd(interaction: discord.Interaction, name: str, args: str | None = None) -> None:
     log.info("Slash command /flowchart name=%s args=%s from %s", name, args, interaction.user)
 
-
-    agent_name = agents.channel_to_agent.get(interaction.channel_id or 0)
-    if agent_name is None:
-        await interaction.response.send_message(
-            "Could not determine agent for this channel. Use this in an agent's channel.", ephemeral=True
-        )
+    resolved = await _resolve_agent(interaction, None)
+    if resolved is None:
         return
-
-    session = agents.agents.get(agent_name)
-    if session is None:
-        await interaction.response.send_message(f"Agent **{agent_name}** not found.", ephemeral=True)
-        return
+    agent_name, session = resolved
 
     if session.query_lock.locked():
         await interaction.response.send_message(
@@ -1510,22 +1494,14 @@ async def restart_including_bridge_cmd(interaction: discord.Interaction, force: 
         )
         return
 
-    async def _notify_agent_channel(agent_name: str, message: str) -> None:
-        channel = await agents.get_agent_channel(agent_name)
-        if channel:
-            await agents.send_system(channel, message)
-
     async def _send_goodbye() -> None:
         master_ch = await agents.get_master_channel()
         if master_ch:
             await master_ch.send("*System:* Full restart — bridge is going down. See you soon!")
 
-    full_coordinator = ShutdownCoordinator(
-        agents=agents.agents,
-        sleep_fn=lambda s: agents.sleep_agent(s, force=True),
+    full_coordinator = agents.make_shutdown_coordinator(
         close_bot_fn=bot.close,
         kill_fn=kill_supervisor,
-        notify_fn=_notify_agent_channel,
         goodbye_fn=_send_goodbye,
         bridge_mode=False,
     )
@@ -1555,9 +1531,9 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
     """Auto-register agent when a user manually creates a channel in the Active category."""
     if not isinstance(channel, discord.TextChannel):
         return
-    if not agents.active_category or channel.category_id != agents.active_category.id:
+    if not channels.active_category or channel.category_id != channels.active_category.id:
         return
-    if channel.name in agents.bot_creating_channels:
+    if channel.name in channels.bot_creating_channels:
         return
     if channel.name == agents.normalize_channel_name(config.MASTER_AGENT_NAME):
         return
@@ -1613,7 +1589,7 @@ async def sync_readme_channel() -> None:
         log.debug("readme_content.md is empty — skipping readme sync")
         return
 
-    guild = agents.target_guild
+    guild = channels.target_guild
     if guild is None:
         log.warning("No guild available — skipping readme sync")
         return
@@ -1676,32 +1652,12 @@ async def sync_readme_channel() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Startup
+# Startup helpers
 # ---------------------------------------------------------------------------
 
 
-@bot.event
-async def on_ready() -> None:
-    global _on_ready_fired
-    log.info("Bot ready as %s", bot.user)
-
-    asyncio.get_event_loop().set_exception_handler(_handle_task_exception)
-
-    if _on_ready_fired:
-        log.info("on_ready fired again (gateway reconnect) — skipping startup logic")
-        return
-    _on_ready_fired = True
-
-    global _bot_start_time
-    _bot_start_time = datetime.now(UTC)
-
-    # Initialize agents module with bot reference
-    agents.init(bot)
-    agents.set_utils_mcp_server(tools.utils_mcp_server)
-
-    # Load master session data from previous run (if any) for resume
-    master_resume_id = None
-    master_old_prompt_hash = None
+def _load_master_session_data() -> tuple[str | None, str | None]:
+    """Load master session_id and prompt_hash from disk. Returns (resume_id, prompt_hash)."""
     try:
         if os.path.isfile(config.MASTER_SESSION_PATH):
             with open(config.MASTER_SESSION_PATH) as f:
@@ -1709,32 +1665,40 @@ async def on_ready() -> None:
             if raw:
                 if raw.startswith("{"):
                     data = json.loads(raw)
-                    master_resume_id = data.get("session_id")
-                    master_old_prompt_hash = data.get("prompt_hash")
+                    resume_id = data.get("session_id")
+                    prompt_hash = data.get("prompt_hash")
                 else:
-                    master_resume_id = raw
-            if master_resume_id:
-                log.info("Loaded master session_id from %s: %s (prompt_hash=%s)", config.MASTER_SESSION_PATH, master_resume_id[:8], master_old_prompt_hash)
+                    resume_id = raw
+                    prompt_hash = None
+                if resume_id:
+                    log.info("Loaded master session_id from %s: %s (prompt_hash=%s)", config.MASTER_SESSION_PATH, resume_id[:8], prompt_hash)
+                return resume_id, prompt_hash
     except (OSError, json.JSONDecodeError):
         log.warning("Failed to read master session data", exc_info=True)
+    return None, None
 
-    # Register master agent as sleeping — it will wake on first message
+
+def _register_master_agent(resume_id: str | None, prompt_hash: str | None) -> AgentSession:
+    """Create and register the master AgentSession (sleeping)."""
     master_mcp: dict[str, Any] = {"axi": tools.axi_master_mcp_server}
     if os.path.isdir(config.BOT_WORKTREES_DIR):
         master_mcp["discord"] = tools.discord_mcp_server
-    master_session = AgentSession(
+    session = AgentSession(
         name=config.MASTER_AGENT_NAME,
         cwd=config.DEFAULT_CWD,
         system_prompt=MASTER_SYSTEM_PROMPT,
-        system_prompt_hash=master_old_prompt_hash,
+        system_prompt_hash=prompt_hash,
         client=None,
         mcp_servers=master_mcp,
-        session_id=master_resume_id,
+        session_id=resume_id,
     )
-    agents.agents[config.MASTER_AGENT_NAME] = master_session
-    log.info("Master agent registered (sleeping, session_id=%s)", master_resume_id and master_resume_id[:8])
+    agents.agents[config.MASTER_AGENT_NAME] = session
+    log.info("Master agent registered (sleeping, session_id=%s)", resume_id and resume_id[:8])
+    return session
 
-    # Set up guild infrastructure (categories + master channel)
+
+async def _setup_guild_infrastructure(master_session: AgentSession) -> None:
+    """Set up Discord guild categories and master channel."""
     try:
         await agents.ensure_guild_infrastructure()
         master_channel = await agents.ensure_agent_channel(config.MASTER_AGENT_NAME)
@@ -1746,117 +1710,95 @@ async def on_ready() -> None:
         if master_channel.topic != desired_topic:
             log.info("Updating topic on #%s: %r -> %r", master_channel.name, master_channel.topic, desired_topic)
             await master_channel.edit(topic=desired_topic)
-
     except Exception:
         log.exception("Failed to set up guild infrastructure — guild channels won't work")
 
-    # Sync readme channel
     try:
         await sync_readme_channel()
     except Exception:
         log.exception("Failed to sync readme channel")
 
-    # Reconstruct sleeping agents from existing channels
     try:
         await agents.reconstruct_agents_from_channels()
     except Exception:
         log.exception("Failed to reconstruct agents from channels")
 
-    # Connect to the agent bridge (or start a new one)
-    await agents.connect_bridge()
 
-    # Initialize shutdown coordinator now that all helpers are available
-    agents.init_shutdown_coordinator()
-
-    await bot.tree.sync()
-    log.info("Slash commands synced")
-
-    check_schedules.start()
-    log.info("Schedule checker started")
-
-    # Check for rollback marker (written by run.sh after auto-rollback)
-    rollback_info = None
-    if os.path.exists(config.ROLLBACK_MARKER_PATH):
+def _consume_json_marker(path: str, label: str) -> dict[str, Any] | None:
+    """Read and delete a JSON marker file. Returns parsed data or None."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data: dict[str, Any] = json.load(f)
+        os.remove(path)
+        log.info("%s marker found and consumed", label)
+        return data
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning("Failed to read %s marker: %s", label, e)
         try:
-            with open(config.ROLLBACK_MARKER_PATH) as f:
-                rollback_info = json.load(f)
-            os.remove(config.ROLLBACK_MARKER_PATH)
-            log.info("Rollback marker found and consumed: %s", rollback_info)
-        except (json.JSONDecodeError, OSError) as e:
-            log.warning("Failed to read rollback marker: %s", e)
-            try:
-                os.remove(config.ROLLBACK_MARKER_PATH)
-            except OSError:
-                pass
+            os.remove(path)
+        except OSError:
+            pass
+        return None
 
-    # Check for crash analysis marker (written by run.sh after runtime crash)
-    crash_info = None
-    if os.path.exists(config.CRASH_ANALYSIS_MARKER_PATH):
-        try:
-            with open(config.CRASH_ANALYSIS_MARKER_PATH) as f:
-                crash_info = json.load(f)
-            os.remove(config.CRASH_ANALYSIS_MARKER_PATH)
-            log.info("Crash analysis marker found and consumed")
-        except (json.JSONDecodeError, OSError) as e:
-            log.warning("Failed to read crash analysis marker: %s", e)
-            try:
-                os.remove(config.CRASH_ANALYSIS_MARKER_PATH)
-            except OSError:
-                pass
 
-    # Send startup notification to master channel
-    master_ch = await agents.get_master_channel()
-    if master_ch:
-        if rollback_info:
-            exit_code = rollback_info.get("exit_code", "unknown")
-            uptime = rollback_info.get("uptime_seconds", "?")
-            timestamp = rollback_info.get("timestamp", "unknown")
-            details = rollback_info.get("rollback_details", "").strip()
-            pre_commit = rollback_info.get("pre_launch_commit", "")
-            crashed_commit = rollback_info.get("crashed_commit", "")
-
-            msg_lines = [
-                "*System:* **Automatic rollback performed.**",
-                f"Axi crashed on startup (exit code {exit_code} after {uptime}s) at {timestamp}.",
-            ]
-            if details:
-                msg_lines.append(f"Actions taken: {details}.")
-            if pre_commit and crashed_commit and pre_commit != crashed_commit:
-                msg_lines.append(f"Reverted from `{crashed_commit[:7]}` to `{pre_commit[:7]}`.")
-                msg_lines.append("Reverted commits are still in the reflog: `git reflog`")
-            if "stashed" in details:
-                msg_lines.append("Stashed changes: `git stash list` / `git stash show -p` / `git stash pop`")
-            if config.ENABLE_CRASH_HANDLER:
-                msg_lines.append("Spawning crash analysis agent...")
-            await master_ch.send("\n".join(msg_lines))
-        elif crash_info:
-            exit_code = crash_info.get("exit_code", "unknown")
-            uptime = crash_info.get("uptime_seconds", "?")
-            timestamp = crash_info.get("timestamp", "unknown")
-            crash_msg = (
-                f"Ow... I think I just blacked out for a second there. What happened?\n\n"
-                f"*System:* **Runtime crash detected.**\n"
-                f"Axi crashed after {uptime}s of uptime (exit code {exit_code}) at {timestamp}."
-            )
-            if config.ENABLE_CRASH_HANDLER:
-                crash_msg += "\nSpawning crash analysis agent..."
-            await master_ch.send(crash_msg)
-        else:
-            await master_ch.send("*System:* Axi restarted.")
-        log.info("Sent restart notification to master channel")
-
-    # Spawn crash handler agent if a crash was detected
-    if not config.ENABLE_CRASH_HANDLER:
-        if rollback_info or crash_info:
-            log.info("Crash handler not enabled (set ENABLE_CRASH_HANDLER=1 to auto-spawn)")
-    elif rollback_info:
-        crash_log = rollback_info.get("crash_log", "(no crash log available)")
+async def _send_startup_notification(
+    master_ch: TextChannel,
+    rollback_info: dict[str, Any] | None,
+    crash_info: dict[str, Any] | None,
+) -> None:
+    """Send startup/rollback/crash notification to master channel."""
+    if rollback_info:
         exit_code = rollback_info.get("exit_code", "unknown")
         uptime = rollback_info.get("uptime_seconds", "?")
         timestamp = rollback_info.get("timestamp", "unknown")
         details = rollback_info.get("rollback_details", "").strip()
         pre_commit = rollback_info.get("pre_launch_commit", "")
         crashed_commit = rollback_info.get("crashed_commit", "")
+
+        msg_lines = [
+            "*System:* **Automatic rollback performed.**",
+            f"Axi crashed on startup (exit code {exit_code} after {uptime}s) at {timestamp}.",
+        ]
+        if details:
+            msg_lines.append(f"Actions taken: {details}.")
+        if pre_commit and crashed_commit and pre_commit != crashed_commit:
+            msg_lines.append(f"Reverted from `{crashed_commit[:7]}` to `{pre_commit[:7]}`.")
+            msg_lines.append("Reverted commits are still in the reflog: `git reflog`")
+        if "stashed" in details:
+            msg_lines.append("Stashed changes: `git stash list` / `git stash show -p` / `git stash pop`")
+        if config.ENABLE_CRASH_HANDLER:
+            msg_lines.append("Spawning crash analysis agent...")
+        await master_ch.send("\n".join(msg_lines))
+    elif crash_info:
+        exit_code = crash_info.get("exit_code", "unknown")
+        uptime = crash_info.get("uptime_seconds", "?")
+        timestamp = crash_info.get("timestamp", "unknown")
+        crash_msg = (
+            f"Ow... I think I just blacked out for a second there. What happened?\n\n"
+            f"*System:* **Runtime crash detected.**\n"
+            f"Axi crashed after {uptime}s of uptime (exit code {exit_code}) at {timestamp}."
+        )
+        if config.ENABLE_CRASH_HANDLER:
+            crash_msg += "\nSpawning crash analysis agent..."
+        await master_ch.send(crash_msg)
+    else:
+        await master_ch.send("*System:* Axi restarted.")
+    log.info("Sent restart notification to master channel")
+
+
+async def _spawn_crash_handler(crash_data: dict[str, Any], is_rollback: bool) -> None:
+    """Spawn a crash-handler agent to analyze a crash or rollback."""
+    crash_log = crash_data.get("crash_log", "(no crash log available)")
+    exit_code = crash_data.get("exit_code", "unknown")
+    uptime = crash_data.get("uptime_seconds", "?")
+    timestamp = crash_data.get("timestamp", "unknown")
+
+    if is_rollback:
+        details = crash_data.get("rollback_details", "").strip()
+        pre_commit = crash_data.get("pre_launch_commit", "")
+        crashed_commit = crash_data.get("crashed_commit", "")
 
         rollback_context = f"- Rollback actions: {details}\n" if details else ""
         if pre_commit and crashed_commit and pre_commit != crashed_commit:
@@ -1888,16 +1830,7 @@ async def on_ready() -> None:
             "need to change and what the changes should be.\n"
             "5. Do NOT apply any fixes yourself. Only produce the analysis and plan.\n"
         )
-
-        await agents.reclaim_agent_name("crash-handler")
-        await agents.spawn_agent("crash-handler", config.BOT_DIR, crash_prompt)
-
-    elif crash_info:
-        crash_log = crash_info.get("crash_log", "(no crash log available)")
-        exit_code = crash_info.get("exit_code", "unknown")
-        uptime = crash_info.get("uptime_seconds", "?")
-        timestamp = crash_info.get("timestamp", "unknown")
-
+    else:
         crash_prompt = (
             "The Discord bot (bot.py) crashed at runtime. Analyze the crash and create a plan to fix it.\n"
             "\n"
@@ -1919,8 +1852,59 @@ async def on_ready() -> None:
             "4. Do NOT apply any fixes yourself. Only produce the analysis and plan.\n"
         )
 
-        await agents.reclaim_agent_name("crash-handler")
-        await agents.spawn_agent("crash-handler", config.BOT_DIR, crash_prompt)
+    await agents.reclaim_agent_name("crash-handler")
+    await agents.spawn_agent("crash-handler", config.BOT_DIR, crash_prompt)
+
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+
+
+@bot.event
+async def on_ready() -> None:
+    global _on_ready_fired
+    log.info("Bot ready as %s", bot.user)
+
+    asyncio.get_event_loop().set_exception_handler(_handle_task_exception)
+
+    if _on_ready_fired:
+        log.info("on_ready fired again (gateway reconnect) — skipping startup logic")
+        return
+    _on_ready_fired = True
+
+    global _bot_start_time
+    _bot_start_time = datetime.now(UTC)
+
+    agents.init(bot)
+    agents.set_utils_mcp_server(tools.utils_mcp_server)
+
+    master_resume_id, master_old_prompt_hash = _load_master_session_data()
+    master_session = _register_master_agent(master_resume_id, master_old_prompt_hash)
+    await _setup_guild_infrastructure(master_session)
+    await agents.connect_bridge()
+    agents.init_shutdown_coordinator()
+
+    await bot.tree.sync()
+    log.info("Slash commands synced")
+
+    check_schedules.start()
+    log.info("Schedule checker started")
+
+    rollback_info = _consume_json_marker(config.ROLLBACK_MARKER_PATH, "Rollback")
+    crash_info = _consume_json_marker(config.CRASH_ANALYSIS_MARKER_PATH, "Crash analysis")
+
+    master_ch = await agents.get_master_channel()
+    if master_ch:
+        await _send_startup_notification(master_ch, rollback_info, crash_info)
+
+    if not config.ENABLE_CRASH_HANDLER:
+        if rollback_info or crash_info:
+            log.info("Crash handler not enabled (set ENABLE_CRASH_HANDLER=1 to auto-spawn)")
+    elif rollback_info:
+        await _spawn_crash_handler(rollback_info, is_rollback=True)
+    elif crash_info:
+        await _spawn_crash_handler(crash_info, is_rollback=False)
 
 
 def _handle_task_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:

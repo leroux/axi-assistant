@@ -4,6 +4,47 @@ import libcst as cst
 from fixit import Invalid, LintRule, Valid
 
 
+class NoBotImports(LintRule):
+    """Flag imports from bot.py — it is the top-level orchestrator.
+
+    bot.py sits at the top of the dependency DAG and should never be imported
+    by library modules. Allowing such imports would create circular dependencies.
+    """
+
+    VALID = [
+        Valid("from agents import spawn_agent"),
+        Valid("from config import BOT_DIR"),
+        Valid("import asyncio"),
+    ]
+    INVALID = [
+        Invalid("from bot import check_schedules"),
+        Invalid("import bot"),
+    ]
+    MESSAGE = (
+        "Do not import from bot.py — it is the top-level orchestrator. "
+        "Move the needed code to a library module instead."
+    )
+
+    def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
+        if isinstance(node.module, cst.Attribute):
+            return
+        if isinstance(node.module, cst.Name) and node.module.value == "bot":
+            self.report(node)
+
+    def visit_Import(self, node: cst.Import) -> None:
+        if isinstance(node.names, cst.ImportStar):
+            return
+        for alias in node.names:
+            if isinstance(alias.name, cst.Name) and alias.name.value == "bot":
+                self.report(node)
+            elif isinstance(alias.name, cst.Attribute):
+                root = alias.name
+                while isinstance(root, cst.Attribute):
+                    root = root.value
+                if isinstance(root, cst.Name) and root.value == "bot":
+                    self.report(node)
+
+
 class NoMultiCharStrip(LintRule):
     """Flag lstrip/rstrip with multi-character string arguments.
 

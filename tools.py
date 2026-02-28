@@ -25,6 +25,7 @@ import arrow
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 import agents
+import channels
 import config
 from schedule_tools import make_schedule_mcp_server
 
@@ -191,7 +192,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
                 packs=agent_packs,
             )
         except Exception:
-            agents.bot_creating_channels.discard(agents.normalize_channel_name(agent_name))
+            channels.bot_creating_channels.discard(agents.normalize_channel_name(agent_name))
             log.exception("Error in background spawn of agent '%s'", agent_name)
             try:
                 channel = await agents.get_agent_channel(agent_name)
@@ -211,7 +212,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     # Guard against on_guild_channel_create race: mark channel as bot-created
     # BEFORE the background task runs, so the guard is already set when the
     # gateway event fires.  spawn_agent will discard it after agents[name] is set.
-    agents.bot_creating_channels.add(agents.normalize_channel_name(agent_name))
+    channels.bot_creating_channels.add(agents.normalize_channel_name(agent_name))
     asyncio.create_task(_do_spawn())
     return {
         "content": [

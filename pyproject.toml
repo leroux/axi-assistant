@@ -21,6 +21,7 @@ flowcoder-flowchart = { path = "/home/ubuntu/flowcoder-rewrite/packages/flowcode
 [dependency-groups]
 dev = [
     "fixit>=2.2.1",
+    "hypothesis>=6.151.9",
     "libcst>=1.8.6",
     "pre-commit>=4.5.1",
     "pyright>=1.1.408",
@@ -78,7 +79,7 @@ ignore = [
 "lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
 
 [tool.ruff.lint.isort]
-known-first-party = ["bot", "config", "axi_types", "prompts", "agents", "tools", "supervisor", "schedule_tools", "shutdown", "flowcoder", "bridge"]
+known-first-party = ["bot", "config", "axi_types", "prompts", "agents", "tools", "supervisor", "rate_limits", "channels", "schedule_tools", "shutdown", "flowcoder", "bridge"]
 
 [tool.ruff.format]
 quote-style = "double"
