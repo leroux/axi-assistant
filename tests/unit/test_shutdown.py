@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from shutdown import ShutdownCoordinator
+from axi.shutdown import ShutdownCoordinator
 
 
 def _make_session(name: str, *, busy: bool = False, has_client: bool = True) -> MagicMock:

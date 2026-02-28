@@ -4,22 +4,7 @@
   "pythonPlatform": "Linux",
 
   "include": [
-    "bot.py",
-    "config.py",
-    "axi_types.py",
-    "prompts.py",
-    "agents/",
-    "tools.py",
-    "supervisor.py",
-    "axi_test.py",
-    "discord_query.py",
-    "channels.py",
-    "rate_limits.py",
-    "schedule_tools.py",
-    "shutdown.py",
-    "flowcoder.py",
-    "wait_for_message.py",
-    "bridge/"
+    "axi/"
   ],
   "exclude": [
     "**/test_*.py",

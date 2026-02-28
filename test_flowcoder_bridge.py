@@ -14,8 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bridge.protocol import ExitMsg, ResultMsg, StderrMsg, StdoutMsg
-from flowcoder import BridgeFlowcoderProcess, FlowcoderProcess
+from axi.bridge.protocol import ExitMsg, ResultMsg, StderrMsg, StdoutMsg
+from axi.flowcoder import BridgeFlowcoderProcess, FlowcoderProcess
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -324,14 +324,14 @@ class TestIsBridgeBacked:
 
 class TestBuildEngineCmd:
     def test_basic_command(self):
-        from flowcoder import build_engine_cmd
+        from axi.flowcoder import build_engine_cmd
 
         cmd = build_engine_cmd("my-flow")
         assert "--command" in cmd
         assert "my-flow" in cmd
 
     def test_with_args(self):
-        from flowcoder import build_engine_cmd
+        from axi.flowcoder import build_engine_cmd
 
         cmd = build_engine_cmd("my-flow", args="hello world")
         assert "--args" in cmd
@@ -339,7 +339,7 @@ class TestBuildEngineCmd:
         assert cmd[idx + 1] == "hello world"
 
     def test_with_search_paths(self):
-        from flowcoder import build_engine_cmd
+        from axi.flowcoder import build_engine_cmd
 
         cmd = build_engine_cmd("my-flow", search_paths=["/extra/path"])
         # Should have default search path + the extra one
@@ -347,7 +347,7 @@ class TestBuildEngineCmd:
         assert len(sp_indices) >= 2  # default + custom
 
     def test_without_args(self):
-        from flowcoder import build_engine_cmd
+        from axi.flowcoder import build_engine_cmd
 
         cmd = build_engine_cmd("my-flow")
         assert "--args" not in cmd
@@ -355,7 +355,7 @@ class TestBuildEngineCmd:
 
 class TestBuildEngineEnv:
     def test_strips_claude_vars(self):
-        from flowcoder import build_engine_env
+        from axi.flowcoder import build_engine_env
 
         with patch.dict("os.environ", {"CLAUDECODE": "1", "PATH": "/usr/bin"}):
             env = build_engine_env()

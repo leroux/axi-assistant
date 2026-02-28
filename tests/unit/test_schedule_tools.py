@@ -1,6 +1,6 @@
 """Unit tests for schedule_tools.schedule_key()."""
 
-from schedule_tools import schedule_key
+from axi.schedule_tools import schedule_key
 
 
 class TestScheduleKey:

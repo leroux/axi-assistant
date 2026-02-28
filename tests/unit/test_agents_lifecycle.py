@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from agents.lifecycle import count_awake_agents, is_awake, is_processing
-from axi_types import AgentSession
+from axi.agents.lifecycle import count_awake_agents, is_awake, is_processing
+from axi.axi_types import AgentSession
 
 
 class TestIsAwake:
@@ -50,7 +50,7 @@ class TestIsProcessing:
 
 class TestCountAwakeAgents:
     def test_empty(self) -> None:
-        from agents import state
+        from axi.agents import state
 
         original = dict(state.agents)
         state.agents.clear()
@@ -60,7 +60,7 @@ class TestCountAwakeAgents:
             state.agents.update(original)
 
     def test_sleeping_agents(self) -> None:
-        from agents import state
+        from axi.agents import state
 
         original = dict(state.agents)
         state.agents.clear()
@@ -73,7 +73,7 @@ class TestCountAwakeAgents:
             state.agents.update(original)
 
     def test_awake_agents(self) -> None:
-        from agents import state
+        from axi.agents import state
 
         original = dict(state.agents)
         state.agents.clear()

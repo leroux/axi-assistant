@@ -12,7 +12,7 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 
-from agents.permissions import make_cwd_permission_callback
+from axi.agents.permissions import make_cwd_permission_callback
 
 
 class TestMakeCwdPermissionCallback:
@@ -55,7 +55,7 @@ class TestMakeCwdPermissionCallback:
     @pytest.mark.asyncio
     async def test_allows_edit_in_user_data(self) -> None:
         """Writes to AXI_USER_DATA are always allowed."""
-        import config
+        from axi import config
 
         user_data = os.path.realpath(config.AXI_USER_DATA)
         cb = make_cwd_permission_callback("/tmp/project")

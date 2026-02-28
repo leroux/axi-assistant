@@ -35,6 +35,10 @@ personal/
 nova_instructions.md
 test_instructions.md
 
+# Test / runtime artifacts
+.hypothesis/
+.master_session_id
+
 # Runtime signals and state
 .restart_requested
 .rollback_performed

@@ -3,7 +3,7 @@
 from hypothesis import given
 from hypothesis import strategies as st
 
-from agents import (
+from axi.agents import (
     _parse_channel_topic,
     content_summary,
     extract_tool_preview,
@@ -12,8 +12,8 @@ from agents import (
     normalize_channel_name,
     split_message,
 )
-from axi_types import AgentSession
-from rate_limits import parse_rate_limit_seconds as _parse_rate_limit_seconds
+from axi.axi_types import AgentSession
+from axi.rate_limits import parse_rate_limit_seconds as _parse_rate_limit_seconds
 
 
 class TestSplitMessage:
@@ -80,13 +80,13 @@ class TestNormalizeChannelName:
 
 class TestIsAwakeAndIsProcessing:
     def test_is_awake_no_client(self) -> None:
-        from agents import is_awake
+        from axi.agents import is_awake
 
         session = AgentSession(name="test")
         assert not is_awake(session)
 
     def test_is_processing_no_lock(self) -> None:
-        from agents import is_processing
+        from axi.agents import is_processing
 
         session = AgentSession(name="test")
         assert not is_processing(session)

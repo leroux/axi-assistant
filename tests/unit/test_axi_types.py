@@ -1,6 +1,6 @@
 """Unit tests for axi_types.tool_display()."""
 
-from axi_types import tool_display
+from axi.axi_types import tool_display
 
 
 class TestToolDisplay:

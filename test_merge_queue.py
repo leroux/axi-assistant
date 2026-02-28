@@ -8,7 +8,7 @@ import os
 import subprocess
 from datetime import UTC
 
-from axi_test import (
+from axi.axi_test import (
     _cleanup_stale,
     _execute_merge,
     _flock,

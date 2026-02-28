@@ -12,13 +12,14 @@ class NoBotImports(LintRule):
     """
 
     VALID = [
-        Valid("from agents import spawn_agent"),
-        Valid("from config import BOT_DIR"),
+        Valid("from axi.agents import spawn_agent"),
+        Valid("from axi.config import BOT_DIR"),
         Valid("import asyncio"),
     ]
     INVALID = [
-        Invalid("from bot import check_schedules"),
-        Invalid("import bot"),
+        Invalid("from axi.bot import check_schedules"),
+        Invalid("from axi import bot"),
+        Invalid("import axi.bot"),
     ]
     MESSAGE = (
         "Do not import from bot.py — it is the top-level orchestrator. "
@@ -26,23 +27,33 @@ class NoBotImports(LintRule):
     )
 
     def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
-        if isinstance(node.module, cst.Attribute):
-            return
-        if isinstance(node.module, cst.Name) and node.module.value == "bot":
+        # from axi.bot import ...
+        if (
+            isinstance(node.module, cst.Attribute)
+            and node.module.attr.value == "bot"
+            and isinstance(node.module.value, cst.Name)
+            and node.module.value.value == "axi"
+        ):
             self.report(node)
+        # from axi import bot
+        if isinstance(node.module, cst.Name) and node.module.value == "axi":
+            if not isinstance(node.names, cst.ImportStar):
+                for alias in node.names:
+                    if isinstance(alias.name, cst.Name) and alias.name.value == "bot":
+                        self.report(node)
 
     def visit_Import(self, node: cst.Import) -> None:
         if isinstance(node.names, cst.ImportStar):
             return
         for alias in node.names:
-            if isinstance(alias.name, cst.Name) and alias.name.value == "bot":
+            # import axi.bot
+            if (
+                isinstance(alias.name, cst.Attribute)
+                and alias.name.attr.value == "bot"
+                and isinstance(alias.name.value, cst.Name)
+                and alias.name.value.value == "axi"
+            ):
                 self.report(node)
-            elif isinstance(alias.name, cst.Attribute):
-                root = alias.name
-                while isinstance(root, cst.Attribute):
-                    root = root.value
-                if isinstance(root, cst.Name) and root.value == "bot":
-                    self.report(node)
 
 
 class NoMultiCharStrip(LintRule):

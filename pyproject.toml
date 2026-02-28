@@ -72,14 +72,14 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "test_*.py" = ["F841", "T20", "PT012"]  # test files: unused vars, print, complex pytest.raises
-"axi_test.py" = ["T20"]     # CLI tool — print() is expected
-"discord_query.py" = ["T20"]  # CLI tool
-"wait_for_message.py" = ["T20"]  # CLI tool
-"bridge/server.py" = ["T20"]  # CLI entrypoint
+"axi/axi_test.py" = ["T20"]     # CLI tool — print() is expected
+"axi/discord_query.py" = ["T20"]  # CLI tool
+"axi/wait_for_message.py" = ["T20"]  # CLI tool
+"axi/bridge/server.py" = ["T20"]  # CLI entrypoint
 "lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
 
 [tool.ruff.lint.isort]
-known-first-party = ["bot", "config", "axi_types", "prompts", "agents", "tools", "supervisor", "rate_limits", "channels", "schedule_tools", "shutdown", "flowcoder", "bridge"]
+known-first-party = ["axi"]
 
 [tool.ruff.format]
 quote-style = "double"

@@ -2,8 +2,8 @@
 
 from unittest.mock import patch
 
-import config
-from prompts import _is_axi_dev_cwd, compute_prompt_hash, make_spawned_agent_system_prompt
+from axi import config
+from axi.prompts import _is_axi_dev_cwd, compute_prompt_hash, make_spawned_agent_system_prompt
 
 
 class TestComputePromptHash:
@@ -85,7 +85,7 @@ class TestMakeSpawnedAgentSystemPrompt:
     def test_default_packs_included(self) -> None:
         result = make_spawned_agent_system_prompt("/tmp/project")
         # Default spawned packs should be included
-        from prompts import DEFAULT_SPAWNED_PACKS
+        from axi.prompts import DEFAULT_SPAWNED_PACKS
 
         for pack in DEFAULT_SPAWNED_PACKS:
             assert pack.lower() in result["append"].lower()

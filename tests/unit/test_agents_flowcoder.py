@@ -6,14 +6,14 @@ from typing import ClassVar
 
 import pytest
 
-from agents.flowcoder import (
+from axi.agents.flowcoder import (
     _FlowcoderCtx,
     _handle_block_complete,
     _handle_block_start,
     _handle_fc_result,
     _handle_fc_status,
 )
-from axi_types import AgentSession
+from axi.axi_types import AgentSession
 
 
 class TestFlowcoderCtx:

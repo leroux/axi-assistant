@@ -5,13 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
 WorkingDirectory=/home/ubuntu/axi-assistant
-ExecStart=/home/ubuntu/.local/bin/uv run python supervisor.py
-Restart=on-failure
+ExecStart=/home/ubuntu/.local/bin/uv run python -m axi.supervisor
+ExecReload=kill -HUP $MAINPID
+Restart=always
 RestartSec=10
 TimeoutStopSec=15
-Environment="HOME=/home/ubuntu"
 Environment="PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [Install]

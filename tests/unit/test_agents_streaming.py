@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from agents.streaming import _StreamCtx, _update_activity, extract_tool_preview
-from axi_types import AgentSession
+from axi.agents.streaming import _StreamCtx, _update_activity, extract_tool_preview
+from axi.axi_types import AgentSession
 
 
 class TestUpdateActivity:
