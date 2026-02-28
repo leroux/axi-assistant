@@ -11,7 +11,10 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +128,8 @@ class FlowcoderProcess:
 
     async def _forward_stderr(self) -> None:
         """Read stderr lines and forward to the logger."""
-        assert self._proc and self._proc.stderr
+        assert self._proc
+        assert self._proc.stderr
         try:
             while True:
                 line = await self._proc.stderr.readline()
@@ -143,7 +147,8 @@ class FlowcoderProcess:
 
     async def messages(self) -> AsyncIterator[dict]:
         """Yield parsed JSON messages from stdout, one per line."""
-        assert self._proc and self._proc.stdout
+        assert self._proc
+        assert self._proc.stdout
         while True:
             line = await self._proc.stdout.readline()
             if not line:

@@ -66,9 +66,6 @@ ignore = [
     "SIM102", # collapsible-if — nested ifs often clearer than combined conditions
     "RET505", # unnecessary else after return — explicit else is often clearer
     "RET506", # unnecessary elif after raise — same rationale
-    "TC002",  # move third-party import to TYPE_CHECKING — too much churn for this codebase
-    "TC003",  # move stdlib import to TYPE_CHECKING — same rationale
-    "PT018",  # compound assertions — runtime guards, not test assertions
 ]
 
 [tool.ruff.lint.per-file-ignores]

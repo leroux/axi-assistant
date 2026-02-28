@@ -131,7 +131,6 @@ DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
 ENABLE_CRASH_HANDLER = os.environ.get("ENABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
 SHOW_AWAITING_INPUT = os.environ.get("SHOW_AWAITING_INPUT", "").lower() in ("1", "true", "yes")
-RECORD_UPDATER_ENABLED = os.environ.get("RECORD_UPDATER_ENABLED", "").lower() in ("1", "true", "yes")
 README_CONTENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "readme_content.md")
 
 # --- Discord bot setup ---
@@ -2232,62 +2231,29 @@ async def wake_agent(session: AgentSession) -> None:
 
         options = _make_agent_options(session, resume_id)
 
-        if bridge_conn and bridge_conn.is_alive:
-            # Bridge mode: spawn CLI via bridge
-            log.debug("Waking '%s' via bridge (resume=%s)", session.name, resume_id)
-            try:
-                client = await _wake_agent_via_bridge(session, options)  # noqa: F821
-                session.client = client
-                log.info("Agent '%s' is now awake via bridge (resumed=%s)", session.name, resume_id)
-                if session._log:
-                    session._log.info("SESSION_WAKE via bridge (resumed=%s)", bool(resume_id))
-            except Exception:
-                if resume_id:
-                    log.warning("Failed to resume '%s' via bridge, retrying fresh", session.name)
-                    options = _make_agent_options(session, resume_id=None)
-                    try:
-                        client = await _wake_agent_via_bridge(session, options)  # noqa: F821
-                        session.client = client
-                        session.session_id = None
-                        if session.name == MASTER_AGENT_NAME:
-                            try:
-                                os.remove(MASTER_SESSION_PATH)
-                            except OSError:
-                                pass
-                        log.warning("Agent '%s' woke fresh via bridge (previous context lost)", session.name)
-                        if session._log:
-                            session._log.info("SESSION_WAKE via bridge (resumed=False, fresh after resume failure)")
-                    except Exception:
-                        log.exception("Failed to wake '%s' via bridge (even fresh)", session.name)
-                        raise
-                else:
-                    log.exception("Failed to wake '%s' via bridge", session.name)
-                    raise
-        else:
-            # Direct mode: original behavior (no bridge)
-            log.debug("Waking '%s' directly (no bridge, resume=%s)", session.name, resume_id)
-            try:
-                client = ClaudeSDKClient(options=options)
-                await client.__aenter__()
-                session.client = client
-                log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
-                if session._log:
-                    session._log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
-            except Exception:
-                log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
-                options = _make_agent_options(session, resume_id=None)
-                client = ClaudeSDKClient(options=options)
-                await client.__aenter__()
-                session.client = client
-                session.session_id = None
-                if session.name == MASTER_AGENT_NAME:
-                    try:
-                        os.remove(MASTER_SESSION_PATH)
-                    except OSError:
-                        pass
-                log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
-                if session._log:
-                    session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
+        log.debug("Waking '%s' (resume=%s)", session.name, resume_id)
+        try:
+            client = ClaudeSDKClient(options=options)
+            await client.__aenter__()
+            session.client = client
+            log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
+            if session._log:
+                session._log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
+        except Exception:
+            log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
+            options = _make_agent_options(session, resume_id=None)
+            client = ClaudeSDKClient(options=options)
+            await client.__aenter__()
+            session.client = client
+            session.session_id = None
+            if session.name == MASTER_AGENT_NAME:
+                try:
+                    os.remove(MASTER_SESSION_PATH)
+                except OSError:
+                    pass
+            log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
+            if session._log:
+                session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
 
         # Detect system prompt changes on resume (e.g. SOUL.md or dev_context.md updated between restarts)
         prompt_changed = False
@@ -2966,28 +2932,9 @@ def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
 async def _query_agent(
     session: AgentSession, content: str | list, channel, *, show_awaiting_input: bool = True
 ) -> None:
-    """Send a message to an agent and stream the response.
-
-    Appends record-tracking instruction for eligible agents and enqueues updates.
-    """
-    # Append record-tracking instruction for eligible agents
-    query_content = content
-    if session.name != "record-updater":
-        query_content = _append_record_tracking(content)  # noqa: F821
-
-    await session.client.query(_as_stream(query_content))
-    response_text = await stream_response_to_channel(session, channel, show_awaiting_input=show_awaiting_input)
-
-    # Check for record tracking in response
-    if session.name != "record-updater" and response_text:
-        tracking = _extract_record_tracking(response_text)  # noqa: F821
-        if tracking and tracking.get("records_changed"):
-            summary = tracking.get("summary", "No summary provided")
-            log.info("Agent '%s' reported records changed: %s", session.name, summary[:100])
-            try:
-                await _enqueue_record_update(session.name, session.cwd, summary)  # noqa: F821
-            except Exception:
-                log.exception("Failed to enqueue record update for '%s'", session.name)
+    """Send a message to an agent and stream the response."""
+    await session.client.query(_as_stream(content))
+    await stream_response_to_channel(session, channel, show_awaiting_input=show_awaiting_input)
 
 
 async def stream_response_to_channel(session: AgentSession, channel, show_awaiting_input: bool = True) -> str:
@@ -3359,65 +3306,6 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
         await send_system(channel, f"Agent **{old_name}** timed out and was recovered (sleeping). Context preserved.")
     else:
         await send_system(channel, f"Agent **{old_name}** timed out and was reset (sleeping). Context lost.")
-
-
-# --- Record updater ---
-
-
-def _build_record_updater_prompt(agent_name: str, agent_cwd: str) -> str:
-    """Build the prompt for a record-updater agent that processes a finished agent's output."""
-    return f"""\
-You are the record-updater. Agent **{agent_name}** just finished working in `{agent_cwd}`.
-
-Your job: figure out what that agent accomplished and update all project records accordingly.
-
-## Steps
-
-1. Look at what the agent produced. Check `{agent_cwd}` for new or recently modified files \
-(*.md, *.json, reports, audits, etc.). Use `ls -lt {agent_cwd}/ | head -20` and read any relevant new files.
-
-2. Read the current project records:
-   - TODOS.md (the user's to-do list)
-   - The relevant project file in projects/ (match by agent name or cwd)
-   - If unsure which project file, read them all and match.
-
-3. Update the project records to reflect what the agent did:
-   - If a to-do was completed, mark it done or remove it from TODOS.md
-   - Update the project's "What's Done" and "What's Next" sections
-   - Update the project's status tag if appropriate
-   - Add any new to-dos or open questions that emerged
-
-4. If the agent's work produced something the user should review, add a note to TODOS.md \
-(e.g. "Review architecture audit in ~/coding-projects/minflow-stableish/ARCHITECTURE_AUDIT.md").
-
-5. Sync changes to MinFlow. The MinFlow REST API is at http://localhost:9100/api. \
-For each structured change (to-do completed, new to-do, status change), make the corresponding \
-API call. Use `curl` with `dangerouslyDisableSandbox: true` for localhost requests.
-   - To find the right deck/card, GET /api/workspace first to see current state.
-   - To complete a card: PUT /api/decks/:id/cards/:cardId with {{"completed": true}}
-   - To add a card: POST /api/decks/:id/cards with {{"text": "..."}}
-   - If no matching deck exists for the project, skip MinFlow sync for that item.
-   - If MinFlow is not running (connection refused), skip sync silently and note it.
-
-Be concise. Update files, sync MinFlow, then stop. Do not message the user.\
-"""
-
-
-async def _maybe_spawn_record_updater(agent_name: str, agent_cwd: str) -> None:
-    """Spawn a short-lived record-updater agent after another agent finishes."""
-    if agent_name in RECORD_UPDATER_EXCLUDED:  # noqa: F821
-        return
-    if len(agents) >= MAX_AGENTS:  # noqa: F821
-        log.warning("Max agents reached — skipping record-updater for '%s'", agent_name)
-        return
-
-    log.info("Spawning record-updater for completed agent '%s'", agent_name)
-    await reclaim_agent_name("record-updater")
-    await spawn_agent(
-        "record-updater",
-        AXI_USER_DATA,
-        _build_record_updater_prompt(agent_name, agent_cwd),
-    )
 
 
 # --- Agent spawning ---
@@ -3821,12 +3709,6 @@ async def _run_initial_prompt(session: AgentSession, prompt: str | list, channel
 
         if not timed_out:
             await send_system(channel, f"Agent **{session.name}** finished initial task.")
-            # Spawn record-updater to process this agent's output
-            try:
-                if RECORD_UPDATER_ENABLED:
-                    await _maybe_spawn_record_updater(session.name, session.cwd)
-            except Exception:
-                log.exception("Error spawning record-updater for '%s'", session.name)
 
     except Exception:
         log.exception("Error running initial prompt for agent '%s'", session.name)

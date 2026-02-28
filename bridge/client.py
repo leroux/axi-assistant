@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from .protocol import (
     CmdMsg,

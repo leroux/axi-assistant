@@ -12,10 +12,11 @@ from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-import discord
 from claude_agent_sdk import ClaudeSDKClient
 
 if TYPE_CHECKING:
+    import discord
+
     from bot import AgentSession
 
 log = logging.getLogger("__main__")  # Use bot.py's logger for consistent log output
