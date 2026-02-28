@@ -4429,7 +4429,7 @@ async def on_message(message):
         msg_id,
         session.is_processing(),
         session._reconnecting,
-        session.message_queue.qsize(),
+        len(session.message_queue),
         session.query_lock.locked(),
     )
 
@@ -5318,7 +5318,7 @@ async def skip_agent(interaction, agent_name: str | None = None):
     # Defer immediately so Discord doesn't time out while we interrupt via bridge
     await interaction.response.defer()
 
-    queued = session.message_queue.qsize()
+    queued = len(session.message_queue)
     try:
         # SIGINT the process group to kill Task subagents, then send SDK
         # interrupt to cleanly abort the CLI query.
