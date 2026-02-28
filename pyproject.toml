@@ -42,6 +42,15 @@ select = [
     "SIM",   # flake8-simplify — simplifiable code
     "TCH",   # flake8-type-checking — move type-only imports behind TYPE_CHECKING
     "RUF",   # Ruff-specific rules
+    "A",     # flake8-builtins — shadowing built-in names (list, id, type, etc.)
+    "C4",    # flake8-comprehensions — unnecessary list()/dict() wrappers
+    "DTZ",   # flake8-datetimez — naive datetime calls without tz
+    "PIE",   # flake8-pie — misc best practices (unnecessary pass, dict.setdefault, etc.)
+    "T20",   # flake8-print — leftover print() statements
+    "PT",    # flake8-pytest-style — pytest best practices
+    "RET",   # flake8-return — unnecessary else after return, etc.
+    "FURB",  # refurb — modernization suggestions (Python 3.12+ idioms)
+    "PERF",  # perflint — performance anti-patterns
 ]
 ignore = [
     "E501",   # line too long — handled by formatter
@@ -54,10 +63,13 @@ ignore = [
     "RUF006", # asyncio-dangling-task — fire-and-forget tasks are intentional in this bot
     "RUF059", # unused-unpacked-variable — common in destructuring patterns
     "SIM102", # collapsible-if — nested ifs often clearer than combined conditions
+    "RET505", # unnecessary else after return — explicit else is often clearer
+    "RET506", # unnecessary elif after raise — same rationale
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "test_*.py" = ["F841"]  # unused variables common in test setup
+"axi_test.py" = ["T20"]  # CLI tool — print() is expected
 
 [tool.ruff.lint.isort]
 known-first-party = ["bot", "supervisor", "handlers", "schedule_tools", "shutdown", "flowcoder", "bridge"]
