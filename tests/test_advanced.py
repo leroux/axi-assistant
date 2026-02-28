@@ -1,5 +1,6 @@
 """Advanced tests — Tiers 10, 13, 14, 16: concurrency, packs, channels, recovery."""
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -9,6 +10,14 @@ import pytest
 from .helpers import Discord
 
 WORKTREE_DIR = Path(__file__).parent.parent
+
+
+def _systemctl_env() -> dict[str, str]:
+    """Return environment with XDG_RUNTIME_DIR for systemctl --user."""
+    env = os.environ.copy()
+    if "XDG_RUNTIME_DIR" not in env:
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+    return env
 
 
 # -- Tier 10: Concurrency & Resource --
@@ -185,6 +194,7 @@ def test_shutdown_rejection(discord: Discord, master_channel: str):
         capture_output=True,
         text=True,
         timeout=10,
+        env=_systemctl_env(),
     )
     if result.returncode != 0 or not result.stdout.strip().isdigit():
         pytest.skip("Could not get service PID")
@@ -195,7 +205,7 @@ def test_shutdown_rejection(discord: Discord, master_channel: str):
 
     # Send SIGTERM (graceful shutdown) and immediately send a message
     latest = discord.latest_message_id(master_channel)
-    subprocess.run(["kill", "-TERM", pid], timeout=5)
+    subprocess.run(["kill", "-TERM", pid], capture_output=True, timeout=5)
     time.sleep(0.5)
     discord.send(master_channel, "This should be rejected during shutdown")
 

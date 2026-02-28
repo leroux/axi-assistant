@@ -653,6 +653,7 @@ def cmd_down(args):
             print(f"Stopping axi-test@{name}...")
             subprocess.run(
                 ["systemctl", "--user", "stop", f"axi-test@{name}"],
+                capture_output=True,
                 check=True,
                 env=_systemctl_env(),
             )
@@ -675,6 +676,7 @@ def cmd_restart(args):
     print(f"Restarting axi-test@{name}...")
     subprocess.run(
         ["systemctl", "--user", "restart", f"axi-test@{name}"],
+        capture_output=True,
         check=True,
         env=_systemctl_env(),
     )
