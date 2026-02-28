@@ -183,9 +183,9 @@ intents = Intents(
 
 BOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOT_WORKTREES_DIR = os.path.join(os.path.dirname(BOT_DIR), "axi-tests")
-SCHEDULES_PATH = os.path.join(BOT_DIR, "schedules.json")
-HISTORY_PATH = os.path.join(BOT_DIR, "schedule_history.json")
-SKIPS_PATH = os.path.join(BOT_DIR, "schedule_skips.json")
+SCHEDULES_PATH = os.path.join(AXI_USER_DATA, "schedules.json")
+HISTORY_PATH = os.path.join(AXI_USER_DATA, "schedule_history.json")
+SKIPS_PATH = os.path.join(AXI_USER_DATA, "schedule_skips.json")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
 BRIDGE_SOCKET_PATH = os.path.join(BOT_DIR, ".bridge.sock")
