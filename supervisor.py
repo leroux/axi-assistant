@@ -18,6 +18,8 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
+from typing import IO
 
 LOG_LEVEL = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
@@ -43,12 +45,12 @@ DIR = Path(__file__).resolve().parent
 #   SIGHUP         → hot restart (bridge stays)
 # ---------------------------------------------------------------------------
 
-_bot_proc: subprocess.Popen | None = None
+_bot_proc: subprocess.Popen[bytes] | None = None
 _stopping = False  # full stop requested (SIGTERM/SIGINT)
 _hot_restart = False  # hot restart requested (SIGHUP)
 
 
-def _stop_handler(signum, _frame):
+def _stop_handler(signum: int, _frame: FrameType | None) -> None:
     """SIGTERM/SIGINT: forward to bot.py, flag for full stop."""
     global _stopping
     _stopping = True
@@ -56,7 +58,7 @@ def _stop_handler(signum, _frame):
         _bot_proc.send_signal(signum)
 
 
-def _hup_handler(signum, _frame):
+def _hup_handler(signum: int, _frame: FrameType | None) -> None:
     """SIGHUP: forward SIGTERM to bot.py to trigger hot restart."""
     global _hot_restart
     _hot_restart = True
@@ -142,7 +144,7 @@ def run_bot() -> int:
     )
     _bot_proc = proc
 
-    def stream(pipe, log_file):
+    def stream(pipe: IO[bytes], log_file: IO[bytes]) -> None:
         for line in iter(pipe.readline, b""):
             sys.stdout.buffer.write(line)
             sys.stdout.buffer.flush()
@@ -204,9 +206,9 @@ def main():
     os.chdir(DIR)
     ensure_default_files()
 
-    signal.signal(signal.SIGTERM, _stop_handler)
-    signal.signal(signal.SIGINT, _stop_handler)
-    signal.signal(signal.SIGHUP, _hup_handler)
+    signal.signal(signal.SIGTERM, _stop_handler)  # pyright: ignore[reportArgumentType]
+    signal.signal(signal.SIGINT, _stop_handler)  # pyright: ignore[reportArgumentType]
+    signal.signal(signal.SIGHUP, _hup_handler)  # pyright: ignore[reportArgumentType]
 
     global _hot_restart
     rollback_attempted = False

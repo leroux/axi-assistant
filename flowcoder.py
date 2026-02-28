@@ -11,19 +11,16 @@ import asyncio
 import json
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from bridge.client import BridgeConnection
+
 log = logging.getLogger(__name__)
 
-# Bridge protocol types — optional import (bridge package may not be available)
-try:
-    from bridge.protocol import ExitMsg, StderrMsg, StdoutMsg
-except ImportError:  # pragma: no cover
-    StdoutMsg = StderrMsg = ExitMsg = None  # type: ignore[assignment,misc]
-
+from bridge.protocol import ExitMsg, StderrMsg, StdoutMsg
 
 # ------------------------------------------------------------------
 # Shared helpers
@@ -102,7 +99,7 @@ class FlowcoderProcess:
         self.search_paths = search_paths or []
         self.cwd = cwd
         self._proc: asyncio.subprocess.Process | None = None
-        self._stderr_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -145,7 +142,7 @@ class FlowcoderProcess:
     # I/O
     # ------------------------------------------------------------------
 
-    async def messages(self) -> AsyncIterator[dict]:
+    async def messages(self) -> AsyncIterator[dict[str, Any]]:
         """Yield parsed JSON messages from stdout, one per line."""
         assert self._proc
         assert self._proc.stdout
@@ -161,7 +158,7 @@ class FlowcoderProcess:
             except json.JSONDecodeError:
                 log.warning("flowcoder: non-JSON stdout line: %s", text[:200])
 
-    async def send(self, msg: dict) -> None:
+    async def send(self, msg: dict[str, Any]) -> None:
         """Write a JSON-line message to the process's stdin."""
         if self._proc and self._proc.stdin and not self._proc.stdin.is_closing():
             data = json.dumps(msg, separators=(",", ":")) + "\n"
@@ -242,7 +239,7 @@ class BridgeFlowcoderProcess:
     def __init__(
         self,
         bridge_name: str,
-        conn: object,  # BridgeConnection — typed loosely to avoid hard import
+        conn: BridgeConnection,
         command: str,
         args: str = "",
         search_paths: list[str] | None = None,
@@ -253,8 +250,8 @@ class BridgeFlowcoderProcess:
         self.args = args
         self.search_paths = search_paths or []
         self.cwd = cwd
-        self._conn = conn  # BridgeConnection
-        self._queue: asyncio.Queue | None = None
+        self._conn = conn
+        self._queue: asyncio.Queue[StdoutMsg | StderrMsg | ExitMsg | None] | None = None
         self._running = False
 
     # ------------------------------------------------------------------
@@ -294,7 +291,7 @@ class BridgeFlowcoderProcess:
 
         self._running = True
 
-    async def subscribe(self):
+    async def subscribe(self) -> Any:
         """Reconnect — register + subscribe without spawning.
 
         Returns the subscribe ResultMsg (has .replayed, .status, .idle fields).
@@ -312,7 +309,7 @@ class BridgeFlowcoderProcess:
     # I/O
     # ------------------------------------------------------------------
 
-    async def messages(self) -> AsyncIterator[dict]:
+    async def messages(self) -> AsyncIterator[dict[str, Any]]:
         """Async iterator reading from bridge agent queue.
 
         Yields StdoutMsg.data dicts, logs StderrMsg, stops on ExitMsg/None.
@@ -326,11 +323,11 @@ class BridgeFlowcoderProcess:
                 # Connection lost sentinel
                 self._running = False
                 break
-            if StdoutMsg and isinstance(msg, StdoutMsg):
+            if isinstance(msg, StdoutMsg):
                 yield msg.data
-            elif StderrMsg and isinstance(msg, StderrMsg):
+            elif isinstance(msg, StderrMsg):
                 log.debug("[flowcoder-engine bridge stderr] %s", msg.text)
-            elif ExitMsg and isinstance(msg, ExitMsg):
+            else:  # ExitMsg
                 self._running = False
                 log.info(
                     "Bridge flowcoder '%s' exited (code=%s)",
@@ -339,7 +336,7 @@ class BridgeFlowcoderProcess:
                 )
                 break
 
-    async def send(self, msg: dict) -> None:
+    async def send(self, msg: dict[str, Any]) -> None:
         """Send a JSON message to the engine's stdin via the bridge."""
         await self._conn.send_stdin(self.bridge_name, msg)
 

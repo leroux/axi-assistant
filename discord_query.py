@@ -14,6 +14,7 @@ import os
 import sys
 import time
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
@@ -75,7 +76,7 @@ def make_client(token: str) -> httpx.Client:
     )
 
 
-def api_get(client: httpx.Client, path: str, params: dict | None = None) -> list | dict:
+def api_get(client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> Any:
     """GET request with rate-limit and retry handling."""
     for attempt in range(MAX_RETRIES + 1):
         resp = client.get(path, params=params)
@@ -181,7 +182,7 @@ def resolve_channel(client: httpx.Client, channel_arg: str) -> str:
     return str(text_channels[0]["id"])
 
 
-def format_message(msg: dict, fmt: str) -> str:
+def format_message(msg: dict[str, Any], fmt: str) -> str:
     """Format a Discord API message object for output."""
     ts = msg.get("timestamp", "")
     author = msg.get("author", {})
@@ -198,7 +199,7 @@ def format_message(msg: dict, fmt: str) -> str:
         except (ValueError, TypeError):
             ts_str = ts
         line = f"[{ts_str}] {author_name}: {content}"
-        extras = []
+        extras: list[str] = []
         if attachments:
             extras.append(f"{attachments} attachment(s)")
         if embeds:
@@ -224,7 +225,7 @@ def format_message(msg: dict, fmt: str) -> str:
 # --- Subcommands ---
 
 
-def cmd_guilds(args, client: httpx.Client) -> None:
+def cmd_guilds(args: argparse.Namespace, client: httpx.Client) -> None:
     """List guilds (servers) the bot is a member of."""
     guilds = api_get(client, "/users/@me/guilds")
     for g in guilds:
@@ -235,7 +236,7 @@ def cmd_guilds(args, client: httpx.Client) -> None:
         print(json.dumps(entry))
 
 
-def cmd_channels(args, client: httpx.Client) -> None:
+def cmd_channels(args: argparse.Namespace, client: httpx.Client) -> None:
     """List text channels in a guild."""
     guild_id = int(args.guild_id)
     validate_guild(client, guild_id)
@@ -264,14 +265,14 @@ def cmd_channels(args, client: httpx.Client) -> None:
         print(json.dumps(entry))
 
 
-def cmd_history(args, client: httpx.Client) -> None:
+def cmd_history(args: argparse.Namespace, client: httpx.Client) -> None:
     """Fetch message history from a channel."""
     channel_id = resolve_channel(client, args.channel)
     limit = min(args.limit, MAX_LIMIT)
     fmt = args.format
 
     collected = 0
-    params: dict = {}
+    params: dict[str, Any] = {}
 
     if args.before:
         params["before"] = resolve_snowflake(args.before)
@@ -282,7 +283,7 @@ def cmd_history(args, client: httpx.Client) -> None:
     # for "what happened after X?" queries. No reversal needed.
     use_after = "after" in params
 
-    messages = []
+    messages: list[dict[str, Any]] = []
 
     while collected < limit:
         batch_size = min(MAX_PER_REQUEST, limit - collected)
@@ -311,7 +312,7 @@ def cmd_history(args, client: httpx.Client) -> None:
         print(format_message(msg, fmt))
 
 
-def cmd_search(args, client: httpx.Client) -> None:
+def cmd_search(args: argparse.Namespace, client: httpx.Client) -> None:
     """Search messages by content substring."""
     guild_id = int(args.guild_id)
     validate_guild(client, guild_id)
@@ -338,7 +339,7 @@ def cmd_search(args, client: httpx.Client) -> None:
             break
 
         scanned = 0
-        params: dict = {}
+        params: dict[str, Any] = {}
 
         while scanned < max_scan and found < limit:
             batch_size = min(MAX_PER_REQUEST, max_scan - scanned)

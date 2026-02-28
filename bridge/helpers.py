@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+from typing import Any
 
 from .client import BridgeConnection
 
@@ -82,7 +83,7 @@ async def ensure_bridge(socket_path: str, timeout: float = 10.0) -> BridgeConnec
     raise RuntimeError(f"Timed out waiting for bridge at {socket_path}")
 
 
-def build_cli_spawn_args(options) -> tuple[list[str], dict[str, str], str]:
+def build_cli_spawn_args(options: Any) -> tuple[list[str], dict[str, str], str]:
     """Build CLI command, env, and cwd from ClaudeAgentOptions.
 
     Uses SubprocessCLITransport._build_command() to stay in sync with
@@ -103,10 +104,10 @@ def build_cli_spawn_args(options) -> tuple[list[str], dict[str, str], str]:
 
     # Create temp transport just for _build_command() — no side effects
     temp = SubprocessCLITransport(prompt="", options=options)
-    cmd = temp._build_command()
+    cmd = temp._build_command()  # pyright: ignore[reportPrivateUsage]
 
     # Replicate env construction from SubprocessCLITransport.connect()
-    env = {
+    env: dict[str, str] = {
         **os.environ,
         **(options.env or {}),
         "CLAUDE_CODE_ENTRYPOINT": "sdk-py",

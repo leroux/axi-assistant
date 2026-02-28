@@ -20,6 +20,9 @@ from .protocol import (
     parse_server_msg,
 )
 
+# Agent message types that flow through queues (None = sentinel for connection loss)
+AgentMsg = StdoutMsg | StderrMsg | ExitMsg | None
+
 log = logging.getLogger(__name__)
 
 
@@ -33,7 +36,7 @@ class BridgeConnection:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self._reader = reader
         self._writer = writer
-        self._agent_queues: dict[str, asyncio.Queue] = {}
+        self._agent_queues: dict[str, asyncio.Queue[AgentMsg]] = {}
         self._cmd_response: asyncio.Queue[ResultMsg] = asyncio.Queue()
         self._cmd_lock = asyncio.Lock()
         self._demux_task = asyncio.create_task(self._demux_loop())
@@ -48,7 +51,7 @@ class BridgeConnection:
                     break  # Socket closed
                 log.debug("[demux] raw line (%d bytes): %.200s", len(line), line.decode(errors="replace").rstrip())
                 try:
-                    msg = parse_server_msg(line)
+                    msg: ResultMsg | StdoutMsg | StderrMsg | ExitMsg = parse_server_msg(line)
                 except Exception:
                     log.debug("[demux] parse FAILED on: %.200s", line.decode(errors="replace").rstrip())
                     continue
@@ -56,7 +59,7 @@ class BridgeConnection:
                 if isinstance(msg, ResultMsg):
                     log.debug("[demux] routed ResultMsg (ok=%s)", msg.ok)
                     await self._cmd_response.put(msg)
-                elif isinstance(msg, (StdoutMsg, StderrMsg, ExitMsg)):
+                else:  # StdoutMsg | StderrMsg | ExitMsg
                     if msg.name in self._agent_queues:
                         log.debug("[demux] routed %s -> agent queue '%s'", type(msg).__name__, msg.name)
                         await self._agent_queues[msg.name].put(msg)
@@ -81,7 +84,7 @@ class BridgeConnection:
     def is_alive(self) -> bool:
         return not self._closed
 
-    async def send_command(self, cmd: str, **kwargs) -> ResultMsg:
+    async def send_command(self, cmd: str, **kwargs: Any) -> ResultMsg:
         """Send a command to the bridge and wait for the result."""
         async with self._cmd_lock:
             msg = CmdMsg(cmd=cmd, **kwargs)
@@ -95,9 +98,9 @@ class BridgeConnection:
         self._writer.write(msg.model_dump_json().encode() + b"\n")
         await self._writer.drain()
 
-    def register_agent(self, name: str) -> asyncio.Queue:
+    def register_agent(self, name: str) -> asyncio.Queue[AgentMsg]:
         """Register an agent and return its message queue."""
-        q = asyncio.Queue()
+        q: asyncio.Queue[AgentMsg] = asyncio.Queue()
         self._agent_queues[name] = q
         return q
 
@@ -136,7 +139,7 @@ class BridgeTransport:
         self._conn = conn
         self._reconnecting = reconnecting
         self._stderr_callback = stderr_callback
-        self._queue: asyncio.Queue | None = None
+        self._queue: asyncio.Queue[AgentMsg] | None = None
         self._ready = False
         self._cli_exited = False
         self._exit_code: int | None = None
@@ -185,7 +188,7 @@ class BridgeTransport:
             and msg.get("request", {}).get("subtype") == "initialize"
         ):
             request_id = msg.get("request_id")
-            fake_response = {
+            fake_response: dict[str, Any] = {
                 "type": "control_response",
                 "response": {
                     "subtype": "success",
@@ -212,14 +215,14 @@ class BridgeTransport:
             if msg is None:
                 raise ConnectionError("Bridge connection lost during read")
             if isinstance(msg, StdoutMsg):
-                msg_type = msg.data.get("type", "?") if isinstance(msg.data, dict) else "non-dict"
+                msg_type = msg.data.get("type", "?")
                 log.debug("[read][%s] yielding StdoutMsg type=%s", self._name, msg_type)
                 yield msg.data
             elif isinstance(msg, StderrMsg):
                 log.debug("[read][%s] stderr: %.200s", self._name, msg.text)
                 if self._stderr_callback:
                     self._stderr_callback(msg.text)
-            elif isinstance(msg, ExitMsg):
+            else:  # ExitMsg
                 log.debug("[read][%s] ExitMsg code=%s", self._name, msg.code)
                 self._cli_exited = True
                 self._exit_code = msg.code

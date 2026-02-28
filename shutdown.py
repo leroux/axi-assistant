@@ -21,7 +21,7 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ class Sleepable(Protocol):
 
 
 # Callback types
-SleepFn = Callable[[Sleepable], Awaitable[None]]  # sleep one agent
+SleepFn = Callable[[Any], Awaitable[None]]  # sleep one agent
 CloseBotFn = Callable[[], Awaitable[None]]  # close discord bot
 NotifyFn = Callable[[str, str], Awaitable[None]]  # (agent_name, message) → send status
 GoodbyeFn = Callable[[], Awaitable[None]]  # send goodbye message to master channel
@@ -137,7 +137,7 @@ class ShutdownCoordinator:
 
     def __init__(
         self,
-        agents: dict[str, Sleepable],
+        agents: Mapping[str, Sleepable],
         sleep_fn: SleepFn,
         close_bot_fn: CloseBotFn,
         kill_fn: Callable[[], None] = kill_supervisor,

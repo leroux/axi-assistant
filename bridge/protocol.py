@@ -6,7 +6,7 @@ Bridge-layer messages are typed Pydantic models. Claude SDK messages
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
 
@@ -70,10 +70,17 @@ class ExitMsg(BaseModel):
 
 # -- Discriminated union helpers -----------------------------------------------
 
+
 from pydantic import TypeAdapter
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 ClientMsg = CmdMsg | StdinMsg
 ServerMsg = ResultMsg | StdoutMsg | StderrMsg | ExitMsg
 
-parse_client_msg = TypeAdapter(ClientMsg).validate_json
-parse_server_msg = TypeAdapter(ServerMsg).validate_json
+_client_adapter: TypeAdapter[ClientMsg] = TypeAdapter(ClientMsg)
+_server_adapter: TypeAdapter[ServerMsg] = TypeAdapter(ServerMsg)
+
+parse_client_msg: Callable[[str | bytes], ClientMsg] = _client_adapter.validate_json
+parse_server_msg: Callable[[str | bytes], ServerMsg] = _server_adapter.validate_json

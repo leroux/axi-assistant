@@ -24,8 +24,10 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import httpx
 from dotenv import dotenv_values
@@ -54,7 +56,7 @@ def _systemctl_env() -> dict[str, str]:
     return env
 
 
-def load_config() -> dict:
+def load_config() -> dict[str, Any]:
     """Load and validate test-config.json."""
     try:
         with open(CONFIG_PATH) as f:
@@ -93,7 +95,7 @@ def is_instance_running(name: str) -> bool:
     return result.stdout.strip() == "active"
 
 
-def get_instance_env(name: str) -> dict:
+def get_instance_env(name: str) -> dict[str, str | None]:
     """Read a test instance's .env file."""
     env_path = os.path.join(TESTS_DIR, name, ".env")
     if not os.path.isfile(env_path):
@@ -136,7 +138,7 @@ def get_worktree_branch(worktree_path: str) -> str:
 
 
 @contextmanager
-def _flock(path: str):
+def _flock(path: str) -> Generator[None, None, None]:
     """Acquire exclusive file lock, release on exit."""
     fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
     try:
@@ -147,20 +149,20 @@ def _flock(path: str):
         os.close(fd)
 
 
-def _read_slots() -> dict:
+def _read_slots() -> dict[str, Any]:
     """Read slots file. Returns empty dict if missing or corrupted."""
     if not os.path.isfile(SLOTS_FILE):
         return {}
     with open(SLOTS_FILE) as f:
         try:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
+            data: Any = json.load(f)
+            return cast("dict[str, Any]", data) if isinstance(data, dict) else {}
         except json.JSONDecodeError:
             print(f"Warning: Corrupted {SLOTS_FILE}, treating as empty", file=sys.stderr)
             return {}
 
 
-def _write_slots(slots: dict) -> None:
+def _write_slots(slots: dict[str, Any]) -> None:
     """Write slots file atomically. Caller must hold slot lock."""
     os.makedirs(CONFIG_DIR, exist_ok=True)
     tmp_path = SLOTS_FILE + ".tmp"
@@ -169,7 +171,7 @@ def _write_slots(slots: dict) -> None:
     os.replace(tmp_path, SLOTS_FILE)
 
 
-def _load_slots(config: dict) -> dict:
+def _load_slots(config: dict[str, Any]) -> dict[str, Any]:
     """Load slots, migrating from .env-based tracking on first run.
 
     Caller must hold slot lock.
@@ -185,17 +187,17 @@ def _load_slots(config: dict) -> dict:
     return slots
 
 
-def _migrate_from_env(config: dict) -> dict:
+def _migrate_from_env(config: dict[str, Any]) -> dict[str, Any]:
     """Build initial slots dict from existing .env files. One-time migration."""
-    slots = {}
+    slots: dict[str, Any] = {}
     if not os.path.isdir(TESTS_DIR):
         return slots
 
-    token_to_bot = {}
+    token_to_bot: dict[str, str] = {}
     for bot_name, bot_info in config["bots"].items():
         token_to_bot[bot_info.get("token")] = bot_name
 
-    id_to_guild = {}
+    id_to_guild: dict[str, str] = {}
     for gname, ginfo in config["guilds"].items():
         id_to_guild[ginfo["guild_id"]] = gname
 
@@ -226,12 +228,12 @@ def _migrate_from_env(config: dict) -> dict:
     return slots
 
 
-def _health_check(slots: dict, config: dict) -> None:
+def _health_check(slots: dict[str, Any], config: dict[str, Any]) -> None:
     """Validate reservations, remove orphans. Mutates slots in place.
 
     Caller must hold slot lock.
     """
-    to_remove = []
+    to_remove: list[str] = []
     for name, slot in slots.items():
         worktree = slot.get("worktree", os.path.join(TESTS_DIR, name))
 
@@ -250,9 +252,9 @@ def _health_check(slots: dict, config: dict) -> None:
         print(f"Cleaned up orphaned reservation: '{name}' (worktree removed)")
 
 
-def _find_free_guild(slots: dict, config: dict, instance_name: str, explicit_guild: str | None) -> str | None:
+def _find_free_guild(slots: dict[str, Any], config: dict[str, Any], instance_name: str, explicit_guild: str | None) -> str | None:
     """Find a free guild whose bot token is not in use. Caller must hold slot lock."""
-    used_tokens = set()
+    used_tokens: set[str] = set()
     for name, slot in slots.items():
         if name != instance_name:
             used_tokens.add(slot["token_id"])
@@ -275,7 +277,7 @@ def _find_free_guild(slots: dict, config: dict, instance_name: str, explicit_gui
     return None
 
 
-def _make_slot(guild_name: str, config: dict, worktree: str) -> dict:
+def _make_slot(guild_name: str, config: dict[str, Any], worktree: str) -> dict[str, Any]:
     """Create a slot reservation record."""
     guild_info = config["guilds"][guild_name]
     return {
@@ -287,7 +289,7 @@ def _make_slot(guild_name: str, config: dict, worktree: str) -> dict:
     }
 
 
-def _write_env(guild_name: str, config: dict, instance_path: str, data_path: str) -> None:
+def _write_env(guild_name: str, config: dict[str, Any], instance_path: str, data_path: str) -> None:
     """Generate .env and data dir from reservation data.
 
     The .env contains non-sensitive config only. The bot token is NOT written
@@ -318,7 +320,7 @@ def _write_env(guild_name: str, config: dict, instance_path: str, data_path: str
                 json.dump([], f)
 
 
-def _try_reserve(config: dict, name: str, instance_path: str, explicit_guild: str | None) -> str | None:
+def _try_reserve(config: dict[str, Any], name: str, instance_path: str, explicit_guild: str | None) -> str | None:
     """Attempt to reserve a slot atomically. Returns guild name or None."""
     with _flock(SLOTS_LOCK):
         slots = _load_slots(config)
@@ -352,7 +354,7 @@ def _try_reserve(config: dict, name: str, instance_path: str, explicit_guild: st
 
 
 def _wait_and_reserve(
-    config: dict, name: str, instance_path: str, explicit_guild: str | None, timeout: int, poll_interval: int = 10
+    config: dict[str, Any], name: str, instance_path: str, explicit_guild: str | None, timeout: int, poll_interval: int = 10
 ) -> str:
     """Poll until a slot is available and reserve it atomically."""
     deadline = time.monotonic() + timeout
@@ -470,7 +472,7 @@ def _merge_lock_file(main_repo: str) -> str:
     return os.path.join(main_repo, ".merge-exec.lock")
 
 
-def _read_queue(main_repo: str) -> list[dict]:
+def _read_queue(main_repo: str) -> list[dict[str, Any]]:
     """Read queue file. Caller must hold queue lock."""
     path = _queue_file(main_repo)
     if not os.path.isfile(path):
@@ -482,16 +484,16 @@ def _read_queue(main_repo: str) -> list[dict]:
             return []
 
 
-def _write_queue(main_repo: str, entries: list[dict]) -> None:
+def _write_queue(main_repo: str, entries: list[dict[str, Any]]) -> None:
     """Write queue file. Caller must hold queue lock."""
     with open(_queue_file(main_repo), "w") as f:
         json.dump(entries, f, indent=2)
 
 
-def _cleanup_stale(entries: list[dict]) -> None:
+def _cleanup_stale(entries: list[dict[str, Any]]) -> None:
     """Remove entries with dead processes. Modifies list in place."""
     now = datetime.now(UTC)
-    to_remove = []
+    to_remove: list[int] = []
     for i, entry in enumerate(entries):
         pid = entry.get("pid")
         if not pid:
@@ -523,7 +525,7 @@ def _remove_from_queue(main_repo: str, branch: str) -> None:
         _write_queue(main_repo, entries)
 
 
-def _git(main_repo: str, *args: str) -> subprocess.CompletedProcess:
+def _git(main_repo: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Run a git command in the main repo."""
     return subprocess.run(
         ["git", "-C", main_repo, *args],
@@ -601,7 +603,7 @@ def _execute_merge(main_repo: str, branch: str, message: str | None = None) -> t
 # --- Subcommands ---
 
 
-def cmd_up(args):
+def cmd_up(args: argparse.Namespace) -> None:
     cleanup_orphan_services()
 
     config = load_config()
@@ -636,7 +638,7 @@ def cmd_up(args):
     print(f"  Data:  {data_path}")
 
 
-def cmd_down(args):
+def cmd_down(args: argparse.Namespace) -> None:
     config = load_config()
     name = args.name
     instance_path = os.path.join(TESTS_DIR, name)
@@ -667,7 +669,7 @@ def cmd_down(args):
     print(f"Released reservation for instance '{name}'")
 
 
-def cmd_restart(args):
+def cmd_restart(args: argparse.Namespace) -> None:
     name = args.name
     slots = _read_slots()
     if name not in slots:
@@ -683,7 +685,7 @@ def cmd_restart(args):
     print("Done")
 
 
-def cmd_list(args):
+def cmd_list(args: argparse.Namespace) -> None:
     config = load_config()
 
     with _flock(SLOTS_LOCK):
@@ -695,7 +697,7 @@ def cmd_list(args):
         print("No test instances found")
         return
 
-    rows = []
+    rows: list[tuple[str, str, str, str, str]] = []
     for name in sorted(slots):
         slot = slots[name]
         guild_name = slot.get("guild", "?")
@@ -706,10 +708,10 @@ def cmd_list(args):
         branch = get_worktree_branch(worktree) if is_git else "-"
 
         reserved_at = slot.get("reserved_at", "?")[:19]
-        rows.append((name, guild_name, branch, status, reserved_at))
+        rows.append((name, str(guild_name), branch, status, str(reserved_at)))
 
     headers = ("NAME", "GUILD", "BRANCH", "STATUS", "RESERVED_AT")
-    widths = [max(len(h), max(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    widths = [max(len(h), max(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*headers))
     for row in rows:
@@ -719,7 +721,7 @@ def cmd_list(args):
 # --- Discord API helpers ---
 
 
-def api_get(client: httpx.Client, path: str, params: dict | None = None):
+def api_get(client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> Any:
     """GET with rate-limit retry."""
     for attempt in range(3):
         resp = client.get(path, params=params)
@@ -738,7 +740,7 @@ def api_get(client: httpx.Client, path: str, params: dict | None = None):
     sys.exit(1)
 
 
-def api_post(client: httpx.Client, path: str, json_data: dict):
+def api_post(client: httpx.Client, path: str, json_data: dict[str, Any]) -> Any:
     """POST with rate-limit retry."""
     for attempt in range(3):
         resp = client.post(path, json=json_data)
@@ -757,7 +759,7 @@ def api_post(client: httpx.Client, path: str, json_data: dict):
     sys.exit(1)
 
 
-def api_patch(client: httpx.Client, path: str, json_data: dict):
+def api_patch(client: httpx.Client, path: str, json_data: dict[str, Any]) -> Any:
     """PATCH with rate-limit retry."""
     for attempt in range(3):
         resp = client.patch(path, json=json_data)
@@ -795,7 +797,7 @@ def api_delete(client: httpx.Client, path: str):
     sys.exit(1)
 
 
-def _get_prime_env(main_repo: str) -> dict:
+def _get_prime_env(main_repo: str) -> dict[str, str | None]:
     """Read Prime bot's .env for Discord token and guild ID."""
     env_path = os.path.join(main_repo, ".env")
     return dotenv_values(env_path) if os.path.isfile(env_path) else {}
@@ -807,7 +809,7 @@ def _normalize_channel_name(name: str) -> str:
     return re.sub(r"[^a-z0-9\-_]", "", name)
 
 
-def _find_channel_by_name(client: httpx.Client, guild_id: str, name: str) -> dict | None:
+def _find_channel_by_name(client: httpx.Client, guild_id: str, name: str) -> dict[str, Any] | None:
     """Find a text channel by name in the Active category."""
     normalized = _normalize_channel_name(name)
     channels = api_get(client, f"/guilds/{guild_id}/channels")
@@ -865,7 +867,7 @@ def find_master_channel(client: httpx.Client, guild_id: str) -> str:
     sys.exit(1)
 
 
-def format_message(msg: dict) -> str:
+def format_message(msg: dict[str, Any]) -> str:
     """Format a Discord message for display."""
     author = msg.get("author", {})
     username = author.get("username", "unknown")
@@ -873,7 +875,7 @@ def format_message(msg: dict) -> str:
     return f"[{username}] {content}"
 
 
-def is_sentinel(msg: dict) -> bool:
+def is_sentinel(msg: dict[str, Any]) -> bool:
     """Check if a message contains the 'finished responding' sentinel."""
     content = msg.get("content", "")
     return content.startswith("*System:*") and SENTINEL in content
@@ -889,7 +891,7 @@ def get_sender_token() -> str:
     return token
 
 
-def cmd_msg(args):
+def cmd_msg(args: argparse.Namespace) -> None:
     name = args.name
     message = args.message
     timeout = args.timeout
@@ -926,7 +928,7 @@ def cmd_msg(args):
         # Poll for response
         deadline = time.monotonic() + timeout
         after_id = sent_id
-        collected = []
+        collected: list[dict[str, Any]] = []
 
         while time.monotonic() < deadline:
             messages = api_get(
@@ -975,7 +977,7 @@ def cmd_msg(args):
         sys.exit(1)
 
 
-def cmd_merge(args):
+def cmd_merge(args: argparse.Namespace) -> None:
     """Queue a squash merge of the current worktree branch into main."""
     main_repo = _find_main_repo()
     cwd = os.path.realpath(os.getcwd())
@@ -1074,7 +1076,7 @@ def cmd_merge(args):
         sys.exit(2)
 
 
-def cmd_queue(args):
+def cmd_queue(args: argparse.Namespace) -> None:
     """Show or manage the merge queue."""
     main_repo = _find_main_repo()
 
@@ -1116,7 +1118,7 @@ def cmd_queue(args):
         print(f"  {i + 1}. [{status}] {branch} (pid {pid}, submitted {submitted})")
 
 
-def cmd_cleanup(args):
+def cmd_cleanup(args: argparse.Namespace) -> None:
     """Stop orphaned axi-test@ services that have no reservation."""
     cleaned = cleanup_orphan_services()
     if cleaned == 0:
@@ -1125,7 +1127,7 @@ def cmd_cleanup(args):
         print(f"Cleaned up {cleaned} orphan service(s)")
 
 
-def cmd_clean(args):
+def cmd_clean(args: argparse.Namespace) -> None:
     """Clean up a worktree: check for uncommitted changes, remove worktree, kill channel."""
     name = args.name
     worktree_path = os.path.join(TESTS_DIR, name)
@@ -1240,7 +1242,7 @@ def cmd_clean(args):
     print(f"Clean complete: {name}")
 
 
-def cmd_logs(args):
+def cmd_logs(args: argparse.Namespace) -> None:
     os.execvp(
         "journalctl",
         [

@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """Agent handlers - polymorphic handlers for different agent types.
 
 Each handler manages the lifecycle and message processing for a specific agent type.
@@ -17,7 +18,7 @@ from claude_agent_sdk import ClaudeSDKClient
 if TYPE_CHECKING:
     import discord
 
-    from bot import AgentSession
+    from bot import AgentSession, MessageContent
 
 log = logging.getLogger("__main__")  # Use bot.py's logger for consistent log output
 
@@ -49,7 +50,7 @@ class AgentHandler(ABC):
     async def process_message(
         self,
         session: AgentSession,
-        content: str | list,
+        content: MessageContent,
         channel: discord.TextChannel,
     ) -> None:
         """Process a user message. Raise RuntimeError if unable."""
@@ -92,7 +93,7 @@ class ClaudeCodeHandler(AgentHandler):
         transport = await _create_transport(session, reconnecting=is_reconnecting)
 
         # Create and connect client
-        session.client = ClaudeSDKClient(options=options, transport=transport)
+        session.client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
         await session.client.__aenter__()
 
         log.info("Claude Code agent '%s' awake", session.name)
@@ -108,7 +109,7 @@ class ClaudeCodeHandler(AgentHandler):
 
         # Import here to avoid circular dependency
         from bot import _ensure_process_dead, _get_subprocess_pid
-
+        assert session.client is not None
         pid = _get_subprocess_pid(session.client)
         try:
             await asyncio.wait_for(
@@ -131,7 +132,7 @@ class ClaudeCodeHandler(AgentHandler):
     async def process_message(
         self,
         session: AgentSession,
-        content: str | list,
+        content: MessageContent,
         channel: discord.TextChannel,
     ) -> None:
         """Run a query through Claude Code.
@@ -139,7 +140,7 @@ class ClaudeCodeHandler(AgentHandler):
         Raises:
             RuntimeError: If agent is not awake
         """
-        if not self.is_awake(session):
+        if not self.is_awake(session) or session.client is None:
             raise RuntimeError(f"Claude Code agent '{session.name}' not awake")
 
         # Import here to avoid circular dependency
@@ -157,13 +158,11 @@ class ClaudeCodeHandler(AgentHandler):
         session.last_idle_notified = None
         session.idle_reminder_count = 0
         session._bridge_busy = False
-
         drain_stderr(session)
         drained = drain_sdk_buffer(session)
 
         if session._log:
             session._log.info("USER: %s", _content_summary(content))
-
         log.info("HANDLER[%s] process_message: drained=%d, calling query+stream", session.name, drained)
         try:
             async with asyncio.timeout(QUERY_TIMEOUT):
@@ -226,12 +225,14 @@ class FlowcoderHandler(AgentHandler):
 
     async def sleep(self, session: AgentSession) -> None:
         """Stop flowcoder process."""
-        if not self.is_awake(session):
+        if not self.is_awake(session) or session.flowcoder_process is None:
             return
+
+        from flowcoder import BridgeFlowcoderProcess
 
         proc = session.flowcoder_process
 
-        if getattr(proc, "is_bridge_backed", False) and session.query_lock.locked():
+        if isinstance(proc, BridgeFlowcoderProcess) and session.query_lock.locked():
             # Mid-execution: detach so bridge can buffer
             await proc.detach()
             log.info("Flowcoder '%s' detached (bridge buffering)", session.name)
@@ -244,7 +245,7 @@ class FlowcoderHandler(AgentHandler):
     async def process_message(
         self,
         session: AgentSession,
-        content: str | list,
+        content: MessageContent,
         channel: discord.TextChannel,
     ) -> None:
         """Send message to flowcoder stdin.
@@ -252,7 +253,7 @@ class FlowcoderHandler(AgentHandler):
         Raises:
             RuntimeError: If flowcoder is not running
         """
-        if not self.is_processing(session):
+        if not self.is_processing(session) or session.flowcoder_process is None:
             raise RuntimeError(f"Flowcoder '{session.name}' not running")
 
         user_msg = {

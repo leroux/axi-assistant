@@ -28,6 +28,7 @@ import json
 import os
 import sys
 import time
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
@@ -47,7 +48,7 @@ def get_token() -> str:
     return token
 
 
-def api_get(client: httpx.Client, path: str, params: dict | None = None) -> list | dict:
+def api_get(client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> Any:
     """GET with rate-limit retry."""
     for attempt in range(3):
         resp = client.get(path, params=params)
@@ -74,7 +75,7 @@ def get_latest_message_id(client: httpx.Client, channel_id: str) -> str | None:
     return None
 
 
-def format_message(msg: dict) -> str:
+def format_message(msg: dict[str, Any]) -> str:
     """Format a message for output."""
     ts = msg.get("timestamp", "")
     author = msg.get("author", {})
@@ -89,7 +90,7 @@ def format_message(msg: dict) -> str:
     )
 
 
-def is_system_message(msg: dict) -> bool:
+def is_system_message(msg: dict[str, Any]) -> bool:
     """Check if a message is a bot system message."""
     content = msg.get("content", "")
     return content.startswith("*System:*")
@@ -103,7 +104,7 @@ def wait_for_messages(
     ignore_author_ids: set[str],
     ignore_system: bool = True,
     poll_interval: float = POLL_INTERVAL,
-) -> tuple[list[dict], str]:
+) -> tuple[list[dict[str, Any]], str]:
     """Poll until new messages appear after after_id.
 
     Returns (matching_messages, cursor) where cursor is the highest
@@ -125,7 +126,7 @@ def wait_for_messages(
             cursor = messages[0]["id"]
 
             # Filter and collect in chronological order
-            matching = []
+            matching: list[dict[str, Any]] = []
             for msg in reversed(messages):
                 author_id = msg.get("author", {}).get("id", "")
 

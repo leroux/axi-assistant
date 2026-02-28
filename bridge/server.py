@@ -10,6 +10,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 from .protocol import (
     CmdMsg,
@@ -32,10 +33,10 @@ class CliProcess:
     proc: asyncio.subprocess.Process
     status: str = "running"  # "running" | "exited"
     exit_code: int | None = None
-    buffer: list[StdoutMsg | StderrMsg | ExitMsg] = field(default_factory=list)
+    buffer: list[StdoutMsg | StderrMsg | ExitMsg] = field(default_factory=lambda: list[StdoutMsg | StderrMsg | ExitMsg]())
     subscribed: bool = False  # whether bot.py is receiving output
-    stdout_task: asyncio.Task | None = None
-    stderr_task: asyncio.Task | None = None
+    stdout_task: asyncio.Task[None] | None = None
+    stderr_task: asyncio.Task[None] | None = None
     last_stdin_at: float = 0.0  # monotonic timestamp of last stdin write
     last_stdout_at: float = 0.0  # monotonic timestamp of last stdout message
 
@@ -123,14 +124,14 @@ class BridgeServer:
                 if not line:
                     break  # Client disconnected
                 try:
-                    msg = parse_client_msg(line)
+                    msg: CmdMsg | StdinMsg = parse_client_msg(line)
                 except Exception:
                     log.warning("Invalid message from client: %r", line[:200])
                     continue
 
                 if isinstance(msg, CmdMsg):
                     await self._handle_command(msg)
-                elif isinstance(msg, StdinMsg):
+                else:  # StdinMsg
                     await self._handle_stdin(msg)
         except (ConnectionError, OSError) as e:
             log.info("Client disconnected: %s", e)
@@ -284,7 +285,7 @@ class BridgeServer:
         await self._send_result(ResultMsg(ok=True, name=name))
 
     async def _cmd_list(self):
-        agents = {}
+        agents: dict[str, Any] = {}
         for name, cp in self._cli_procs.items():
             agents[name] = {
                 "pid": cp.proc.pid,
@@ -328,6 +329,7 @@ class BridgeServer:
 
     async def _relay_stdout(self, cp: CliProcess):
         """Read JSON lines from CLI stdout, relay or buffer."""
+        assert cp.proc.stdout is not None
         normal_eof = False
         try:
             while True:
@@ -338,7 +340,7 @@ class BridgeServer:
                 raw = line.decode().strip()
                 log.debug("[stdout][%s] raw line (%d bytes): %.200s", cp.name, len(line), raw)
                 try:
-                    data = json.loads(raw)
+                    data: Any = json.loads(raw)
                 except json.JSONDecodeError:
                     log.debug("[stdout][%s] json.loads FAILED on: %.200s", cp.name, raw)
                     # Non-JSON output — treat as stderr
@@ -346,10 +348,10 @@ class BridgeServer:
                         await self._relay_or_buffer(cp, StderrMsg(name=cp.name, text=raw))
                     continue
 
-                msg_type = data.get("type", "?") if isinstance(data, dict) else "non-dict"
-                log.debug("[stdout][%s] parsed msg type=%s", cp.name, msg_type)
+                log.debug("[stdout][%s] parsed msg", cp.name)
                 cp.last_stdout_at = asyncio.get_event_loop().time()
-                await self._relay_or_buffer(cp, StdoutMsg(name=cp.name, data=data))
+                stdout_data = cast("dict[str, Any]", data) if isinstance(data, dict) else {"raw": data}
+                await self._relay_or_buffer(cp, StdoutMsg(name=cp.name, data=stdout_data))
         except Exception:
             log.exception("Error relaying stdout for '%s'", cp.name)
         finally:
@@ -378,6 +380,7 @@ class BridgeServer:
 
     async def _relay_stderr(self, cp: CliProcess):
         """Read lines from CLI stderr, relay or buffer."""
+        assert cp.proc.stderr is not None
         try:
             while True:
                 line = await cp.proc.stderr.readline()

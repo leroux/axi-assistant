@@ -1,0 +1,30 @@
+{
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Linux",
+
+  "include": [
+    "bot.py",
+    "supervisor.py",
+    "axi_test.py",
+    "discord_query.py",
+    "handlers.py",
+    "schedule_tools.py",
+    "shutdown.py",
+    "flowcoder.py",
+    "wait_for_message.py",
+    "bridge/"
+  ],
+  "exclude": [
+    "**/test_*.py",
+    ".venv",
+    "**/__pycache__"
+  ],
+
+  "venvPath": ".",
+  "venv": ".venv",
+
+  "reportMissingTypeStubs": "warning",
+  "reportUnusedImport": false,
+  "reportUnusedVariable": false
+}

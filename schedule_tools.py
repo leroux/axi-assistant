@@ -44,7 +44,7 @@ _MAX_PROMPT_LEN = 2000
 # ---------------------------------------------------------------------------
 
 
-def schedule_key(entry: dict) -> str:
+def schedule_key(entry: dict[str, Any]) -> str:
     """Compute a globally-unique key for schedule_last_fired / check_skip.
 
     Entries with an ``owner`` field produce ``"{owner}/{name}"``.
@@ -55,7 +55,7 @@ def schedule_key(entry: dict) -> str:
     return f"{owner}/{entry['name']}" if owner else entry["name"]
 
 
-def _load(path: str) -> list[dict]:
+def _load(path: str) -> list[dict[str, Any]]:
     try:
         with open(path) as f:
             return json.load(f)
@@ -63,7 +63,7 @@ def _load(path: str) -> list[dict]:
         return []
 
 
-def _save(path: str, entries: list[dict]) -> None:
+def _save(path: str, entries: list[dict[str, Any]]) -> None:
     with open(path, "w") as f:
         json.dump(entries, f, indent=2)
         f.write("\n")
@@ -98,12 +98,12 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
 
     # -- Closures over agent_name -----------------------------------------
 
-    def _my_schedules(entries: list[dict]) -> list[dict]:
+    def _my_schedules(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [e for e in entries if e.get("owner") == agent_name]
 
     # -- Tool handlers ----------------------------------------------------
 
-    async def handle_schedule_list(args: dict) -> dict[str, Any]:
+    async def handle_schedule_list(args: dict[str, Any]) -> dict[str, Any]:
         async with schedules_lock:
             entries = _load(schedules_path)
 
@@ -111,7 +111,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
         if not mine:
             return _text("You have no scheduled tasks.")
 
-        result = []
+        result: list[dict[str, Any]] = []
         for e in mine:
             item: dict[str, Any] = {"name": e["name"], "prompt": e["prompt"]}
             if "schedule" in e:
@@ -126,7 +126,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
 
         return _text(json.dumps(result, indent=2))
 
-    async def handle_schedule_create(args: dict) -> dict[str, Any]:
+    async def handle_schedule_create(args: dict[str, Any]) -> dict[str, Any]:
         name = (args.get("name") or "").strip()
         prompt = (args.get("prompt") or "").strip()
         stype = (args.get("schedule_type") or "").strip()
@@ -212,7 +212,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
         else:
             return _text(f"Created one-off schedule '{name}' firing at {at_str}.")
 
-    async def handle_schedule_delete(args: dict) -> dict[str, Any]:
+    async def handle_schedule_delete(args: dict[str, Any]) -> dict[str, Any]:
         name = (args.get("name") or "").strip()
         if not name:
             return _error("Name is required.")
