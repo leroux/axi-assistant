@@ -77,7 +77,51 @@ _file_fmt.converter = time.gmtime
 _file_handler.setFormatter(_file_fmt)
 log.addHandler(_file_handler)
 
-DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+def _resolve_discord_token() -> str:
+    """Resolve Discord token from env or test slot reservation.
+
+    For prime: reads DISCORD_TOKEN from .env as usual.
+    For test instances: derives instance name from the bot directory,
+    looks up the reserved token from ~/.config/axi/.test-slots.json
+    and ~/.config/axi/test-config.json. No token in .env needed.
+    """
+    token = os.environ.get("DISCORD_TOKEN")
+    if token:
+        return token
+
+    bot_dir = os.path.dirname(os.path.abspath(__file__))
+    instance_name = os.path.basename(bot_dir)
+    config_dir = os.path.expanduser("~/.config/axi")
+    slots_path = os.path.join(config_dir, ".test-slots.json")
+    config_path = os.path.join(config_dir, "test-config.json")
+
+    try:
+        with open(slots_path) as f:
+            slots = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        raise RuntimeError(
+            f"DISCORD_TOKEN not set and cannot read {slots_path}: {e}\n"
+            f"Set DISCORD_TOKEN in .env or reserve a slot: axi-test up {instance_name}"
+        ) from None
+
+    slot = slots.get(instance_name)
+    if not slot:
+        raise RuntimeError(
+            f"DISCORD_TOKEN not set and no slot for '{instance_name}' in {slots_path}\n"
+            f"Reserve a slot: axi-test up {instance_name}"
+        )
+
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        return config["bots"][slot["token_id"]]["token"]
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+        raise RuntimeError(
+            f"Cannot resolve token for bot '{slot.get('token_id')}': {e}"
+        ) from None
+
+
+DISCORD_TOKEN = _resolve_discord_token()
 ALLOWED_USER_IDS = {int(uid.strip()) for uid in os.environ["ALLOWED_USER_IDS"].split(",")}
 DEFAULT_CWD = os.environ.get("DEFAULT_CWD", os.getcwd())
 AXI_USER_DATA = os.environ.get("AXI_USER_DATA", os.path.expanduser("~/axi-user-data"))

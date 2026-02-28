@@ -29,8 +29,14 @@ from dotenv import dotenv_values
 
 TESTS_DIR = "/home/ubuntu/axi-tests"
 CONFIG_PATH = os.path.expanduser("~/.config/axi/test-config.json")
+CONFIG_DIR = os.path.expanduser("~/.config/axi")
+SLOTS_FILE = os.path.join(CONFIG_DIR, ".test-slots.json")
+SLOTS_LOCK = os.path.join(CONFIG_DIR, ".test-slots.lock")
 API_BASE = "https://discord.com/api/v10"
 SENTINEL = "Bot has finished responding"
+
+
+# --- Utilities ---
 
 
 def _systemctl_env() -> dict[str, str]:
@@ -64,21 +70,6 @@ def load_config() -> dict:
     return config
 
 
-def resolve_bot_token(config: dict, guild_name: str) -> str:
-    """Resolve guild name -> bot name -> token."""
-    guild = config["guilds"].get(guild_name)
-    if not guild:
-        print(f"Error: Guild '{guild_name}' not found in config", file=sys.stderr)
-        sys.exit(1)
-    bot_name = guild.get("bot")
-    bot = config["bots"].get(bot_name, {})
-    token = bot.get("token")
-    if not token:
-        print(f"Error: No token found for bot '{bot_name}' (guild '{guild_name}')", file=sys.stderr)
-        sys.exit(1)
-    return token
-
-
 def is_instance_running(name: str) -> bool:
     """Check if a test instance systemd service is active.
 
@@ -97,152 +88,12 @@ def is_instance_running(name: str) -> bool:
     return result.stdout.strip() == "active"
 
 
-def cleanup_orphan_services() -> int:
-    """Stop and reset orphaned axi-test@ services.
-
-    Finds user-level axi-test@ units that are crash-looping or failed
-    because their worktree directory or .env is missing. Returns count
-    of services cleaned up.
-    """
-    # List all axi-test@ units (any state)
-    env = _systemctl_env()
-    result = subprocess.run(
-        ["systemctl", "--user", "list-units", "--all", "--plain",
-         "--no-legend", "axi-test@*"],
-        capture_output=True, text=True, env=env,
-    )
-    cleaned = 0
-    for line in result.stdout.strip().splitlines():
-        if not line.strip():
-            continue
-        unit = line.split()[0]
-        # Extract instance name: "axi-test@foo.service" -> "foo"
-        if not unit.startswith("axi-test@") or not unit.endswith(".service"):
-            continue
-        name = unit[len("axi-test@"):-len(".service")]
-
-        instance_path = os.path.join(TESTS_DIR, name)
-        env_path = os.path.join(instance_path, ".env")
-
-        # Orphan if: directory missing, or .env missing (no reservation)
-        if os.path.isdir(instance_path) and os.path.isfile(env_path):
-            continue  # Looks legitimate, skip
-
-        # Stop and reset
-        subprocess.run(
-            ["systemctl", "--user", "stop", unit],
-            capture_output=True, env=env,
-        )
-        subprocess.run(
-            ["systemctl", "--user", "reset-failed", unit],
-            capture_output=True, env=env,
-        )
-        print(f"Cleaned up orphan service: {unit}")
-        cleaned += 1
-
-    return cleaned
-
-
-def get_running_instances() -> list[str]:
-    """Get names of all running test instances."""
-    running = []
-    if not os.path.isdir(TESTS_DIR):
-        return running
-    for entry in os.listdir(TESTS_DIR):
-        path = os.path.join(TESTS_DIR, entry)
-        if os.path.isdir(path) and not entry.endswith("-data"):
-            if is_instance_running(entry):
-                running.append(entry)
-    return running
-
-
-def get_allocated_instances() -> list[str]:
-    """Get names of all instances with a .env reservation (running or stopped)."""
-    allocated = []
-    if not os.path.isdir(TESTS_DIR):
-        return allocated
-    for entry in os.listdir(TESTS_DIR):
-        path = os.path.join(TESTS_DIR, entry)
-        if os.path.isdir(path) and not entry.endswith("-data"):
-            env_path = os.path.join(path, ".env")
-            if os.path.isfile(env_path):
-                allocated.append(entry)
-    return allocated
-
-
 def get_instance_env(name: str) -> dict:
     """Read a test instance's .env file."""
     env_path = os.path.join(TESTS_DIR, name, ".env")
     if not os.path.isfile(env_path):
         return {}
     return dotenv_values(env_path)
-
-
-def get_token_for_running_instance(name: str, config: dict) -> str | None:
-    """Get the bot token used by a running instance."""
-    env = get_instance_env(name)
-    return env.get("DISCORD_TOKEN")
-
-
-def pick_guild(config: dict, explicit_guild: str | None) -> str | None:
-    """Pick a guild, checking for token conflicts with allocated instances.
-
-    Returns None if no guild slot is available (all tokens in use).
-    A slot is considered "in use" if any instance has a .env file with that
-    bot token — even if the instance is currently stopped.
-    """
-    if explicit_guild:
-        if explicit_guild not in config["guilds"]:
-            print(f"Error: Guild '{explicit_guild}' not found in config", file=sys.stderr)
-            print(f"Available guilds: {', '.join(config['guilds'].keys())}", file=sys.stderr)
-            sys.exit(1)
-        return explicit_guild
-
-    # Pick first guild whose bot has no allocated instance
-    allocated = get_allocated_instances()
-    allocated_tokens = set()
-    for inst in allocated:
-        token = get_token_for_running_instance(inst, config)
-        if token:
-            allocated_tokens.add(token)
-
-    for guild_name, guild_info in config["guilds"].items():
-        bot_name = guild_info.get("bot")
-        token = config["bots"].get(bot_name, {}).get("token")
-        if token and token not in allocated_tokens:
-            return guild_name
-
-    return None
-
-
-def has_token_conflict(config: dict, guild_name: str, instance_name: str) -> bool:
-    """Check if another allocated instance uses the same bot token."""
-    token = resolve_bot_token(config, guild_name)
-    allocated = get_allocated_instances()
-    for inst in allocated:
-        if inst == instance_name:
-            continue
-        inst_token = get_token_for_running_instance(inst, config)
-        if inst_token == token:
-            return True
-    return False
-
-
-def check_token_conflict(config: dict, guild_name: str, instance_name: str) -> None:
-    """Error if another allocated instance uses the same bot token."""
-    if not has_token_conflict(config, guild_name, instance_name):
-        return
-    token = resolve_bot_token(config, guild_name)
-    allocated = get_allocated_instances()
-    for inst in allocated:
-        if inst == instance_name:
-            continue
-        inst_token = get_token_for_running_instance(inst, config)
-        if inst_token == token:
-            bot_name = config["guilds"][guild_name].get("bot")
-            print(f"Error: Bot '{bot_name}' is already allocated to instance '{inst}'", file=sys.stderr)
-            print(f"Release it first: axi-test down {inst}", file=sys.stderr)
-            sys.exit(1)
 
 
 def get_worktree_branch(worktree_path: str) -> str:
@@ -260,6 +111,325 @@ def get_worktree_branch(worktree_path: str) -> str:
         cwd=worktree_path, capture_output=True, text=True,
     )
     return result.stdout.strip() or "unknown"
+
+
+# --- Slot Management ---
+#
+# All slot reservations are tracked in a single JSON file (~/.config/axi/.test-slots.json)
+# protected by an exclusive file lock (~/.config/axi/.test-slots.lock).
+#
+# The .env files in worktree directories are DERIVED from this reservation state —
+# they contain non-sensitive config only (no tokens). The bot resolves its token
+# at startup from the slots file + test-config.json.
+#
+# This eliminates TOCTOU races: checking for free slots and claiming one happens
+# atomically under the same lock acquisition.
+
+
+@contextmanager
+def _flock(path: str):
+    """Acquire exclusive file lock, release on exit."""
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _read_slots() -> dict:
+    """Read slots file. Returns empty dict if missing or corrupted."""
+    if not os.path.isfile(SLOTS_FILE):
+        return {}
+    with open(SLOTS_FILE) as f:
+        try:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            print(f"Warning: Corrupted {SLOTS_FILE}, treating as empty", file=sys.stderr)
+            return {}
+
+
+def _write_slots(slots: dict) -> None:
+    """Write slots file atomically. Caller must hold slot lock."""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    tmp_path = SLOTS_FILE + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(slots, f, indent=2)
+    os.replace(tmp_path, SLOTS_FILE)
+
+
+def _load_slots(config: dict) -> dict:
+    """Load slots, migrating from .env-based tracking on first run.
+
+    Caller must hold slot lock.
+    """
+    if os.path.isfile(SLOTS_FILE):
+        return _read_slots()
+
+    # First run — migrate from existing .env files
+    slots = _migrate_from_env(config)
+    if slots:
+        print(f"Migrated {len(slots)} reservation(s) from .env files")
+    _write_slots(slots)  # Create file even if empty (prevents re-migration)
+    return slots
+
+
+def _migrate_from_env(config: dict) -> dict:
+    """Build initial slots dict from existing .env files. One-time migration."""
+    slots = {}
+    if not os.path.isdir(TESTS_DIR):
+        return slots
+
+    token_to_bot = {}
+    for bot_name, bot_info in config["bots"].items():
+        token_to_bot[bot_info.get("token")] = bot_name
+
+    id_to_guild = {}
+    for gname, ginfo in config["guilds"].items():
+        id_to_guild[ginfo["guild_id"]] = gname
+
+    for entry in os.listdir(TESTS_DIR):
+        path = os.path.join(TESTS_DIR, entry)
+        if not os.path.isdir(path) or entry.endswith("-data"):
+            continue
+        env_path = os.path.join(path, ".env")
+        if not os.path.isfile(env_path):
+            continue
+
+        env = dotenv_values(env_path)
+        token = env.get("DISCORD_TOKEN")
+        guild_id = env.get("DISCORD_GUILD_ID")
+        if not token or not guild_id:
+            continue
+
+        bot_name = token_to_bot.get(token, "unknown")
+        guild_name = id_to_guild.get(guild_id, "unknown")
+        slots[entry] = {
+            "guild": guild_name,
+            "guild_id": guild_id,
+            "token_id": bot_name,
+            "reserved_at": datetime.now(timezone.utc).isoformat(),
+            "worktree": path,
+        }
+
+    return slots
+
+
+def _health_check(slots: dict, config: dict) -> None:
+    """Validate reservations, remove orphans. Mutates slots in place.
+
+    Caller must hold slot lock.
+    """
+    to_remove = []
+    for name, slot in slots.items():
+        worktree = slot.get("worktree", os.path.join(TESTS_DIR, name))
+
+        # Worktree directory gone → definitely orphaned
+        if not os.path.isdir(worktree):
+            to_remove.append(name)
+            if is_instance_running(name):
+                subprocess.run(
+                    ["systemctl", "--user", "stop", f"axi-test@{name}"],
+                    capture_output=True, env=_systemctl_env(),
+                )
+
+    for name in to_remove:
+        del slots[name]
+        print(f"Cleaned up orphaned reservation: '{name}' (worktree removed)")
+
+
+def _find_free_guild(slots: dict, config: dict, instance_name: str,
+                     explicit_guild: str | None) -> str | None:
+    """Find a free guild whose bot token is not in use. Caller must hold slot lock."""
+    used_tokens = set()
+    for name, slot in slots.items():
+        if name != instance_name:
+            used_tokens.add(slot["token_id"])
+
+    if explicit_guild:
+        if explicit_guild not in config["guilds"]:
+            print(f"Error: Guild '{explicit_guild}' not found in config", file=sys.stderr)
+            print(f"Available guilds: {', '.join(config['guilds'].keys())}", file=sys.stderr)
+            sys.exit(1)
+        bot_name = config["guilds"][explicit_guild].get("bot")
+        if bot_name not in used_tokens:
+            return explicit_guild
+        return None
+
+    for guild_name, guild_info in config["guilds"].items():
+        bot_name = guild_info.get("bot")
+        if bot_name not in used_tokens:
+            return guild_name
+
+    return None
+
+
+def _make_slot(guild_name: str, config: dict, worktree: str) -> dict:
+    """Create a slot reservation record."""
+    guild_info = config["guilds"][guild_name]
+    return {
+        "guild": guild_name,
+        "guild_id": guild_info["guild_id"],
+        "token_id": guild_info.get("bot"),
+        "reserved_at": datetime.now(timezone.utc).isoformat(),
+        "worktree": worktree,
+    }
+
+
+def _write_env(guild_name: str, config: dict, instance_path: str, data_path: str) -> None:
+    """Generate .env and data dir from reservation data.
+
+    The .env contains non-sensitive config only. The bot token is NOT written
+    here — bot.py resolves it at startup from the slots file + test-config.json.
+    """
+    guild_info = config["guilds"][guild_name]
+    guild_id = guild_info["guild_id"]
+    defaults = config.get("defaults", {})
+
+    os.makedirs(instance_path, exist_ok=True)
+    env_content = (
+        f"DISCORD_GUILD_ID={guild_id}\n"
+        f"ALLOWED_USER_IDS={defaults.get('allowed_user_ids', '')}\n"
+        f"SCHEDULE_TIMEZONE={defaults.get('schedule_timezone', 'UTC')}\n"
+        f"DEFAULT_CWD={instance_path}\n"
+        f"AXI_USER_DATA={data_path}\n"
+        f"DAY_BOUNDARY_HOUR={defaults.get('day_boundary_hour', '0')}\n"
+        f"SHOW_AWAITING_INPUT=true\n"
+    )
+    with open(os.path.join(instance_path, ".env"), "w") as f:
+        f.write(env_content)
+
+    os.makedirs(data_path, exist_ok=True)
+    for fname in ("schedules.json", "schedule_history.json"):
+        fpath = os.path.join(data_path, fname)
+        if not os.path.exists(fpath):
+            with open(fpath, "w") as f:
+                json.dump([], f)
+
+
+def _try_reserve(config: dict, name: str, instance_path: str,
+                 explicit_guild: str | None) -> str | None:
+    """Attempt to reserve a slot atomically. Returns guild name or None."""
+    with _flock(SLOTS_LOCK):
+        slots = _load_slots(config)
+        _health_check(slots, config)
+
+        if name in slots:
+            if is_instance_running(name):
+                print(f"Error: Instance '{name}' is already running", file=sys.stderr)
+                print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
+                sys.exit(1)
+            else:
+                print(f"Cleaning up stale reservation for '{name}' (not running)")
+                subprocess.run(
+                    ["systemctl", "--user", "stop", f"axi-test@{name}"],
+                    capture_output=True, env=_systemctl_env(),
+                )
+                env_path = os.path.join(instance_path, ".env")
+                if os.path.isfile(env_path):
+                    os.remove(env_path)
+                del slots[name]
+
+        guild_name = _find_free_guild(slots, config, name, explicit_guild)
+        if guild_name is not None:
+            slots[name] = _make_slot(guild_name, config, instance_path)
+            _write_slots(slots)
+            return guild_name
+
+        _write_slots(slots)  # persist health check cleanup
+        return None
+
+
+def _wait_and_reserve(config: dict, name: str, instance_path: str,
+                      explicit_guild: str | None, timeout: int,
+                      poll_interval: int = 10) -> str:
+    """Poll until a slot is available and reserve it atomically."""
+    deadline = time.monotonic() + timeout
+    total = len(config["guilds"])
+
+    if explicit_guild:
+        bot_name = config["guilds"][explicit_guild].get("bot", "?")
+        print(f"Bot '{bot_name}' (guild '{explicit_guild}') is in use. "
+              f"Waiting for it to free up (timeout: {timeout}s)...")
+    else:
+        print(f"All {total} bot token(s) are in use. "
+              f"Waiting for a slot (timeout: {timeout}s)...")
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"\nCould not reserve a bot token slot after waiting {timeout}s.",
+                  file=sys.stderr)
+            print("All bot tokens are still in use. Please ask the user how to proceed.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        time.sleep(min(poll_interval, remaining))
+
+        with _flock(SLOTS_LOCK):
+            slots = _load_slots(config)
+            _health_check(slots, config)
+            guild_name = _find_free_guild(slots, config, name, explicit_guild)
+            if guild_name is not None:
+                slots[name] = _make_slot(guild_name, config, instance_path)
+                _write_slots(slots)
+                print(f"Slot available! Using guild '{guild_name}'")
+                return guild_name
+            _write_slots(slots)  # persist health check cleanup
+
+        mins_left = int(remaining) // 60
+        secs_left = int(remaining) % 60
+        print(f"  Still waiting... ({mins_left}m {secs_left}s remaining)")
+
+
+# --- Orphan Service Cleanup ---
+
+
+def cleanup_orphan_services() -> int:
+    """Stop and reset orphaned axi-test@ services.
+
+    Finds user-level axi-test@ units that have no reservation in the
+    slots file and no .env file (pre-migration fallback).
+    """
+    slots = _read_slots()
+    env = _systemctl_env()
+    result = subprocess.run(
+        ["systemctl", "--user", "list-units", "--all", "--plain",
+         "--no-legend", "axi-test@*"],
+        capture_output=True, text=True, env=env,
+    )
+    cleaned = 0
+    for line in result.stdout.strip().splitlines():
+        if not line.strip():
+            continue
+        unit = line.split()[0]
+        if not unit.startswith("axi-test@") or not unit.endswith(".service"):
+            continue
+        name = unit[len("axi-test@"):-len(".service")]
+
+        # Has a reservation → legitimate
+        if name in slots:
+            continue
+
+        # Fallback: check .env file (pre-migration compat)
+        instance_path = os.path.join(TESTS_DIR, name)
+        if os.path.isdir(instance_path) and os.path.isfile(os.path.join(instance_path, ".env")):
+            continue
+
+        subprocess.run(
+            ["systemctl", "--user", "stop", unit],
+            capture_output=True, env=env,
+        )
+        subprocess.run(
+            ["systemctl", "--user", "reset-failed", unit],
+            capture_output=True, env=env,
+        )
+        print(f"Cleaned up orphan service: {unit}")
+        cleaned += 1
+
+    return cleaned
 
 
 # --- Merge Queue ---
@@ -287,18 +457,6 @@ def _queue_lock(main_repo: str) -> str:
 
 def _merge_lock_file(main_repo: str) -> str:
     return os.path.join(main_repo, ".merge-exec.lock")
-
-
-@contextmanager
-def _flock(path: str):
-    """Acquire exclusive file lock, release on exit."""
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
 
 
 def _read_queue(main_repo: str) -> list[dict]:
@@ -430,41 +588,8 @@ def _execute_merge(main_repo: str, branch: str, message: str | None = None) -> t
 
 # --- Subcommands ---
 
-def wait_for_slot(config, explicit_guild, instance_name, timeout, poll_interval=10):
-    """Poll until a guild slot is available, or raise SystemExit on timeout.
-
-    Returns the guild name once a slot is free.
-    """
-    deadline = time.monotonic() + timeout
-    total_guilds = len(config["guilds"])
-    if explicit_guild:
-        bot_name = config["guilds"][explicit_guild].get("bot", "?")
-        print(f"Bot '{bot_name}' (guild '{explicit_guild}') is in use. Waiting for it to free up (timeout: {timeout}s)...")
-    else:
-        print(f"All {total_guilds} bot token(s) are in use. Waiting for a slot (timeout: {timeout}s)...")
-
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            print(f"\nCould not reserve a bot token slot after waiting {timeout}s.", file=sys.stderr)
-            print("All bot tokens are still in use. Please ask the user how to proceed.", file=sys.stderr)
-            sys.exit(1)
-
-        sleep_time = min(poll_interval, remaining)
-        time.sleep(sleep_time)
-
-        guild_name = pick_guild(config, explicit_guild)
-        if guild_name is not None and not has_token_conflict(config, guild_name, instance_name):
-            print(f"Slot available! Using guild '{guild_name}'")
-            return guild_name
-
-        mins_left = int(remaining) // 60
-        secs_left = int(remaining) % 60
-        print(f"  Still waiting... ({mins_left}m {secs_left}s remaining)")
-
 
 def cmd_up(args):
-    # Clean up orphaned services before reserving a slot
     cleanup_orphan_services()
 
     config = load_config()
@@ -472,100 +597,64 @@ def cmd_up(args):
     instance_path = os.path.join(TESTS_DIR, name)
     data_path = os.path.join(TESTS_DIR, f"{name}-data")
 
-    if os.path.isfile(os.path.join(instance_path, ".env")):
-        if is_instance_running(name):
-            print(f"Error: Instance '{name}' is already running", file=sys.stderr)
-            print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
-            sys.exit(1)
-        else:
-            print(f"Cleaning up stale reservation for '{name}' (not running, .env left behind)")
-            subprocess.run(
-                ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                capture_output=True, env=_systemctl_env(),
-            )
-            os.remove(os.path.join(instance_path, ".env"))
-
-    guild_name = pick_guild(config, args.guild)
+    guild_name = _try_reserve(config, name, instance_path, args.guild)
 
     if guild_name is None:
         if args.wait:
-            guild_name = wait_for_slot(
-                config, args.guild, name, timeout=args.wait_timeout,
+            guild_name = _wait_and_reserve(
+                config, name, instance_path, args.guild, args.wait_timeout,
             )
         else:
-            print("Error: All bot tokens are in use by running instances", file=sys.stderr)
+            total = len(config["guilds"])
+            print(f"Error: All {total} bot token(s) are in use", file=sys.stderr)
             print("Either stop an instance or add another bot to the config", file=sys.stderr)
             print("Hint: Use --wait to poll until a slot is available", file=sys.stderr)
             sys.exit(1)
 
-    # For explicit guild, the token might still be in use by another instance
-    if has_token_conflict(config, guild_name, name):
-        if args.wait:
-            guild_name = wait_for_slot(
-                config, args.guild, name, timeout=args.wait_timeout,
-            )
-        else:
-            check_token_conflict(config, guild_name, name)
+    # Write .env and create data dir (outside lock — derived from reservation)
+    _write_env(guild_name, config, instance_path, data_path)
 
-    guild_info = config["guilds"][guild_name]
-    guild_id = guild_info["guild_id"]
-    token = resolve_bot_token(config, guild_name)
-    defaults = config.get("defaults", {})
-
-    # Write .env (instance directory must already exist)
-    os.makedirs(instance_path, exist_ok=True)
-    env_content = (
-        f"DISCORD_TOKEN={token}\n"
-        f"DISCORD_GUILD_ID={guild_id}\n"
-        f"ALLOWED_USER_IDS={defaults.get('allowed_user_ids', '')}\n"
-        f"SCHEDULE_TIMEZONE={defaults.get('schedule_timezone', 'UTC')}\n"
-        f"DEFAULT_CWD={instance_path}\n"
-        f"AXI_USER_DATA={data_path}\n"
-        f"DAY_BOUNDARY_HOUR={defaults.get('day_boundary_hour', '0')}\n"
-        f"SHOW_AWAITING_INPUT=true\n"
-    )
-    with open(os.path.join(instance_path, ".env"), "w") as f:
-        f.write(env_content)
-
-    # Create data directory with empty schedule files
-    os.makedirs(data_path, exist_ok=True)
-    for fname in ("schedules.json", "schedule_history.json"):
-        fpath = os.path.join(data_path, fname)
-        if not os.path.exists(fpath):
-            with open(fpath, "w") as f:
-                json.dump([], f)
-
+    guild_id = config["guilds"][guild_name]["guild_id"]
     print(f"Reserved guild '{guild_name}' ({guild_id}) for instance '{name}'")
     print(f"  .env:  {instance_path}/.env")
     print(f"  Data:  {data_path}")
 
 
 def cmd_down(args):
+    config = load_config()
     name = args.name
     instance_path = os.path.join(TESTS_DIR, name)
-    data_path = os.path.join(TESTS_DIR, f"{name}-data")
     env_path = os.path.join(instance_path, ".env")
 
-    if not os.path.isfile(env_path):
-        print(f"Error: No reservation found for '{name}' (no .env)", file=sys.stderr)
-        sys.exit(1)
+    with _flock(SLOTS_LOCK):
+        slots = _load_slots(config)
 
-    # Stop the systemd service if it's still running
-    if is_instance_running(name):
-        print(f"Stopping axi-test@{name}...")
-        subprocess.run(
-            ["systemctl", "--user", "stop", f"axi-test@{name}"],
-            check=True, env=_systemctl_env(),
-        )
+        if name not in slots:
+            print(f"Error: No reservation found for '{name}'", file=sys.stderr)
+            sys.exit(1)
 
-    # Remove .env to release the reservation
-    os.remove(env_path)
+        if is_instance_running(name):
+            print(f"Stopping axi-test@{name}...")
+            subprocess.run(
+                ["systemctl", "--user", "stop", f"axi-test@{name}"],
+                check=True, env=_systemctl_env(),
+            )
+
+        if os.path.isfile(env_path):
+            os.remove(env_path)
+
+        del slots[name]
+        _write_slots(slots)
 
     print(f"Released reservation for instance '{name}'")
 
 
 def cmd_restart(args):
     name = args.name
+    slots = _read_slots()
+    if name not in slots:
+        print(f"Warning: No reservation found for '{name}' in slots file", file=sys.stderr)
+
     print(f"Restarting axi-test@{name}...")
     subprocess.run(
         ["systemctl", "--user", "restart", f"axi-test@{name}"],
@@ -576,43 +665,39 @@ def cmd_restart(args):
 
 def cmd_list(args):
     config = load_config()
-    if not os.path.isdir(TESTS_DIR):
+
+    with _flock(SLOTS_LOCK):
+        slots = _load_slots(config)
+        _health_check(slots, config)
+        _write_slots(slots)
+
+    if not slots:
         print("No test instances found")
         return
-
-    # Build guild_id -> guild_name map
-    id_to_guild = {}
-    for gname, ginfo in config["guilds"].items():
-        id_to_guild[ginfo["guild_id"]] = gname
 
     rows = []
-    for entry in sorted(os.listdir(TESTS_DIR)):
-        path = os.path.join(TESTS_DIR, entry)
-        if not os.path.isdir(path) or entry.endswith("-data"):
-            continue
+    for name in sorted(slots):
+        slot = slots[name]
+        guild_name = slot.get("guild", "?")
+        worktree = slot.get("worktree", os.path.join(TESTS_DIR, name))
+        status = "running" if is_instance_running(name) else "stopped"
 
-        env = get_instance_env(entry)
-        if not env:
-            continue  # No reservation
+        is_git = (os.path.isdir(os.path.join(worktree, ".git"))
+                  or os.path.isfile(os.path.join(worktree, ".git")))
+        branch = get_worktree_branch(worktree) if is_git else "-"
 
-        guild_id = env.get("DISCORD_GUILD_ID", "?")
-        guild_name = id_to_guild.get(guild_id, "?")
-        status = "running" if is_instance_running(entry) else "stopped"
-        branch = get_worktree_branch(path) if os.path.isdir(os.path.join(path, ".git")) or os.path.isfile(os.path.join(path, ".git")) else "-"
+        reserved_at = slot.get("reserved_at", "?")[:19]
+        rows.append((name, guild_name, branch, status, reserved_at))
 
-        rows.append((entry, guild_name, branch, status, guild_id))
-
-    if not rows:
-        print("No test instances found")
-        return
-
-    # Print table
-    headers = ("NAME", "GUILD", "BRANCH", "STATUS", "GUILD_ID")
+    headers = ("NAME", "GUILD", "BRANCH", "STATUS", "RESERVED_AT")
     widths = [max(len(h), max(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*headers))
     for row in rows:
         print(fmt.format(*row))
+
+
+# --- Discord API helpers ---
 
 
 def api_get(client: httpx.Client, path: str, params: dict | None = None):
@@ -711,10 +796,18 @@ def cmd_msg(args):
     message = args.message
     timeout = args.timeout
 
-    env = get_instance_env(name)
-    guild_id = env.get("DISCORD_GUILD_ID")
+    # Read guild_id from slots file (source of truth)
+    slots = _read_slots()
+    slot = slots.get(name)
+    guild_id = slot.get("guild_id") if slot else None
+
     if not guild_id:
-        print(f"Error: No reservation found for '{name}' (no .env or missing DISCORD_GUILD_ID)", file=sys.stderr)
+        # Fallback to .env (pre-migration compat)
+        env = get_instance_env(name)
+        guild_id = env.get("DISCORD_GUILD_ID")
+
+    if not guild_id:
+        print(f"Error: No reservation found for '{name}'", file=sys.stderr)
         sys.exit(1)
 
     sender_token = get_sender_token()
@@ -926,7 +1019,7 @@ def cmd_queue(args):
 
 
 def cmd_cleanup(args):
-    """Stop orphaned axi-test@ services that have no worktree or .env."""
+    """Stop orphaned axi-test@ services that have no reservation."""
     cleaned = cleanup_orphan_services()
     if cleaned == 0:
         print("No orphan services found")
