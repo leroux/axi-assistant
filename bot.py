@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import signal
+import hashlib
 import subprocess
 import threading
 import time
@@ -296,6 +297,7 @@ class AgentSession:
     stderr_lock: threading.Lock = field(default_factory=threading.Lock)
     last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
     system_prompt: dict | str | None = None
+    system_prompt_hash: str | None = None  # Hash of system prompt text for change detection across restarts
     _system_prompt_posted: bool = False  # Set True after posting system prompt to Discord
     last_idle_notified: datetime | None = None
     idle_reminder_count: int = 0
@@ -862,28 +864,32 @@ def check_skip(name: str) -> bool:
 
 # --- Channel topic helpers ---
 
-
-def _format_channel_topic(cwd: str, session_id: str | None = None) -> str:
+def _format_channel_topic(cwd: str, session_id: str | None = None, prompt_hash: str | None = None) -> str:
     """Format agent metadata for a Discord channel topic."""
     parts = [f"cwd: {cwd}"]
     if session_id:
         parts.append(f"session: {session_id}")
+    if prompt_hash:
+        parts.append(f"prompt_hash: {prompt_hash}")
     return " | ".join(parts)
 
 
-def _parse_channel_topic(topic: str | None) -> tuple[str | None, str | None]:
-    """Parse cwd and session_id from a channel topic. Returns (cwd, session_id)."""
+def _parse_channel_topic(topic: str | None) -> tuple[str | None, str | None, str | None]:
+    """Parse cwd, session_id, and prompt_hash from a channel topic. Returns (cwd, session_id, prompt_hash)."""
     if not topic:
-        return None, None
+        return None, None, None
     cwd = None
     session_id = None
+    prompt_hash = None
     for part in topic.split("|"):
         part = part.strip()
         if part.startswith("cwd: "):
             cwd = part[5:].strip()
         elif part.startswith("session:"):
             session_id = part[8:].strip()
-    return cwd, session_id
+        elif part.startswith("prompt_hash:"):
+            prompt_hash = part[12:].strip()
+    return cwd, session_id, prompt_hash
 
 
 async def _set_session_id(session: AgentSession, msg_or_sid: ResultMessage | str, channel=None) -> None:
@@ -897,17 +903,20 @@ async def _set_session_id(session: AgentSession, msg_or_sid: ResultMessage | str
     if sid and sid != session.session_id:
         session.session_id = sid
         if session.name == MASTER_AGENT_NAME:
-            # Persist master session_id to file so it survives restarts
+            # Persist master session_id + prompt_hash to file so it survives restarts
             try:
+                data = {"session_id": sid}
+                if session.system_prompt_hash:
+                    data["prompt_hash"] = session.system_prompt_hash
                 with open(MASTER_SESSION_PATH, "w") as f:
-                    f.write(sid)
-                log.info("Saved master session_id to %s", MASTER_SESSION_PATH)
+                    json.dump(data, f)
+                log.info("Saved master session data to %s", MASTER_SESSION_PATH)
             except OSError:
-                log.warning("Failed to save master session_id", exc_info=True)
+                log.warning("Failed to save master session data", exc_info=True)
         elif session.discord_channel_id:
             ch = channel or bot.get_channel(session.discord_channel_id)
             if ch:
-                desired_topic = _format_channel_topic(session.cwd, sid)
+                desired_topic = _format_channel_topic(session.cwd, sid, session.system_prompt_hash)
                 if ch.topic != desired_topic:
                     log.info("Updating topic on #%s: %r -> %r", ch.name, ch.topic, desired_topic)
                     await ch.edit(topic=desired_topic)
@@ -919,6 +928,23 @@ async def _set_session_id(session: AgentSession, msg_or_sid: ResultMessage | str
 # SOUL.md: full personality for master + admin agents (agents in BOT_DIR or worktrees)
 # dev_context.md: axi-assistant development context (architecture, safety, test workflow)
 # Content uses %(var)s interpolation — literal % must be escaped as %% in prompt files.
+
+
+def _compute_prompt_hash(system_prompt: dict | str | None) -> str | None:
+    """Compute a short hash of the system prompt text for change detection.
+
+    Extracts the prompt text (from 'append' for dicts, or the string directly),
+    returns the first 16 hex chars of its SHA-256 hash.
+    """
+    if system_prompt is None:
+        return None
+    if isinstance(system_prompt, dict):
+        text = system_prompt.get("append", "")
+    else:
+        text = system_prompt
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _load_prompt_file(path: str, variables: dict[str, str] | None = None) -> str:
@@ -1062,14 +1088,16 @@ async def _post_system_prompt_to_channel(
     system_prompt: dict | str | None,
     *,
     is_resume: bool = False,
+    prompt_changed: bool = False,
     session_id: str | None = None,
 ) -> None:
     """Post the system prompt as a file attachment to the agent's Discord channel.
 
-    On resume, posts a brief note instead of the full prompt.
+    On resume with no prompt change, posts a brief note.
+    On resume with prompt change, posts the full updated prompt.
     On new sessions, posts the appended system prompt as an .md file attachment.
     """
-    if is_resume:
+    if is_resume and not prompt_changed:
         sid_display = f"`{session_id[:8]}…`" if session_id else "unknown"
         await channel.send(f"*System:* 📋 Resumed session {sid_display}")
         return
@@ -1089,7 +1117,10 @@ async def _post_system_prompt_to_channel(
         filename="system-prompt.md",
     )
     sid_suffix = f" — session `{session_id[:8]}…`" if session_id else ""
-    await channel.send(f"*System:* 📋 {label} ({line_count} lines){sid_suffix}", file=file)
+    if prompt_changed:
+        await channel.send(f"*System:* 📋 **System prompt updated** — {label} ({line_count} lines){sid_suffix}", file=file)
+    else:
+        await channel.send(f"*System:* 📋 {label} ({line_count} lines){sid_suffix}", file=file)
 
 
 # --- MCP tools for master agent ---
@@ -2106,14 +2137,17 @@ async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
     """
     session = agents.get(name)
     old_cwd = session.cwd if session else DEFAULT_CWD
-    old_prompt = session.system_prompt if session else SYSTEM_PROMPT
     old_channel_id = session.discord_channel_id if session else None
     old_mcp = getattr(session, "mcp_servers", None)
+    resolved_cwd = cwd or old_cwd
+    # Prefer existing prompt; rebuild from cwd if missing
+    prompt = session.system_prompt if session and session.system_prompt else _make_spawned_agent_system_prompt(resolved_cwd)
     await end_session(name)
     new_session = AgentSession(
         name=name,
-        cwd=cwd or old_cwd,
-        system_prompt=old_prompt,
+        cwd=resolved_cwd,
+        system_prompt=prompt,
+        system_prompt_hash=_compute_prompt_hash(prompt),
         client=None,
         session_id=None,
         discord_channel_id=old_channel_id,
@@ -2347,6 +2381,19 @@ async def wake_agent(session: AgentSession) -> None:
                 if session._log:
                     session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
 
+        # Detect system prompt changes on resume (e.g. SOUL.md or dev_context.md updated between restarts)
+        prompt_changed = False
+        if resume_id and session.system_prompt is not None:
+            current_hash = _compute_prompt_hash(session.system_prompt)
+            if session.system_prompt_hash is not None and current_hash != session.system_prompt_hash:
+                prompt_changed = True
+                log.info(
+                    "System prompt changed for '%s' (old=%s, new=%s)",
+                    session.name, session.system_prompt_hash, current_hash,
+                )
+            # Update stored hash to current
+            session.system_prompt_hash = current_hash
+
         # Post system prompt to Discord on first wake (once per session lifecycle)
         if not session._system_prompt_posted and session.discord_channel_id:
             session._system_prompt_posted = True
@@ -2357,6 +2404,7 @@ async def wake_agent(session: AgentSession) -> None:
                         channel,
                         session.system_prompt,
                         is_resume=bool(resume_id),
+                        prompt_changed=prompt_changed,
                         session_id=session.session_id or resume_id,
                     )
                 except Exception:
@@ -2501,15 +2549,19 @@ async def reconstruct_agents_from_channels() -> int:
                 channel_to_agent[ch.id] = agent_name
                 continue
 
-            cwd, session_id = _parse_channel_topic(ch.topic)
+            cwd, session_id, old_prompt_hash = _parse_channel_topic(ch.topic)
             if cwd is None:
                 log.debug("No cwd in topic for channel #%s, skipping", agent_name)
                 continue
 
+            # Build system prompt so resumed agents get the current prompt text
+            prompt = _make_spawned_agent_system_prompt(cwd)
             session = AgentSession(
                 name=agent_name,
                 client=None,  # sleeping
                 cwd=cwd,
+                system_prompt=prompt,
+                system_prompt_hash=old_prompt_hash,  # Hash from before restart (for change detection)
                 session_id=session_id,
                 discord_channel_id=ch.id,
                 mcp_servers={
@@ -2521,11 +2573,12 @@ async def reconstruct_agents_from_channels() -> int:
             channel_to_agent[ch.id] = agent_name
             reconstructed += 1
             log.info(
-                "Reconstructed agent '%s' from #%s (category=%s, session_id=%s)",
+                "Reconstructed agent '%s' from #%s (category=%s, session_id=%s, prompt_hash=%s)",
                 agent_name,
                 ch.name,
                 cat.name,
                 session_id,
+                old_prompt_hash,
             )
 
     log.info("Reconstructed %d agent(s) from channels", reconstructed)
@@ -3376,7 +3429,8 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
     old_session_id = session.session_id
     old_name = session.name
     old_cwd = session.cwd
-    old_prompt = session.system_prompt
+    old_prompt = session.system_prompt or _make_spawned_agent_system_prompt(session.cwd)
+    old_prompt_hash = session.system_prompt_hash or _compute_prompt_hash(old_prompt)
     old_channel_id = session.discord_channel_id
     old_mcp = session.mcp_servers
     await end_session(old_name)
@@ -3385,6 +3439,7 @@ async def _handle_query_timeout(session: AgentSession, channel) -> None:
         name=old_name,
         cwd=old_cwd,
         system_prompt=old_prompt,
+        system_prompt_hash=old_prompt_hash,
         client=None,
         session_id=old_session_id,
         discord_channel_id=old_channel_id,
@@ -3518,10 +3573,12 @@ async def spawn_agent(
         )
     else:
         # Create agent as sleeping — _run_initial_prompt will wake it if needed
+        prompt = _make_spawned_agent_system_prompt(cwd, packs=packs)
         session = AgentSession(
             name=name,
             cwd=cwd,
-            system_prompt=_make_spawned_agent_system_prompt(cwd, packs=packs),
+            system_prompt=prompt,
+            system_prompt_hash=_compute_prompt_hash(prompt),
             client=None,
             session_id=resume,
             discord_channel_id=channel.id,
@@ -3537,7 +3594,7 @@ async def spawn_agent(
     log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)
 
     # Set initial topic with cwd (session_id added from first StreamEvent during query)
-    desired_topic = _format_channel_topic(cwd, resume)
+    desired_topic = _format_channel_topic(cwd, resume, session.system_prompt_hash)
     if channel.topic != desired_topic:
         log.info("Updating topic on #%s: %r -> %r", channel.name, channel.topic, desired_topic)
         await channel.edit(topic=desired_topic)
@@ -5802,10 +5859,13 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     cwd = os.path.join(AXI_USER_DATA, "agents", agent_name)
     os.makedirs(cwd, exist_ok=True)
 
+    prompt = _make_spawned_agent_system_prompt(cwd)
     session = AgentSession(
         name=agent_name,
         client=None,
         cwd=cwd,
+        system_prompt=prompt,
+        system_prompt_hash=_compute_prompt_hash(prompt),
         discord_channel_id=channel.id,
         mcp_servers={
             "utils": _utils_mcp_server,
@@ -5815,7 +5875,7 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     agents[agent_name] = session
     channel_to_agent[channel.id] = agent_name
 
-    desired_topic = _format_channel_topic(cwd)
+    desired_topic = _format_channel_topic(cwd, prompt_hash=session.system_prompt_hash)
     try:
         await channel.edit(topic=desired_topic)
     except discord.HTTPException as e:
@@ -5934,15 +5994,24 @@ async def on_ready():
     global _bot_start_time
     _bot_start_time = datetime.now(UTC)
 
-    # Load master session_id from previous run (if any) for resume
+    # Load master session data from previous run (if any) for resume
     master_resume_id = None
+    master_old_prompt_hash = None
     try:
         if os.path.isfile(MASTER_SESSION_PATH):
-            master_resume_id = open(MASTER_SESSION_PATH).read().strip() or None
+            raw = open(MASTER_SESSION_PATH).read().strip()
+            if raw:
+                # Support both JSON format (new) and plain session_id string (legacy)
+                if raw.startswith("{"):
+                    data = json.loads(raw)
+                    master_resume_id = data.get("session_id")
+                    master_old_prompt_hash = data.get("prompt_hash")
+                else:
+                    master_resume_id = raw
             if master_resume_id:
-                log.info("Loaded master session_id from %s: %s", MASTER_SESSION_PATH, master_resume_id[:8])
-    except OSError:
-        log.warning("Failed to read master session_id", exc_info=True)
+                log.info("Loaded master session_id from %s: %s (prompt_hash=%s)", MASTER_SESSION_PATH, master_resume_id[:8], master_old_prompt_hash)
+    except (OSError, json.JSONDecodeError):
+        log.warning("Failed to read master session data", exc_info=True)
 
     # Register master agent as sleeping — it will wake on first message
     master_mcp = {"axi": _axi_master_mcp_server}
@@ -5952,6 +6021,7 @@ async def on_ready():
         name=MASTER_AGENT_NAME,
         cwd=DEFAULT_CWD,
         system_prompt=MASTER_SYSTEM_PROMPT,
+        system_prompt_hash=master_old_prompt_hash,  # Hash from before restart (for change detection)
         client=None,
         mcp_servers=master_mcp,
         session_id=master_resume_id,
