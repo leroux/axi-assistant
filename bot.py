@@ -4308,6 +4308,23 @@ _seen_message_ids: set[int] = set()  # dedup guard for Discord duplicate deliver
 
 
 @bot.event
+async def on_error(event_method: str, *args, **kwargs):
+    """Catch all unhandled exceptions in discord.py event handlers.
+
+    By default discord.py silently prints to stderr — route through our logger
+    and #exceptions channel so nothing gets swallowed.
+    """
+    log.exception("Unhandled exception in event handler '%s'", event_method)
+    exc_info = __import__("sys").exc_info()
+    exc = exc_info[1]
+    if exc:
+        exc_str = f"{type(exc).__name__}: {exc}"
+        await send_to_exceptions(
+            f"🔥 Unhandled exception in **{event_method}**:\n```\n{exc_str[:1500]}\n```"
+        )
+
+
+@bot.event
 async def on_message(message):
     """Handle incoming Discord messages.
 
