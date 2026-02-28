@@ -3096,7 +3096,8 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
     log.info("STREAM_END[%s] result=ok msgs=%d flushes=%d", stream_id, _msg_total, _flush_count)
 
     if SHOW_AWAITING_INPUT:
-        await send_system(channel, "Bot has finished responding and is awaiting input.")
+        mentions = " ".join(f"<@{uid}>" for uid in ALLOWED_USER_IDS)
+        await send_system(channel, f"Bot has finished responding and is awaiting input. {mentions}")
 
     return None
 

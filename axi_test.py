@@ -12,6 +12,7 @@ Usage:
     axi-test merge [-m MSG] [--timeout SECS]
     axi-test queue [show|drop] [--all]
     axi-test msg <name> <message> [--timeout SECS]
+    axi-test clean <name> [--force] [--keep-channel] [--keep-branch]
     axi-test logs <name>
 """
 import argparse
@@ -23,6 +24,8 @@ import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+
+import re
 
 import httpx
 from dotenv import dotenv_values
@@ -738,6 +741,83 @@ def api_post(client: httpx.Client, path: str, json_data: dict):
     sys.exit(1)
 
 
+def api_patch(client: httpx.Client, path: str, json_data: dict):
+    """PATCH with rate-limit retry."""
+    for attempt in range(3):
+        resp = client.patch(path, json=json_data)
+        if resp.status_code in (200, 204):
+            return resp.json() if resp.status_code == 200 else None
+        if resp.status_code == 429:
+            retry_after = float(resp.json().get("retry_after", 1.0))
+            time.sleep(retry_after)
+            continue
+        if resp.status_code >= 500 and attempt < 2:
+            time.sleep(2 ** attempt)
+            continue
+        print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
+        sys.exit(1)
+    print("Error: Exhausted retries.", file=sys.stderr)
+    sys.exit(1)
+
+
+def api_delete(client: httpx.Client, path: str):
+    """DELETE with rate-limit retry."""
+    for attempt in range(3):
+        resp = client.delete(path)
+        if resp.status_code in (200, 204):
+            return
+        if resp.status_code == 429:
+            retry_after = float(resp.json().get("retry_after", 1.0))
+            time.sleep(retry_after)
+            continue
+        if resp.status_code >= 500 and attempt < 2:
+            time.sleep(2 ** attempt)
+            continue
+        print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
+        sys.exit(1)
+    print("Error: Exhausted retries.", file=sys.stderr)
+    sys.exit(1)
+
+
+def _get_prime_env(main_repo: str) -> dict:
+    """Read Prime bot's .env for Discord token and guild ID."""
+    env_path = os.path.join(main_repo, ".env")
+    return dotenv_values(env_path) if os.path.isfile(env_path) else {}
+
+
+def _normalize_channel_name(name: str) -> str:
+    """Normalize an agent name to a Discord channel name."""
+    name = name.lower().replace(" ", "-")
+    return re.sub(r"[^a-z0-9\-_]", "", name)
+
+
+def _find_channel_by_name(client: httpx.Client, guild_id: str,
+                          name: str) -> dict | None:
+    """Find a text channel by name in the Active category."""
+    normalized = _normalize_channel_name(name)
+    channels = api_get(client, f"/guilds/{guild_id}/channels")
+    # Find Active category ID
+    active_cat_id = None
+    for ch in channels:
+        if ch.get("type") == 4 and ch.get("name", "").lower() == "active":
+            active_cat_id = ch["id"]
+            break
+    for ch in channels:
+        if (ch.get("name") == normalized and ch.get("type") == 0
+                and (active_cat_id is None or ch.get("parent_id") == active_cat_id)):
+            return ch
+    return None
+
+
+def _find_killed_category(client: httpx.Client, guild_id: str) -> str | None:
+    """Find the Killed category ID in a guild."""
+    channels = api_get(client, f"/guilds/{guild_id}/channels")
+    for ch in channels:
+        if ch.get("type") == 4 and ch.get("name", "").lower() == "killed":
+            return ch["id"]
+    return None
+
+
 def find_master_channel(client: httpx.Client, guild_id: str) -> str:
     """Find the axi-master channel (or first text channel in Active category)."""
     channels = api_get(client, f"/guilds/{guild_id}/channels")
@@ -1027,6 +1107,118 @@ def cmd_cleanup(args):
         print(f"Cleaned up {cleaned} orphan service(s)")
 
 
+def cmd_clean(args):
+    """Clean up a worktree: check for uncommitted changes, remove worktree, kill channel."""
+    name = args.name
+    worktree_path = os.path.join(TESTS_DIR, name)
+    force = args.force
+
+    if not os.path.isdir(worktree_path):
+        print(f"Error: Worktree not found: {worktree_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # 1. Check for uncommitted changes
+    result = subprocess.run(
+        ["git", "-C", worktree_path, "status", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    if result.stdout.strip():
+        if not force:
+            print("Error: Worktree has uncommitted changes:", file=sys.stderr)
+            for line in result.stdout.strip().splitlines():
+                print(f"  {line}", file=sys.stderr)
+            print(f"\nUse --force to clean anyway", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print("Warning: Discarding uncommitted changes (--force)")
+
+    # 2. Get branch name before removing worktree
+    branch = get_worktree_branch(worktree_path)
+
+    # 3. Stop service and release slot if reserved
+    config = load_config()
+    with _flock(SLOTS_LOCK):
+        slots = _load_slots(config)
+        if name in slots:
+            if is_instance_running(name):
+                print(f"Stopping axi-test@{name}...")
+                subprocess.run(
+                    ["systemctl", "--user", "stop", f"axi-test@{name}"],
+                    capture_output=True, env=_systemctl_env(),
+                )
+            env_path = os.path.join(worktree_path, ".env")
+            if os.path.isfile(env_path):
+                os.remove(env_path)
+            del slots[name]
+            _write_slots(slots)
+            print("Released slot reservation")
+
+    # 4. Remove git worktree
+    main_repo_result = subprocess.run(
+        ["git", "-C", worktree_path, "rev-parse", "--path-format=absolute",
+         "--git-common-dir"],
+        capture_output=True, text=True,
+    )
+    if main_repo_result.returncode != 0:
+        print(f"Error: Cannot determine main repo from worktree", file=sys.stderr)
+        sys.exit(1)
+    main_repo = os.path.dirname(main_repo_result.stdout.strip())
+
+    remove_cmd = ["git", "-C", main_repo, "worktree", "remove", worktree_path]
+    if force:
+        remove_cmd.append("--force")
+    result = subprocess.run(remove_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error removing worktree: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Removed worktree: {worktree_path}")
+
+    # 5. Delete branch if it was a feature branch (unless --keep-branch)
+    if not args.keep_branch and branch and branch.startswith("feature/"):
+        # Check if branch is merged into main
+        result = subprocess.run(
+            ["git", "-C", main_repo, "branch", "--merged", "main"],
+            capture_output=True, text=True,
+        )
+        merged_branches = [b.strip().removeprefix("* ") for b in result.stdout.splitlines()]
+        if branch in merged_branches:
+            subprocess.run(
+                ["git", "-C", main_repo, "branch", "-d", branch],
+                capture_output=True, text=True,
+            )
+            print(f"Deleted merged branch: {branch}")
+        else:
+            print(f"Kept unmerged branch: {branch}")
+
+    # 6. Kill Discord channel (move to Killed category)
+    if not args.keep_channel:
+        prime_env = _get_prime_env(main_repo)
+        token = prime_env.get("DISCORD_TOKEN")
+        guild_id = prime_env.get("DISCORD_GUILD_ID")
+        if token and guild_id:
+            with httpx.Client(
+                base_url=API_BASE,
+                headers={"Authorization": f"Bot {token}"},
+                timeout=httpx.Timeout(10.0),
+            ) as client:
+                ch = _find_channel_by_name(client, guild_id, name)
+                if ch:
+                    killed_cat = _find_killed_category(client, guild_id)
+                    if killed_cat:
+                        api_patch(client, f"/channels/{ch['id']}",
+                                  {"parent_id": killed_cat})
+                        print(f"Moved channel #{ch['name']} to Killed")
+                    else:
+                        api_delete(client, f"/channels/{ch['id']}")
+                        print(f"Deleted channel #{ch['name']}")
+                else:
+                    print(f"No Discord channel found for '{name}'")
+        else:
+            print("Warning: Could not read Prime .env — skipping channel cleanup")
+
+    print(f"Clean complete: {name}")
+
+
 def cmd_logs(args):
     os.execvp("journalctl", [
         "journalctl", "--user", "-u", f"axi-test@{args.name}", "-f",
@@ -1083,6 +1275,17 @@ def main():
                           help="Action: show (default) or drop")
     p_queue.add_argument("--all", action="store_true", help="Drop all entries (with 'drop')")
     p_queue.set_defaults(func=cmd_queue)
+
+    # clean
+    p_clean = sub.add_parser("clean", help="Remove worktree, release slot, kill channel")
+    p_clean.add_argument("name", help="Worktree/agent name")
+    p_clean.add_argument("--force", action="store_true",
+                          help="Clean even with uncommitted changes")
+    p_clean.add_argument("--keep-channel", action="store_true",
+                          help="Don't move Discord channel to Killed")
+    p_clean.add_argument("--keep-branch", action="store_true",
+                          help="Don't delete merged feature branch")
+    p_clean.set_defaults(func=cmd_clean)
 
     # cleanup
     p_cleanup = sub.add_parser("cleanup", help="Stop orphaned test instance services")
