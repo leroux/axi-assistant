@@ -5,9 +5,9 @@ from fixit import Invalid, LintRule, Valid
 
 
 class NoBotImports(LintRule):
-    """Flag imports from bot.py — it is the top-level orchestrator.
+    """Flag imports from main.py — it is the top-level orchestrator.
 
-    bot.py sits at the top of the dependency DAG and should never be imported
+    main.py sits at the top of the dependency DAG and should never be imported
     by library modules. Allowing such imports would create circular dependencies.
     """
 
@@ -17,39 +17,39 @@ class NoBotImports(LintRule):
         Valid("import asyncio"),
     ]
     INVALID = [
-        Invalid("from axi.bot import check_schedules"),
-        Invalid("from axi import bot"),
-        Invalid("import axi.bot"),
+        Invalid("from axi.main import check_schedules"),
+        Invalid("from axi import main"),
+        Invalid("import axi.main"),
     ]
     MESSAGE = (
-        "Do not import from bot.py — it is the top-level orchestrator. "
+        "Do not import from main.py — it is the top-level orchestrator. "
         "Move the needed code to a library module instead."
     )
 
     def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
-        # from axi.bot import ...
+        # from axi.main import ...
         if (
             isinstance(node.module, cst.Attribute)
-            and node.module.attr.value == "bot"
+            and node.module.attr.value == "main"
             and isinstance(node.module.value, cst.Name)
             and node.module.value.value == "axi"
         ):
             self.report(node)
-        # from axi import bot
+        # from axi import main
         if isinstance(node.module, cst.Name) and node.module.value == "axi":
             if not isinstance(node.names, cst.ImportStar):
                 for alias in node.names:
-                    if isinstance(alias.name, cst.Name) and alias.name.value == "bot":
+                    if isinstance(alias.name, cst.Name) and alias.name.value == "main":
                         self.report(node)
 
     def visit_Import(self, node: cst.Import) -> None:
         if isinstance(node.names, cst.ImportStar):
             return
         for alias in node.names:
-            # import axi.bot
+            # import axi.main
             if (
                 isinstance(alias.name, cst.Attribute)
-                and alias.name.attr.value == "bot"
+                and alias.name.attr.value == "main"
                 and isinstance(alias.name.value, cst.Name)
                 and alias.name.value.value == "axi"
             ):

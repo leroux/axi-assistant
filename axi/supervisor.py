@@ -137,7 +137,7 @@ def run_bot() -> int:
     global _bot_proc
     log_path = DIR / LOG_FILE
     proc = subprocess.Popen(
-        ["uv", "run", "python", "-m", "axi.bot"],
+        ["uv", "run", "python", "-m", "axi.main"],
         cwd=DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
