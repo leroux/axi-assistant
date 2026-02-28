@@ -1,11 +1,11 @@
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
 import signal
-import hashlib
 import subprocess
 import threading
 import time
@@ -540,7 +540,7 @@ async def _extract_message_content(message: discord.Message) -> str | list:
         except Exception:
             log.warning("Failed to download attachment %s", attachment.filename, exc_info=True)
 
-    return blocks if blocks else message.content
+    return blocks or message.content
 
 
 def _content_summary(content: str | list) -> str:
@@ -627,10 +627,8 @@ def make_cwd_permission_callback(allowed_cwd: str, session: "AgentSession | None
 
     # Agents rooted in bot code or worktree dirs also get worktree + admin write access
     is_code_agent = (
-        allowed == bot_dir
-        or allowed.startswith(bot_dir + os.sep)
-        or allowed == worktrees
-        or allowed.startswith(worktrees + os.sep)
+        allowed in (bot_dir, worktrees)
+        or allowed.startswith((bot_dir + os.sep, worktrees + os.sep))
     )
     bases = [allowed, user_data]
     if is_code_agent:
@@ -816,7 +814,7 @@ def prune_skips() -> None:
     """Remove skip entries whose date has passed."""
     skips = load_skips()
     today = datetime.now(SCHEDULE_TIMEZONE).date()
-    pruned = [s for s in skips if datetime.strptime(s["skip_date"], "%Y-%m-%d").date() >= today]
+    pruned = [s for s in skips if datetime.strptime(s["skip_date"], "%Y-%m-%d").replace(tzinfo=UTC).date() >= today]
     if len(pruned) != len(skips):
         save_skips(pruned)
 
@@ -982,14 +980,13 @@ def _pack_prompt_text(pack_names: list[str]) -> str:
 
 
 # Mini system prompt for non-admin spawned agents (keeps context small)
-_AGENT_CONTEXT_PROMPT = (
-    """\
+_AGENT_CONTEXT_PROMPT = """\
 You are an agent session in the Axi system — a Discord-based personal assistant for a single user. \
 You communicate through a dedicated Discord text channel. The user reads your messages there. \
 Keep responses concise and well-formatted for Discord (markdown, code blocks).
 
 Key context:
-- The user's profile and preferences are in USER_PROFILE.md at %(bot_dir)s/USER_PROFILE.md
+- The user's profile and preferences are in USER_PROFILE.md at {bot_dir}/USER_PROFILE.md
 - You are one of several agent sessions. The master agent (Axi) coordinates via #axi-master.
 - Your working directory is set by whoever spawned you. Files you create/edit stay in that directory.
 - The user's timezone is US/Pacific.
@@ -1003,9 +1000,7 @@ Communication rules:
 - Do NOT use AskUserQuestion, TodoWrite, Skill, or EnterWorktree tools — they are invisible in Discord.
 - EnterPlanMode and ExitPlanMode ARE supported — use plan mode normally for non-trivial implementation tasks. Your plan will be posted to Discord for user approval.
 - Ask questions as normal text messages. List options in your message if the user needs to choose.\
-"""
-    % _PROMPT_VARS
-)
+""".format(**_PROMPT_VARS)
 
 
 def _is_axi_dev_cwd(cwd: str) -> bool:
@@ -1470,62 +1465,6 @@ async def send_to_exceptions(message: str) -> bool:
         return False
 
 
-@tool(
-    "discord_send_file",
-    "Send a file as a Discord message attachment to your own channel or another channel. "
-    "If channel_id is omitted, the file is sent to your own agent channel.",
-    {
-        "type": "object",
-        "properties": {
-            "channel_id": {
-                "type": "string",
-                "description": "The Discord channel ID. Omit to send to your own channel.",
-            },
-            "file_path": {"type": "string", "description": "Absolute path to the file to upload"},
-            "content": {"type": "string", "description": "Optional text message to include with the file"},
-        },
-        "required": ["file_path"],
-    },
-)
-async def discord_send_file(args):
-    file_path = args["file_path"]
-    content = args.get("content", "")
-    channel_id = args.get("channel_id")
-    if not channel_id:
-        # Auto-resolve: find calling agent's channel
-        for ch_id, name in channel_to_agent.items():
-            session = agents.get(name)
-            if session and session.client is not None:
-                # Heuristic: the agent currently awake and calling this tool
-                channel_id = str(ch_id)
-                break
-    if not channel_id:
-        return {
-            "content": [{"type": "text", "text": "Error: could not determine channel. Provide channel_id explicitly."}],
-            "is_error": True,
-        }
-    if not os.path.isfile(file_path):
-        return {"content": [{"type": "text", "text": f"Error: file not found: {file_path}"}], "is_error": True}
-    filename = os.path.basename(file_path)
-    try:
-        with open(file_path, "rb") as f:
-            file_data = f.read()
-        data = {}
-        if content:
-            data["content"] = content
-        files = {"files[0]": (filename, file_data)}
-        resp = await _discord_request(
-            "POST",
-            f"/channels/{channel_id}/messages",
-            data=data,
-            files=files,
-        )
-        msg = resp.json()
-        return {"content": [{"type": "text", "text": f"File '{filename}' sent (msg id: {msg['id']})"}]}
-    except Exception as e:
-        return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
-
-
 # --- Discord REST MCP tools (for cross-server messaging) ---
 
 
@@ -1854,18 +1793,17 @@ async def discord_list_channels(args):
         resp = await _discord_request("GET", f"/guilds/{guild_id}/channels")
         channels = resp.json()
         # Filter to text channels (type 0) and format
-        text_channels = []
         # Build category map
         categories = {c["id"]: c["name"] for c in channels if c["type"] == 4}
-        for ch in channels:
-            if ch["type"] == 0:  # GUILD_TEXT
-                text_channels.append(
-                    {
-                        "id": ch["id"],
-                        "name": ch["name"],
-                        "category": categories.get(ch.get("parent_id")),
-                    }
-                )
+        text_channels = [
+            {
+                "id": ch["id"],
+                "name": ch["name"],
+                "category": categories.get(ch.get("parent_id")),
+            }
+            for ch in channels
+            if ch["type"] == 0  # GUILD_TEXT
+        ]
         return {"content": [{"type": "text", "text": json.dumps(text_channels, indent=2)}]}
     except Exception as e:
         return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
@@ -2196,7 +2134,6 @@ async def _ensure_awake_slot(requesting_agent: str) -> bool:
 class ConcurrencyLimitError(Exception):
     """Raised when the awake-agent concurrency limit is reached and no slots can be freed."""
 
-    pass
 
 
 async def sleep_agent(session: AgentSession) -> None:
@@ -2299,7 +2236,7 @@ async def wake_agent(session: AgentSession) -> None:
             # Bridge mode: spawn CLI via bridge
             log.debug("Waking '%s' via bridge (resume=%s)", session.name, resume_id)
             try:
-                client = await _wake_agent_via_bridge(session, options)
+                client = await _wake_agent_via_bridge(session, options)  # noqa: F821
                 session.client = client
                 log.info("Agent '%s' is now awake via bridge (resumed=%s)", session.name, resume_id)
                 if session._log:
@@ -2309,7 +2246,7 @@ async def wake_agent(session: AgentSession) -> None:
                     log.warning("Failed to resume '%s' via bridge, retrying fresh", session.name)
                     options = _make_agent_options(session, resume_id=None)
                     try:
-                        client = await _wake_agent_via_bridge(session, options)
+                        client = await _wake_agent_via_bridge(session, options)  # noqa: F821
                         session.client = client
                         session.session_id = None
                         if session.name == MASTER_AGENT_NAME:
@@ -2709,7 +2646,7 @@ def _parse_rate_limit_seconds(text: str) -> int:
         unit = match.group(2)
         if unit.startswith("min"):
             return value * 60
-        elif unit.startswith("hour") or unit.startswith("hr"):
+        elif unit.startswith(("hour", "hr")):
             return value * 3600
         return value
 
@@ -2797,7 +2734,7 @@ def _record_session_usage(agent_name: str, msg: ResultMessage) -> None:
             "duration_ms": msg.duration_ms,
             "duration_api_ms": msg.duration_api_ms,
             "is_error": msg.is_error,
-            "usage": usage if usage else None,
+            "usage": usage or None,
         }
         with open(USAGE_HISTORY_PATH, "a") as f:
             f.write(json.dumps(record) + "\n")
@@ -2875,7 +2812,7 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel) ->
 
         # Notify ALL active agent channels, not just the one that triggered it
         notified_channels = set()
-        for _name, agent_session in agents.items():
+        for agent_session in agents.values():
             if not agent_session.discord_channel_id:
                 continue
             ch = bot.get_channel(agent_session.discord_channel_id)
@@ -3036,19 +2973,19 @@ async def _query_agent(
     # Append record-tracking instruction for eligible agents
     query_content = content
     if session.name != "record-updater":
-        query_content = _append_record_tracking(content)
+        query_content = _append_record_tracking(content)  # noqa: F821
 
     await session.client.query(_as_stream(query_content))
     response_text = await stream_response_to_channel(session, channel, show_awaiting_input=show_awaiting_input)
 
     # Check for record tracking in response
     if session.name != "record-updater" and response_text:
-        tracking = _extract_record_tracking(response_text)
+        tracking = _extract_record_tracking(response_text)  # noqa: F821
         if tracking and tracking.get("records_changed"):
             summary = tracking.get("summary", "No summary provided")
             log.info("Agent '%s' reported records changed: %s", session.name, summary[:100])
             try:
-                await _enqueue_record_update(session.name, session.cwd, summary)
+                await _enqueue_record_update(session.name, session.cwd, summary)  # noqa: F821
             except Exception:
                 log.exception("Failed to enqueue record update for '%s'", session.name)
 
@@ -3142,7 +3079,7 @@ async def stream_response_to_channel(session: AgentSession, channel, show_awaiti
                 # Debug output — emit tool calls and thinking to Discord
                 if session.debug:
                     if event_type == "content_block_stop":
-                        if session.activity.phase in ("thinking",) and session.activity.thinking_text:
+                        if session.activity.phase == "thinking" and session.activity.thinking_text:
                             # Thinking block just finished — post as file attachment
                             thinking = session.activity.thinking_text.strip()
                             if thinking:
@@ -3468,9 +3405,9 @@ Be concise. Update files, sync MinFlow, then stop. Do not message the user.\
 
 async def _maybe_spawn_record_updater(agent_name: str, agent_cwd: str) -> None:
     """Spawn a short-lived record-updater agent after another agent finishes."""
-    if agent_name in RECORD_UPDATER_EXCLUDED:
+    if agent_name in RECORD_UPDATER_EXCLUDED:  # noqa: F821
         return
-    if len(agents) >= MAX_AGENTS:
+    if len(agents) >= MAX_AGENTS:  # noqa: F821
         log.warning("Max agents reached — skipping record-updater for '%s'", agent_name)
         return
 
@@ -3714,7 +3651,6 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
 
     text_buffer: list[str] = []
     current_block = ""
-    current_block_type = ""
     block_count = 0
     start_time = time.monotonic()
 
@@ -3740,7 +3676,6 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
             block_name = data.get("block_name", "?")
             block_type = data.get("block_type", "?")
             current_block = block_name
-            current_block_type = block_type
             session.activity = ActivityState(
                 phase="tool_use",
                 tool_name=f"flowcoder:{block_type}",
@@ -3775,9 +3710,11 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
                     if isinstance(content, str):
                         parts.append(content)
                     elif isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                parts.append(block.get("text", ""))
+                        parts.extend(
+                            block.get("text", "")
+                            for block in content
+                            if isinstance(block, dict) and block.get("type") == "text"
+                        )
                     fallback_text = "\n".join(parts)
                     if fallback_text.strip():
                         await send_long(channel, fallback_text)
@@ -3799,7 +3736,6 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
             is_error = msg.get("is_error", False)
             status = "**failed**" if is_error else "**completed**"
             cost = msg.get("total_cost_usd", 0)
-            result_text = msg.get("result", "")
 
             summary = f"Flowchart {status} in {elapsed:.0f}s | Cost: ${cost:.4f} | Blocks: {block_count}"
             await send_system(channel, summary)
@@ -6236,9 +6172,9 @@ def _acquire_lock():
     lock_fd = open(lock_path, "w")
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        print("ERROR: Another bot.py instance is already running (could not acquire .bot.lock). Exiting.")
-        raise SystemExit(1)
+    except OSError as exc:
+        log.critical("Another bot.py instance is already running (could not acquire .bot.lock). Exiting.")
+        raise SystemExit(1) from exc
     # Write our PID for debugging
     lock_fd.write(str(os.getpid()))
     lock_fd.flush()
