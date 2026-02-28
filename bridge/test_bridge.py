@@ -763,9 +763,7 @@ class TestBridgeTransportReadMessages:
             await transport.connect()
             await asyncio.wait_for(transport.subscribe(), timeout=3)
 
-            msgs = []
-            async for data in transport.read_messages():
-                msgs.append(data)
+            msgs = [data async for data in transport.read_messages()]
 
             assert len(msgs) >= 1
             assert transport.cli_exited is True
@@ -2308,7 +2306,7 @@ class TestReconnectScenarios:
 
             all_ns = []
 
-            for cycle in range(3):
+            for _cycle in range(3):
                 q = conn.register_agent("multi")
                 sub = await asyncio.wait_for(conn.send_command("subscribe", name="multi"), timeout=3)
 
@@ -2642,7 +2640,6 @@ class TestUnlimitedAgentSpawning:
 class _FakeClient:
     """Stands in for ClaudeSDKClient — just needs to be truthy."""
 
-    pass
 
 
 class _FakeSession:
@@ -2659,7 +2656,6 @@ class _FakeSession:
 class ConcurrencyLimitError(Exception):
     """Mirrors bot.py's ConcurrencyLimitError."""
 
-    pass
 
 
 MAX_AWAKE_AGENTS = 5

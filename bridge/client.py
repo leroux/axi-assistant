@@ -238,7 +238,6 @@ class BridgeTransport:
 
     async def end_input(self) -> None:
         """Not needed for bridge mode — CLI stdin stays open for multi-turn."""
-        pass
 
     @property
     def cli_exited(self) -> bool:

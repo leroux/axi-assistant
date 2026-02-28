@@ -42,13 +42,13 @@ def make_conn() -> MagicMock:
 
 def make_proc(conn=None, **kwargs) -> BridgeFlowcoderProcess:
     """Build a BridgeFlowcoderProcess with mock conn."""
-    defaults = dict(
-        bridge_name="test-agent:flowcoder",
-        conn=conn or make_conn(),
-        command="test-cmd",
-        args="arg1",
-        cwd="/tmp/test",
-    )
+    defaults = {
+        "bridge_name": "test-agent:flowcoder",
+        "conn": conn or make_conn(),
+        "command": "test-cmd",
+        "args": "arg1",
+        "cwd": "/tmp/test",
+    }
     defaults.update(kwargs)
     return BridgeFlowcoderProcess(**defaults)
 
@@ -163,9 +163,7 @@ class TestBridgeMessages:
         await q.put(StdoutMsg(name="test-agent:flowcoder", data={"type": "block_complete", "id": "1"}))
         await q.put(ExitMsg(name="test-agent:flowcoder", code=0))
 
-        collected = []
-        async for msg in proc.messages():
-            collected.append(msg)
+        collected = [msg async for msg in proc.messages()]
 
         assert len(collected) == 2
         assert collected[0] == {"type": "block_start", "id": "1"}
@@ -182,9 +180,7 @@ class TestBridgeMessages:
 
         await q.put(ExitMsg(name="test-agent:flowcoder", code=1))
 
-        collected = []
-        async for msg in proc.messages():
-            collected.append(msg)
+        collected = [msg async for msg in proc.messages()]
 
         assert collected == []
         assert not proc.is_running
@@ -200,9 +196,7 @@ class TestBridgeMessages:
 
         await q.put(None)
 
-        collected = []
-        async for msg in proc.messages():
-            collected.append(msg)
+        collected = [msg async for msg in proc.messages()]
 
         assert collected == []
         assert not proc.is_running
@@ -220,9 +214,7 @@ class TestBridgeMessages:
         await q.put(StdoutMsg(name="test-agent:flowcoder", data={"type": "ok"}))
         await q.put(ExitMsg(name="test-agent:flowcoder", code=0))
 
-        collected = []
-        async for msg in proc.messages():
-            collected.append(msg)
+        collected = [msg async for msg in proc.messages()]
 
         assert len(collected) == 1
         assert collected[0] == {"type": "ok"}

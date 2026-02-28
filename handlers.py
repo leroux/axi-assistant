@@ -31,22 +31,18 @@ class AgentHandler(ABC):
     @abstractmethod
     def is_awake(self, session: AgentSession) -> bool:
         """Check if agent is ready to process messages."""
-        pass
 
     @abstractmethod
     def is_processing(self, session: AgentSession) -> bool:
         """Check if agent has active work."""
-        pass
 
     @abstractmethod
     async def wake(self, session: AgentSession) -> None:
         """Activate/initialize the agent. May raise ConcurrencyLimitError or other exceptions."""
-        pass
 
     @abstractmethod
     async def sleep(self, session: AgentSession) -> None:
         """Deactivate/cleanup the agent."""
-        pass
 
     @abstractmethod
     async def process_message(
@@ -56,7 +52,6 @@ class AgentHandler(ABC):
         channel: discord.TextChannel,
     ) -> None:
         """Process a user message. Raise RuntimeError if unable."""
-        pass
 
 
 class ClaudeCodeHandler(AgentHandler):

@@ -3,4 +3,3 @@ repos:
     rev: v0.15.4
     hooks:
       - id: ruff
-        args: [--force-exclude]

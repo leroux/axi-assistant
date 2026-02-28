@@ -66,11 +66,18 @@ ignore = [
     "SIM102", # collapsible-if — nested ifs often clearer than combined conditions
     "RET505", # unnecessary else after return — explicit else is often clearer
     "RET506", # unnecessary elif after raise — same rationale
+    "TC002",  # move third-party import to TYPE_CHECKING — too much churn for this codebase
+    "TC003",  # move stdlib import to TYPE_CHECKING — same rationale
+    "PT018",  # compound assertions — runtime guards, not test assertions
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"test_*.py" = ["F841"]  # unused variables common in test setup
-"axi_test.py" = ["T20"]  # CLI tool — print() is expected
+"test_*.py" = ["F841", "T20", "PT012"]  # test files: unused vars, print, complex pytest.raises
+"axi_test.py" = ["T20"]     # CLI tool — print() is expected
+"discord_query.py" = ["T20"]  # CLI tool
+"wait_for_message.py" = ["T20"]  # CLI tool
+"bridge/server.py" = ["T20"]  # CLI entrypoint
+"lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
 
 [tool.ruff.lint.isort]
 known-first-party = ["bot", "supervisor", "handlers", "schedule_tools", "shutdown", "flowcoder", "bridge"]
