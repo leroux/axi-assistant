@@ -8,7 +8,7 @@
     "config.py",
     "axi_types.py",
     "prompts.py",
-    "agents.py",
+    "agents/",
     "tools.py",
     "supervisor.py",
     "axi_test.py",

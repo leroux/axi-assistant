@@ -1,4 +1,3 @@
-# pyright: reportUnusedFunction=false
 """Centralized configuration for the Axi bot.
 
 Leaf module — no project imports. All env vars, paths, constants, logging setup,

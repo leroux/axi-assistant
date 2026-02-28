@@ -1,4 +1,3 @@
-# pyright: reportUnusedFunction=false
 """Discord bot orchestrator — event handlers, slash commands, and scheduler.
 
 Thin layer that wires Discord events to agent lifecycle functions in agents.py.
