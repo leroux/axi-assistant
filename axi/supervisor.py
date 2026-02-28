@@ -97,14 +97,17 @@ def _kill_bridge():
 
 
 def ensure_default_files():
+    user_data = Path(os.environ.get("AXI_USER_DATA", Path.home() / "axi-user-data"))
+    user_data.mkdir(parents=True, exist_ok=True)
+
     if not (DIR / "USER_PROFILE.md").exists():
         (DIR / "USER_PROFILE.md").write_text(
             "# User Profile\n\nThis is a currently blank user profile. It will be updated over time.\n"
         )
-    if not (DIR / "schedules.json").exists():
-        (DIR / "schedules.json").write_text("[]\n")
-    if not (DIR / "schedule_history.json").exists():
-        (DIR / "schedule_history.json").write_text("[]\n")
+    if not (user_data / "schedules.json").exists():
+        (user_data / "schedules.json").write_text("[]\n")
+    if not (user_data / "schedule_history.json").exists():
+        (user_data / "schedule_history.json").write_text("[]\n")
 
 
 def git(*args: str) -> subprocess.CompletedProcess[str]:

@@ -153,7 +153,7 @@ async def on_message(message: discord.Message) -> None:
         if channels.killed_category and channel.category_id == channels.killed_category.id:
             await agents.send_system(
                 channel,
-                "This agent has been killed. Use `/spawn` to create a new one.",
+                "This agent has been killed. Ask the master agent to spawn a new one.",
             )
         return
 

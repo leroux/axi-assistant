@@ -236,8 +236,9 @@ class ShutdownCoordinator:
         (used when an agent triggers its own restart to avoid deadlocking on
         itself).
 
-        There is **no hard timeout** on the wait. Agents get as much time as
-        they need. The user can call force_shutdown() to bail out.
+        There is a 5-minute hard timeout on the wait. If agents are still
+        busy after that, shutdown proceeds anyway. The user can also call
+        force_shutdown() to bail out sooner.
 
         In bridge mode, busy agents are not waited for — they keep running
         in the bridge process and will be reconnected after restart.
