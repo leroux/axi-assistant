@@ -3359,8 +3359,6 @@ async def spawn_agent(
             name=name,
             agent_type="flowcoder",
             cwd=cwd,
-            system_prompt=None,
-            client=None,
             session_id=None,
             discord_channel_id=channel.id,
             mcp_servers=None,

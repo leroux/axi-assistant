@@ -85,3 +85,4 @@ indent-style = "space"
 
 [tool.fixit]
 enable = [".lint"]
+disable = ["fixit.rules"]

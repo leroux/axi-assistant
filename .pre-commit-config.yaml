@@ -3,3 +3,11 @@ repos:
     rev: v0.15.4
     hooks:
       - id: ruff
+  - repo: local
+    hooks:
+      - id: fixit
+        name: fixit
+        entry: python -m fixit lint
+        language: system
+        types: [python]
+        pass_filenames: true
