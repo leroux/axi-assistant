@@ -11,14 +11,14 @@ from typing import TYPE_CHECKING, Any
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 import config
-from agents._discord import send_system
-from agents._flowcoder import _stream_flowcoder_to_channel
-from agents._lifecycle import _create_transport
-from agents._messaging import process_message_queue
-from agents._permissions import make_cwd_permission_callback
-from agents._sdk import make_stderr_callback
-from agents._state import agents
-from agents._streaming import stream_response_to_channel
+from agents.discord_helpers import send_system
+from agents.flowcoder import _stream_flowcoder_to_channel
+from agents.lifecycle import _create_transport
+from agents.messaging import process_message_queue
+from agents.permissions import make_cwd_permission_callback
+from agents.sdk import make_stderr_callback
+from agents.state import agents
+from agents.streaming import stream_response_to_channel
 from axi_types import ActivityState, AgentSession
 from bridge import ensure_bridge
 from channels import get_agent_channel
@@ -34,17 +34,17 @@ log = logging.getLogger("axi")
 
 async def connect_bridge() -> None:
     """Connect to the agent bridge and schedule reconnections for running agents."""
-    from agents import _state
+    from agents import state
 
     try:
-        _state.bridge_conn = await ensure_bridge(config.BRIDGE_SOCKET_PATH, timeout=10.0)
+        state.bridge_conn = await ensure_bridge(config.BRIDGE_SOCKET_PATH, timeout=10.0)
         log.info("Bridge connection established")
     except Exception:
         log.exception("Failed to connect to bridge — agents will use direct subprocess mode")
-        _state.bridge_conn = None
+        state.bridge_conn = None
         return
 
-    bridge_conn = _state.bridge_conn
+    bridge_conn = state.bridge_conn
 
     try:
         result = await bridge_conn.send_command("list")
@@ -110,7 +110,7 @@ async def connect_bridge() -> None:
 
 async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any]) -> None:
     """Reconnect a single agent to the bridge and drain any buffered output."""
-    from agents._state import bridge_conn
+    from agents.state import bridge_conn
 
     try:
         async with session.query_lock:
@@ -202,7 +202,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
 
 async def _reconnect_flowcoder(session: AgentSession, bridge_name: str, bridge_info: dict[str, Any]) -> None:
     """Reconnect to a flowcoder engine that survived bot.py restart."""
-    from agents._state import bridge_conn
+    from agents.state import bridge_conn
 
     log.info("Reconnecting flowcoder '%s' for session '%s'", bridge_name, session.name)
     try:

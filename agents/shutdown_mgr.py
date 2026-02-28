@@ -6,9 +6,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from agents._discord import send_system
-from agents._lifecycle import sleep_agent
-from agents._state import agents
+from agents.discord_helpers import send_system
+from agents.lifecycle import sleep_agent
+from agents.state import agents
 from channels import get_agent_channel, get_master_channel
 from shutdown import ShutdownCoordinator, exit_for_restart, kill_supervisor
 
@@ -46,8 +46,8 @@ def init_shutdown_coordinator() -> None:
 
     Called once from on_ready after all helpers are defined.
     """
-    import agents._state as _state
-    from agents._state import _bot, bridge_conn
+    import agents.state as _state
+    from agents.state import _bot, bridge_conn
 
     assert _bot is not None
 

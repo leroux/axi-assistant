@@ -13,7 +13,7 @@ import httpx
 from discord import TextChannel
 
 import config
-from agents._state import agents, channel_to_agent
+from agents.state import agents, channel_to_agent
 from channels import ensure_agent_channel
 
 if TYPE_CHECKING:
@@ -46,7 +46,7 @@ async def remove_reaction(message: discord.Message | None, emoji: str) -> None:
     if message is None:
         return
     try:
-        from agents._state import _bot as bot_ref
+        from agents.state import _bot as bot_ref
 
         assert bot_ref is not None
         assert bot_ref.user is not None

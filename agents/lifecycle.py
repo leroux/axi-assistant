@@ -17,10 +17,10 @@ from discord import TextChannel
 
 import channels as _channels_mod
 import config
-from agents._discord import add_reaction, send_system
-from agents._permissions import make_cwd_permission_callback
-from agents._sdk import make_stderr_callback
-from agents._state import _wake_lock, agents, channel_to_agent
+from agents.discord_helpers import add_reaction, send_system
+from agents.permissions import make_cwd_permission_callback
+from agents.sdk import make_stderr_callback
+from agents.state import _wake_lock, agents, channel_to_agent
 from axi_types import ActivityState, AgentSession, ConcurrencyLimitError, MessageContent
 from bridge import BridgeTransport
 from channels import (
@@ -59,7 +59,7 @@ def is_processing(session: AgentSession) -> bool:
     return session.query_lock.locked()
 
 
-def _reset_session_activity(session: AgentSession) -> None:  # pyright: ignore[reportUnusedFunction]  # called from _messaging
+def _reset_session_activity(session: AgentSession) -> None:  # pyright: ignore[reportUnusedFunction]  # called from messaging
     """Reset idle tracking and activity state for the start of a new query."""
     session.last_activity = datetime.now(UTC)
     session.last_idle_notified = None
@@ -101,9 +101,9 @@ def _ensure_process_dead(pid: int | None, label: str) -> None:
         pass
 
 
-async def _create_transport(session: AgentSession, reconnecting: bool = False):  # pyright: ignore[reportUnusedFunction]  # called from _bridge
+async def _create_transport(session: AgentSession, reconnecting: bool = False):  # pyright: ignore[reportUnusedFunction]  # called from bridge_conn
     """Create a transport for Claude Code agent (bridge or direct)."""
-    from agents._state import bridge_conn
+    from agents.state import bridge_conn
 
     if bridge_conn and bridge_conn.is_alive:
         transport = BridgeTransport(
@@ -265,7 +265,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> 
 
 async def wake_agent(session: AgentSession) -> None:
     """Wake a sleeping agent. Enforces concurrency limit. Posts system prompt on first wake."""
-    from agents._state import _bot
+    from agents.state import _bot
 
     assert _bot is not None
 
@@ -444,7 +444,7 @@ def get_master_session() -> AgentSession | None:
 
 async def reconstruct_agents_from_channels() -> int:
     """Reconstruct sleeping AgentSession entries from existing Discord channels."""
-    from agents._state import _utils_mcp_server
+    from agents.state import _utils_mcp_server
 
     reconstructed = 0
     if not _channels_mod.active_category:
@@ -504,9 +504,9 @@ async def reconstruct_agents_from_channels() -> int:
 # ---------------------------------------------------------------------------
 
 
-async def _set_session_id(session: AgentSession, msg_or_sid: Any, channel: TextChannel | None = None) -> None:  # pyright: ignore[reportUnusedFunction]  # called from _streaming
+async def _set_session_id(session: AgentSession, msg_or_sid: Any, channel: TextChannel | None = None) -> None:  # pyright: ignore[reportUnusedFunction]  # called from streaming
     """Update session's session_id and persist it (topic or file)."""
-    from agents._state import _bot
+    from agents.state import _bot
 
     assert _bot is not None
     sid: str | None = msg_or_sid if isinstance(msg_or_sid, str) else getattr(msg_or_sid, "session_id", None)
@@ -540,7 +540,7 @@ async def _set_session_id(session: AgentSession, msg_or_sid: Any, channel: TextC
 
 async def _post_model_warning(session: AgentSession) -> None:
     """Post a warning to Discord if the agent is running on a non-opus model."""
-    from agents._state import _bot
+    from agents.state import _bot
 
     assert _bot is not None
     model = config.get_model()

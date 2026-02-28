@@ -7,11 +7,11 @@ All public names are re-exported here so that ``import agents; agents.xxx`` work
 
 from __future__ import annotations
 
-# _bridge
-from agents._bridge import connect_bridge
+# bridge_conn
+from agents.bridge_conn import connect_bridge
 
-# _discord — Discord helpers
-from agents._discord import (
+# discord_helpers — Discord helpers
+from agents.discord_helpers import (
     add_reaction,
     content_summary,
     extract_message_content,
@@ -22,11 +22,11 @@ from agents._discord import (
     split_message,
 )
 
-# _flowcoder
-from agents._flowcoder import run_inline_flowchart
+# flowcoder
+from agents.flowcoder import run_inline_flowchart
 
-# _lifecycle — session lifecycle
-from agents._lifecycle import (
+# lifecycle — session lifecycle
+from agents.lifecycle import (
     count_awake_agents,
     end_session,
     get_master_session,
@@ -39,8 +39,8 @@ from agents._lifecycle import (
     wake_or_queue,
 )
 
-# _messaging — message processing + spawning
-from agents._messaging import (
+# messaging — message processing + spawning
+from agents.messaging import (
     deliver_inter_agent_message,
     process_message,
     process_message_queue,
@@ -50,19 +50,19 @@ from agents._messaging import (
     spawn_agent,
 )
 
-# _permissions
-from agents._permissions import make_cwd_permission_callback
+# permissions
+from agents.permissions import make_cwd_permission_callback
 
-# _sdk — SDK/stderr utilities
-from agents._sdk import (
+# sdk — SDK/stderr utilities
+from agents.sdk import (
     as_stream,
     drain_sdk_buffer,
     drain_stderr,
     make_stderr_callback,
 )
 
-# _shutdown
-from agents._shutdown import (
+# shutdown_mgr
+from agents.shutdown_mgr import (
     init_shutdown_coordinator,
     make_shutdown_coordinator,
 )
@@ -70,8 +70,8 @@ from agents._shutdown import (
 # ---------------------------------------------------------------------------
 # Re-exports from submodules
 # ---------------------------------------------------------------------------
-# _state — module-level state + init
-from agents._state import (
+# state — module-level state + init
+from agents.state import (
     agents,
     bridge_conn,
     channel_to_agent,
@@ -81,8 +81,8 @@ from agents._state import (
     shutdown_coordinator,
 )
 
-# _streaming — response streaming
-from agents._streaming import (
+# streaming — response streaming
+from agents.streaming import (
     extract_tool_preview,
     handle_query_timeout,
     stream_response_to_channel,

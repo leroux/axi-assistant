@@ -1,10 +1,10 @@
-"""Unit tests for agents._lifecycle — is_awake, is_processing, count_awake_agents."""
+"""Unit tests for agents.lifecycle — is_awake, is_processing, count_awake_agents."""
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from agents._lifecycle import count_awake_agents, is_awake, is_processing
+from agents.lifecycle import count_awake_agents, is_awake, is_processing
 from axi_types import AgentSession
 
 
@@ -50,40 +50,40 @@ class TestIsProcessing:
 
 class TestCountAwakeAgents:
     def test_empty(self) -> None:
-        from agents import _state
+        from agents import state
 
-        original = dict(_state.agents)
-        _state.agents.clear()
+        original = dict(state.agents)
+        state.agents.clear()
         try:
             assert count_awake_agents() == 0
         finally:
-            _state.agents.update(original)
+            state.agents.update(original)
 
     def test_sleeping_agents(self) -> None:
-        from agents import _state
+        from agents import state
 
-        original = dict(_state.agents)
-        _state.agents.clear()
-        _state.agents["a"] = AgentSession(name="a")
-        _state.agents["b"] = AgentSession(name="b")
+        original = dict(state.agents)
+        state.agents.clear()
+        state.agents["a"] = AgentSession(name="a")
+        state.agents["b"] = AgentSession(name="b")
         try:
             assert count_awake_agents() == 0
         finally:
-            _state.agents.clear()
-            _state.agents.update(original)
+            state.agents.clear()
+            state.agents.update(original)
 
     def test_awake_agents(self) -> None:
-        from agents import _state
+        from agents import state
 
-        original = dict(_state.agents)
-        _state.agents.clear()
+        original = dict(state.agents)
+        state.agents.clear()
         s1 = AgentSession(name="a")
         s1.client = MagicMock()  # type: ignore[assignment]
         s2 = AgentSession(name="b")
-        _state.agents["a"] = s1
-        _state.agents["b"] = s2
+        state.agents["a"] = s1
+        state.agents["b"] = s2
         try:
             assert count_awake_agents() == 1
         finally:
-            _state.agents.clear()
-            _state.agents.update(original)
+            state.agents.clear()
+            state.agents.update(original)

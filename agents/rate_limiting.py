@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING
 
 from discord import TextChannel
 
-from agents._discord import send_system
-from agents._state import agents
+from agents.discord_helpers import send_system
+from agents.state import agents
 from channels import get_master_channel
 from rate_limits import handle_rate_limit as _rl_handle_rate_limit
 from rate_limits import notify_rate_limit_expired
@@ -21,9 +21,9 @@ if TYPE_CHECKING:
 log = logging.getLogger("axi")
 
 
-async def _handle_rate_limit(error_text: str, session: AgentSession, channel: TextChannel) -> None:  # pyright: ignore[reportUnusedFunction]  # called from _streaming
+async def _handle_rate_limit(error_text: str, session: AgentSession, channel: TextChannel) -> None:  # pyright: ignore[reportUnusedFunction]  # called from streaming
     """Handle a rate limit error: set global state, notify all agent channels."""
-    from agents._state import _bot
+    from agents.state import _bot
 
     assert _bot is not None
     bot_ref = _bot

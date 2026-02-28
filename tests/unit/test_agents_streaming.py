@@ -1,8 +1,8 @@
-"""Unit tests for agents._streaming — activity tracking and tool preview."""
+"""Unit tests for agents.streaming — activity tracking and tool preview."""
 
 from __future__ import annotations
 
-from agents._streaming import _StreamCtx, _update_activity, extract_tool_preview
+from agents.streaming import _StreamCtx, _update_activity, extract_tool_preview
 from axi_types import AgentSession
 
 

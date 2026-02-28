@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 import channels as _channels_mod
 import config
-from agents._discord import add_reaction, content_summary, remove_reaction, send_long, send_system
-from agents._lifecycle import (
+from agents.discord_helpers import add_reaction, content_summary, remove_reaction, send_long, send_system
+from agents.lifecycle import (
     _post_model_warning,
     _reset_session_activity,
     count_awake_agents,
@@ -20,9 +20,9 @@ from agents._lifecycle import (
     sleep_agent,
     wake_agent,
 )
-from agents._sdk import as_stream, drain_sdk_buffer, drain_stderr
-from agents._state import agents, channel_to_agent
-from agents._streaming import handle_query_timeout, stream_with_retry
+from agents.sdk import as_stream, drain_sdk_buffer, drain_stderr
+from agents.state import agents, channel_to_agent
+from agents.streaming import handle_query_timeout, stream_with_retry
 from axi_types import ActivityState, AgentSession, ConcurrencyLimitError, MessageContent
 from channels import ensure_agent_channel, format_channel_topic, get_agent_channel, normalize_channel_name
 from prompts import compute_prompt_hash, make_spawned_agent_system_prompt
@@ -116,8 +116,8 @@ async def spawn_agent(
     packs: list[str] | None = None,
 ) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
-    from agents._flowcoder import _run_flowcoder
-    from agents._state import _utils_mcp_server
+    from agents.flowcoder import _run_flowcoder
+    from agents.state import _utils_mcp_server
 
     if not os.path.isdir(cwd):
         os.makedirs(cwd, exist_ok=True)
@@ -265,7 +265,7 @@ async def run_initial_prompt(session: AgentSession, prompt: MessageContent, chan
 
 async def process_message_queue(session: AgentSession) -> None:
     """Process any queued messages for an agent after the current query finishes."""
-    from agents._state import shutdown_coordinator
+    from agents.state import shutdown_coordinator
 
     if session.message_queue:
         log.info("QUEUE[%s] processing %d queued messages", session.name, len(session.message_queue))
@@ -343,7 +343,7 @@ async def deliver_inter_agent_message(
     content: str,
 ) -> str:
     """Deliver a message from one agent to another."""
-    from agents._state import bridge_conn
+    from agents.state import bridge_conn
 
     channel = await get_agent_channel(target_session.name)
     if channel is None:

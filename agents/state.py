@@ -56,7 +56,7 @@ def init(bot_instance: Bot) -> None:
     """Inject the Bot reference. Called once from bot.py."""
     global _bot
     _bot = bot_instance
-    from agents._discord import send_to_exceptions
+    from agents.discord_helpers import send_to_exceptions
 
     _channels_mod.init(bot_instance, agents, channel_to_agent, send_to_exceptions)
 
@@ -67,7 +67,7 @@ def set_utils_mcp_server(server: Any) -> None:
     _utils_mcp_server = server
 
 
-def _next_stream_id(agent_name: str) -> str:  # pyright: ignore[reportUnusedFunction]  # called from _streaming
+def _next_stream_id(agent_name: str) -> str:  # pyright: ignore[reportUnusedFunction]  # called from streaming
     """Generate a unique stream ID for tracing."""
     global _stream_counter
     _stream_counter += 1

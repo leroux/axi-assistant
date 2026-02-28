@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import config
-from agents._discord import send_long, send_system
+from agents.discord_helpers import send_long, send_system
 from axi_types import ActivityState, AgentSession, ContentBlock
 
 if TYPE_CHECKING:
@@ -204,7 +204,7 @@ async def _run_and_stream_flowcoder(
     session: AgentSession, channel: TextChannel, command: str, args: str, label: str
 ) -> None:
     """Shared: create flowcoder process, stream output, handle cancellation/cleanup."""
-    from agents._state import bridge_conn
+    from agents.state import bridge_conn
 
     if bridge_conn and bridge_conn.is_alive:
         proc = BridgeFlowcoderProcess(
@@ -239,7 +239,7 @@ async def _run_and_stream_flowcoder(
             session.activity = ActivityState(phase="idle")
 
 
-async def _run_flowcoder(session: AgentSession, channel: TextChannel) -> None:  # pyright: ignore[reportUnusedFunction]  # called from _messaging
+async def _run_flowcoder(session: AgentSession, channel: TextChannel) -> None:  # pyright: ignore[reportUnusedFunction]  # called from messaging
     """Run a flowcoder agent to completion, streaming output to Discord."""
     log.info("Starting flowcoder agent '%s' (channel=%s)", session.name, channel.id)
     try:
@@ -274,6 +274,6 @@ async def run_inline_flowchart(session: AgentSession, channel: TextChannel, comm
         await send_system(channel, f"Running flowchart: `{cmd_display}`")
         await _run_and_stream_flowcoder(session, channel, command, args, f"Flowchart `{command}`")
 
-    from agents._messaging import process_message_queue
+    from agents.messaging import process_message_queue
 
     await process_message_queue(session)

@@ -24,11 +24,11 @@ from claude_agent_sdk.types import (
 from discord import TextChannel
 
 import config
-from agents._discord import send_long, send_system, send_to_exceptions, split_message
-from agents._lifecycle import _rebuild_session, _set_session_id
-from agents._rate_limits import _handle_rate_limit
-from agents._sdk import as_stream, drain_stderr
-from agents._state import _next_stream_id
+from agents.discord_helpers import send_long, send_system, send_to_exceptions, split_message
+from agents.lifecycle import _rebuild_session, _set_session_id
+from agents.rate_limiting import _handle_rate_limit
+from agents.sdk import as_stream, drain_stderr
+from agents.state import _next_stream_id
 from rate_limits import record_session_usage as _recordsession_usage
 from rate_limits import update_rate_limit_quota as _update_rate_limit_quota
 
@@ -484,7 +484,7 @@ async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool
 
 async def handle_query_timeout(session: AgentSession, channel: TextChannel) -> None:
     """Handle a query timeout. Try interrupt first, then kill and resume."""
-    from agents._state import bridge_conn
+    from agents.state import bridge_conn
 
     log.warning("Query timeout for agent '%s', attempting interrupt", session.name)
 

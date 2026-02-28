@@ -1,4 +1,4 @@
-"""Unit tests for agents._permissions — make_cwd_permission_callback."""
+"""Unit tests for agents.permissions — make_cwd_permission_callback."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 
-from agents._permissions import make_cwd_permission_callback
+from agents.permissions import make_cwd_permission_callback
 
 
 class TestMakeCwdPermissionCallback:

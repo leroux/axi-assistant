@@ -1,4 +1,4 @@
-"""Unit tests for agents._flowcoder — dispatch table routing."""
+"""Unit tests for agents.flowcoder — dispatch table routing."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import ClassVar
 
 import pytest
 
-from agents._flowcoder import (
+from agents.flowcoder import (
     _FlowcoderCtx,
     _handle_block_complete,
     _handle_block_start,
