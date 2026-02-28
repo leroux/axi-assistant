@@ -691,49 +691,20 @@ async def _handle_exit_plan_mode(
     async def _send_plan_msg(content: str) -> None:
         await _discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
 
-    # Try to find and read the plan file.
-    # Claude Code writes the plan to a file specified in the plan mode system message.
-    plan_content = None
-    plan_paths = [
-        os.path.join(session.cwd, ".claude", "plan.md"),
-        os.path.join(session.cwd, "plan.md"),
-    ]
-    for plan_path in plan_paths:
-        if os.path.exists(plan_path):
-            try:
-                with open(plan_path) as f:
-                    plan_content = f.read().strip()
-                break
-            except Exception:
-                pass
+    # ExitPlanMode passes the full plan content in tool_input["plan"]
+    plan_content = (tool_input.get("plan") or "").strip() or None
 
     # Post the plan to Discord
     header = f"📋 **Plan from {session.name}** — waiting for approval"
     try:
         if plan_content:
-            if len(plan_content) > 1800:
-                # Upload as file attachment
-                await _send_plan_msg(header)
-                # Use multipart form for file upload
-                boundary = "----PlanFileBoundary"
-                body = (
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="content"\r\n\r\n'
-                    f"{header}\r\n"
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="files[0]"; filename="plan.md"\r\n'
-                    f"Content-Type: text/markdown\r\n\r\n"
-                    f"{plan_content}\r\n"
-                    f"--{boundary}--\r\n"
-                )
-                await _discord_api.request(
-                    "POST",
-                    f"/channels/{channel_id}/messages",
-                    content=body.encode(),
-                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-                )
-            else:
-                await _send_plan_msg(f"{header}\n\n{plan_content}")
+            # Attach plan as a .txt file with header as message content
+            plan_bytes = plan_content.encode("utf-8")
+            await _discord_request(
+                "POST", f"/channels/{channel_id}/messages",
+                data={"content": header},
+                files={"files[0]": ("plan.txt", plan_bytes)},
+            )
         else:
             await _send_plan_msg(
                 f"{header}\n\n*(Plan file not found — the agent should have described the plan in its messages above.)*"
