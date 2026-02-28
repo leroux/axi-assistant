@@ -237,3 +237,48 @@ class SystemctlRequiresEnv(LintRule):
             and node.func.value.value == "subprocess"
             and node.func.attr.value == "run"
         )
+
+
+def _is_none_or_empty_string(node: cst.BaseExpression) -> bool:
+    """Check if a CST node is None or an empty string literal."""
+    if isinstance(node, cst.Name) and node.value == "None":
+        return True
+    if isinstance(node, cst.SimpleString):
+        try:
+            return node.evaluated_value == ""
+        except Exception:
+            return False
+    return False
+
+
+class NoEmptySystemPrompt(LintRule):
+    """Flag system_prompt=None or system_prompt="" passed to any function.
+
+    Passing None or "" as a system prompt silently disables it. If you don't
+    want a system prompt, omit the parameter entirely. If this is a conditional
+    value, ensure the caller never passes None/"".
+    """
+
+    VALID = [
+        Valid('ClaudeAgentOptions(cwd="/tmp", system_prompt=prompt)'),
+        Valid('ClaudeAgentOptions(cwd="/tmp", system_prompt="You are helpful.")'),
+        Valid('ClaudeAgentOptions(cwd="/tmp", system_prompt=build_prompt())'),
+        Valid('ClaudeAgentOptions(cwd="/tmp")'),
+    ]
+    INVALID = [
+        Invalid('ClaudeAgentOptions(cwd="/tmp", system_prompt=None)'),
+        Invalid('ClaudeAgentOptions(cwd="/tmp", system_prompt="")'),
+    ]
+    MESSAGE = (
+        "Do not pass None or empty string as system_prompt — it silently "
+        "disables the system prompt. Omit the parameter or pass a real prompt."
+    )
+
+    def visit_Call(self, node: cst.Call) -> None:
+        for arg in node.args:
+            if (
+                arg.keyword is not None
+                and arg.keyword.value == "system_prompt"
+                and _is_none_or_empty_string(arg.value)
+            ):
+                self.report(node)
