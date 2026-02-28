@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false, reportUnusedFunction=false
+# pyright: reportUnusedFunction=false
 """Centralized configuration for the Axi bot.
 
 Leaf module — no project imports. All env vars, paths, constants, logging setup,
@@ -6,6 +6,50 @@ Discord REST client, and user config management live here.
 """
 
 from __future__ import annotations
+
+__all__ = [
+    "ACTIVE_CATEGORY_NAME",
+    "ADMIN_ALLOWED_CWDS",
+    "ALLOWED_CWDS",
+    "ALLOWED_USER_IDS",
+    "API_ERROR_BASE_DELAY",
+    "API_ERROR_MAX_RETRIES",
+    "AXI_USER_DATA",
+    "BOT_DIR",
+    "BOT_WORKTREES_DIR",
+    "BRIDGE_SOCKET_PATH",
+    "CONFIG_PATH",
+    "CRASH_ANALYSIS_MARKER_PATH",
+    "DAY_BOUNDARY_HOUR",
+    "DEFAULT_CWD",
+    "DISCORD_GUILD_ID",
+    "DISCORD_TOKEN",
+    "ENABLE_CRASH_HANDLER",
+    "FLOWCODER_ENABLED",
+    "HISTORY_PATH",
+    "IDLE_REMINDER_THRESHOLDS",
+    "INTERRUPT_TIMEOUT",
+    "KILLED_CATEGORY_NAME",
+    "LOG_DIR",
+    "MASTER_AGENT_NAME",
+    "MASTER_SESSION_PATH",
+    "MAX_AWAKE_AGENTS",
+    "QUERY_TIMEOUT",
+    "RATE_LIMIT_HISTORY_PATH",
+    "README_CONTENT_PATH",
+    "ROLLBACK_MARKER_PATH",
+    "SCHEDULES_PATH",
+    "SCHEDULE_TIMEZONE",
+    "SHOW_AWAITING_INPUT",
+    "SKIPS_PATH",
+    "USAGE_HISTORY_PATH",
+    "VALID_MODELS",
+    "discord_request",
+    "get_model",
+    "intents",
+    "log",
+    "set_model",
+]
 
 import asyncio
 import json
@@ -193,14 +237,14 @@ def _save_config(config: dict[str, Any]) -> None:
         log.error("Failed to save config: %s", e)
 
 
-def _get_model() -> str:
+def get_model() -> str:
     """Get the current model preference."""
     with _config_lock:
         config = _load_config()
     return config.get("model", "opus")
 
 
-def _set_model(model: str) -> str:
+def set_model(model: str) -> str:
     """Set the model preference. Returns validation error string or empty string on success."""
     if model.lower() not in VALID_MODELS:
         return f"Invalid model '{model}'. Valid options: {', '.join(sorted(VALID_MODELS))}"
@@ -237,7 +281,7 @@ _discord_api = httpx.AsyncClient(
 )
 
 
-async def _discord_request(method: str, path: str, **kwargs: Any) -> httpx.Response:
+async def discord_request(method: str, path: str, **kwargs: Any) -> httpx.Response:
     """Make a Discord API request with rate-limit retry."""
     resp: httpx.Response | None = None
     for _attempt in range(3):

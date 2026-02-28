@@ -1,4 +1,3 @@
-# pyright: reportPrivateUsage=false
 """System prompt construction and pack loading for the Axi bot.
 
 Handles layered .md prompt files, pack system, and per-agent prompt assembly.
@@ -6,7 +5,12 @@ Handles layered .md prompt files, pack system, and per-agent prompt assembly.
 
 from __future__ import annotations
 
-__all__ = ["_compute_prompt_hash", "_make_spawned_agent_system_prompt", "_post_system_prompt_to_channel"]
+__all__ = [
+    "MASTER_SYSTEM_PROMPT",
+    "compute_prompt_hash",
+    "make_spawned_agent_system_prompt",
+    "post_system_prompt_to_channel",
+]
 
 import hashlib
 import io
@@ -29,7 +33,7 @@ log = logging.getLogger("axi")
 # ---------------------------------------------------------------------------
 
 
-def _compute_prompt_hash(system_prompt: SystemPromptPreset | str | None) -> str | None:
+def compute_prompt_hash(system_prompt: SystemPromptPreset | str | None) -> str | None:
     """Compute a short hash of the system prompt text for change detection.
 
     Extracts the prompt text (from 'append' for dicts, or the string directly),
@@ -155,7 +159,7 @@ MASTER_SYSTEM_PROMPT: SystemPromptPreset = {
 }
 
 
-def _make_spawned_agent_system_prompt(cwd: str, packs: list[str] | None = None) -> SystemPromptPreset:
+def make_spawned_agent_system_prompt(cwd: str, packs: list[str] | None = None) -> SystemPromptPreset:
     """Build system prompt for a spawned agent based on its working directory.
 
     packs: explicit list of pack names to include, or None for DEFAULT_SPAWNED_PACKS.
@@ -187,7 +191,7 @@ def _make_spawned_agent_system_prompt(cwd: str, packs: list[str] | None = None) 
 # ---------------------------------------------------------------------------
 
 
-async def _post_system_prompt_to_channel(
+async def post_system_prompt_to_channel(
     channel: TextChannel,
     system_prompt: SystemPromptPreset | str | None,
     *,

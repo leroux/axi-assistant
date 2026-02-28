@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false, reportUnusedFunction=false
+# pyright: reportUnusedFunction=false
 """Agent lifecycle, streaming, rate limits, bridge, and channel management.
 
 This is the engine module: everything that operates on AgentSession state lives here.
@@ -9,6 +9,90 @@ Nothing imports from this module except tools.py and bot.py.
 """
 
 from __future__ import annotations
+
+__all__ = [
+    "active_category",
+    # Discord helpers
+    "add_reaction",
+    # Module-level state
+    "agents",
+    "append_history",
+    # Streaming
+    "as_stream",
+    "bot_creating_channels",
+    "bridge_conn",
+    "channel_to_agent",
+    "check_skip",
+    # Bridge
+    "connect_bridge",
+    "content_summary",
+    "count_awake_agents",
+    "deliver_inter_agent_message",
+    # SDK helpers
+    "drain_sdk_buffer",
+    "drain_stderr",
+    "end_session",
+    "ensure_agent_channel",
+    "ensure_guild_infrastructure",
+    # Message handling
+    "extract_message_content",
+    "extract_tool_preview",
+    "format_channel_topic",
+    "format_time_remaining",
+    "get_agent_channel",
+    "get_master_channel",
+    "get_master_session",
+    "handle_query_timeout",
+    # Initialization
+    "init",
+    "init_shutdown_coordinator",
+    # Session lifecycle
+    "is_awake",
+    "is_processing",
+    # Rate limiting
+    "is_rate_limited",
+    "killed_category",
+    "load_history",
+    # Schedule helpers
+    "load_schedules",
+    "load_skips",
+    "make_cwd_permission_callback",
+    "make_stderr_callback",
+    "move_channel_to_killed",
+    "normalize_channel_name",
+    "process_message",
+    "process_message_queue",
+    "prune_history",
+    "prune_skips",
+    "rate_limit_quotas",
+    "rate_limit_remaining_seconds",
+    "rate_limited_until",
+    "reclaim_agent_name",
+    "reconstruct_agents_from_channels",
+    "remove_reaction",
+    "reset_session",
+    "run_initial_prompt",
+    # Flowcoder
+    "run_inline_flowchart",
+    "save_schedules",
+    "save_skips",
+    "schedule_last_fired",
+    "send_long",
+    "send_prompt_to_agent",
+    "send_system",
+    "send_to_exceptions",
+    "session_usage",
+    "set_utils_mcp_server",
+    "shutdown_coordinator",
+    "sleep_agent",
+    "spawn_agent",
+    "split_message",
+    "stream_response_to_channel",
+    "stream_with_retry",
+    "target_guild",
+    "wake_agent",
+    "wake_or_queue",
+]
 
 import asyncio
 import base64
@@ -52,9 +136,9 @@ from axi_types import (
 )
 from bridge import BridgeConnection, BridgeTransport, ensure_bridge
 from prompts import (
-    _compute_prompt_hash,
-    _make_spawned_agent_system_prompt,
-    _post_system_prompt_to_channel,
+    compute_prompt_hash,
+    make_spawned_agent_system_prompt,
+    post_system_prompt_to_channel,
 )
 from schedule_tools import make_schedule_mcp_server
 from shutdown import ShutdownCoordinator, exit_for_restart, kill_supervisor
@@ -87,15 +171,15 @@ bridge_conn: BridgeConnection | None = None
 shutdown_coordinator: ShutdownCoordinator | None = None
 
 # Global rate limit state (all agents share the same API account)
-_rate_limited_until: datetime | None = None
-_session_usage: dict[str, SessionUsage] = {}
-_rate_limit_quotas: dict[str, RateLimitQuota] = {}
+rate_limited_until: datetime | None = None
+session_usage: dict[str, SessionUsage] = {}
+rate_limit_quotas: dict[str, RateLimitQuota] = {}
 
 # Guild infrastructure (populated in on_ready)
 target_guild: discord.Guild | None = None
 active_category: CategoryChannel | None = None
 killed_category: CategoryChannel | None = None
-_bot_creating_channels: set[str] = set()  # channel names currently being created
+bot_creating_channels: set[str] = set()  # channel names currently being created
 
 # Exceptions channel (REST-based, works in any context)
 _exceptions_channel_id: str | None = None
@@ -168,7 +252,7 @@ def drain_stderr(session: AgentSession) -> list[str]:
     return msgs
 
 
-async def _as_stream(content: MessageContent):
+async def as_stream(content: MessageContent):
     """Wrap a prompt as an AsyncIterable for streaming mode."""
     yield {
         "type": "user",
@@ -184,8 +268,8 @@ def drain_sdk_buffer(session: AgentSession) -> int:
         return 0
 
     client = session.client
-    assert client._query is not None  # narrowing: getattr check above guarantees this
-    receive_stream = client._query._message_receive
+    assert client._query is not None  # narrowing: getattr check above guarantees this  # pyright: ignore[reportPrivateUsage]
+    receive_stream = client._query._message_receive  # pyright: ignore[reportPrivateUsage]
     drained: list[dict[str, Any]] = []
     while True:
         try:
@@ -219,7 +303,7 @@ def drain_sdk_buffer(session: AgentSession) -> int:
 # ---------------------------------------------------------------------------
 
 
-async def _add_reaction(message: discord.Message | None, emoji: str) -> None:
+async def add_reaction(message: discord.Message | None, emoji: str) -> None:
     """Add a reaction to a message, silently ignoring errors."""
     if message is None:
         return
@@ -230,7 +314,7 @@ async def _add_reaction(message: discord.Message | None, emoji: str) -> None:
         log.warning("Reaction +%s failed on message %s: %s", emoji, message.id, exc)
 
 
-async def _remove_reaction(message: discord.Message | None, emoji: str) -> None:
+async def remove_reaction(message: discord.Message | None, emoji: str) -> None:
     """Remove the bot's own reaction from a message, silently ignoring errors."""
     if message is None:
         return
@@ -251,7 +335,7 @@ _SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 _MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB per image
 
 
-async def _extract_message_content(message: discord.Message) -> MessageContent:
+async def extract_message_content(message: discord.Message) -> MessageContent:
     """Extract text and image content from a Discord message."""
     # Discord long-message: blank content with an attached message.txt
     if not message.content.strip() and message.attachments:
@@ -295,7 +379,7 @@ async def _extract_message_content(message: discord.Message) -> MessageContent:
     return blocks or message.content
 
 
-def _content_summary(content: MessageContent) -> str:
+def content_summary(content: MessageContent) -> str:
     """Short text summary of message content for logging."""
     if isinstance(content, str):
         return content[:200]
@@ -383,7 +467,7 @@ async def _handle_exit_plan_mode(
     channel_id = session.discord_channel_id
 
     async def _send_plan_msg(content: str) -> None:
-        await config._discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
+        await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
 
     plan_content = (tool_input.get("plan") or "").strip() or None
 
@@ -391,7 +475,7 @@ async def _handle_exit_plan_mode(
     try:
         if plan_content:
             plan_bytes = plan_content.encode("utf-8")
-            await config._discord_request(
+            await config.discord_request(
                 "POST", f"/channels/{channel_id}/messages",
                 data={"content": header},
                 files={"files[0]": ("plan.txt", plan_bytes)},
@@ -527,7 +611,7 @@ def check_skip(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _format_channel_topic(cwd: str, session_id: str | None = None, prompt_hash: str | None = None) -> str:
+def format_channel_topic(cwd: str, session_id: str | None = None, prompt_hash: str | None = None) -> str:
     """Format agent metadata for a Discord channel topic."""
     parts = [f"cwd: {cwd}"]
     if session_id:
@@ -574,7 +658,7 @@ async def _set_session_id(session: AgentSession, msg_or_sid: ResultMessage | str
         elif session.discord_channel_id:
             ch = channel or _bot.get_channel(session.discord_channel_id)
             if ch and isinstance(ch, TextChannel):
-                desired_topic = _format_channel_topic(session.cwd, sid, session.system_prompt_hash)
+                desired_topic = format_channel_topic(session.cwd, sid, session.system_prompt_hash)
                 if ch.topic != desired_topic:
                     log.info("Updating topic on #%s: %r -> %r", ch.name, ch.topic, desired_topic)
                     await ch.edit(topic=desired_topic)
@@ -590,7 +674,7 @@ async def _set_session_id(session: AgentSession, msg_or_sid: ResultMessage | str
 async def _post_model_warning(session: AgentSession) -> None:
     """Post a warning to Discord if the agent is running on a non-opus model."""
     assert _bot is not None
-    model = config._get_model()
+    model = config.get_model()
     if model == "opus" or not session.discord_channel_id:
         return
     channel = _bot.get_channel(session.discord_channel_id)
@@ -613,12 +697,12 @@ async def _get_or_create_exceptions_channel() -> str | None:
         return _exceptions_channel_id
     try:
         guild_id = str(config.DISCORD_GUILD_ID)
-        resp = await config._discord_request("GET", f"/guilds/{guild_id}/channels")
+        resp = await config.discord_request("GET", f"/guilds/{guild_id}/channels")
         for ch in resp.json():
             if ch.get("name") == "exceptions" and ch.get("type") == 0:
                 _exceptions_channel_id = ch["id"]
                 return _exceptions_channel_id
-        resp = await config._discord_request(
+        resp = await config.discord_request(
             "POST",
             f"/guilds/{guild_id}/channels",
             json={"name": "exceptions", "type": 0},
@@ -638,7 +722,7 @@ async def send_to_exceptions(message: str) -> bool:
         ch_id = await _get_or_create_exceptions_channel()
         if ch_id is None:
             return False
-        await config._discord_request(
+        await config.discord_request(
             "POST",
             f"/channels/{ch_id}/messages",
             json={"content": message[:2000]},
@@ -746,7 +830,7 @@ def _parse_rate_limit_seconds(text: str) -> int:
     return 300
 
 
-def _format_time_remaining(seconds: int) -> str:
+def format_time_remaining(seconds: int) -> str:
     """Format seconds into a human-readable duration string."""
     if seconds < 60:
         return f"{seconds}s"
@@ -760,26 +844,26 @@ def _format_time_remaining(seconds: int) -> str:
         return f"{hours}h {minutes}m" if minutes else f"{hours}h"
 
 
-def _is_rate_limited() -> bool:
+def is_rate_limited() -> bool:
     """Check if we're currently rate limited."""
-    global _rate_limited_until
-    if _rate_limited_until is None:
+    global rate_limited_until
+    if rate_limited_until is None:
         return False
-    if datetime.now(UTC) >= _rate_limited_until:
-        _rate_limited_until = None
+    if datetime.now(UTC) >= rate_limited_until:
+        rate_limited_until = None
         return False
     return True
 
 
-def _rate_limit_remaining_seconds() -> int:
+def rate_limit_remaining_seconds() -> int:
     """Get remaining rate limit time in seconds."""
-    if _rate_limited_until is None:
+    if rate_limited_until is None:
         return 0
-    remaining = (_rate_limited_until - datetime.now(UTC)).total_seconds()
+    remaining = (rate_limited_until - datetime.now(UTC)).total_seconds()
     return max(0, int(remaining))
 
 
-def _record_session_usage(agent_name: str, msg: ResultMessage) -> None:
+def _recordsession_usage(agent_name: str, msg: ResultMessage) -> None:
     sid = msg.session_id
     if not sid:
         return
@@ -788,9 +872,9 @@ def _record_session_usage(agent_name: str, msg: ResultMessage) -> None:
     input_tokens: int = usage.get("input_tokens", 0)
     output_tokens: int = usage.get("output_tokens", 0)
 
-    if sid not in _session_usage:
-        _session_usage[sid] = SessionUsage(agent_name=agent_name, first_query=now)
-    entry = _session_usage[sid]
+    if sid not in session_usage:
+        session_usage[sid] = SessionUsage(agent_name=agent_name, first_query=now)
+    entry = session_usage[sid]
     entry.queries += 1
     entry.total_cost_usd += msg.total_cost_usd or 0.0
     entry.total_turns += msg.num_turns or 0
@@ -827,11 +911,11 @@ def _update_rate_limit_quota(data: dict[str, Any]) -> None:
     new_resets_at = datetime.fromtimestamp(resets_at_unix, tz=UTC)
     new_utilization = info.get("utilization")
 
-    existing = _rate_limit_quotas.get(rl_type)
+    existing = rate_limit_quotas.get(rl_type)
     if existing is not None and new_utilization is None and existing.resets_at == new_resets_at:
         new_utilization = existing.utilization
 
-    _rate_limit_quotas[rl_type] = RateLimitQuota(
+    rate_limit_quotas[rl_type] = RateLimitQuota(
         status=new_status,
         resets_at=new_resets_at,
         rate_limit_type=rl_type,
@@ -853,26 +937,26 @@ def _update_rate_limit_quota(data: dict[str, Any]) -> None:
 
 async def _handle_rate_limit(error_text: str, session: AgentSession, channel: TextChannel) -> None:
     """Handle a rate limit error: set global state, notify all agent channels."""
-    global _rate_limited_until
+    global rate_limited_until
     assert _bot is not None
 
     wait_seconds = _parse_rate_limit_seconds(error_text)
     new_limit = datetime.now(UTC) + timedelta(seconds=wait_seconds)
-    already_limited = _is_rate_limited()
+    already_limited = is_rate_limited()
 
-    if _rate_limited_until is None or new_limit > _rate_limited_until:
-        _rate_limited_until = new_limit
+    if rate_limited_until is None or new_limit > rate_limited_until:
+        rate_limited_until = new_limit
 
-    log.warning("Rate limited — waiting %ds (until %s)", wait_seconds, _rate_limited_until.isoformat())
+    log.warning("Rate limited — waiting %ds (until %s)", wait_seconds, rate_limited_until.isoformat())
 
     if not already_limited:
-        remaining = _format_time_remaining(wait_seconds)
-        reset_time = _rate_limited_until.strftime("%H:%M:%S UTC")
+        remaining = format_time_remaining(wait_seconds)
+        reset_time = rate_limited_until.strftime("%H:%M:%S UTC")
 
         quota_lines = ""
-        if _rate_limit_quotas:
+        if rate_limit_quotas:
             rl_parts: list[str] = []
-            for rl_type, quota in _rate_limit_quotas.items():
+            for rl_type, quota in rate_limit_quotas.items():
                 pct = f"{quota.utilization:.0%}" if quota.utilization is not None else "?"
                 rl_parts.append(f"{rl_type}: {pct}")
             quota_lines = "\nUtilization: " + " · ".join(rl_parts)
@@ -898,7 +982,7 @@ async def _notify_rate_limit_expired(delay: float) -> None:
     """Sleep until rate limit expires, then notify master channel."""
     try:
         await asyncio.sleep(delay)
-        if not _is_rate_limited():
+        if not is_rate_limited():
             ch = await get_master_channel()
             if ch:
                 await send_system(ch, "✅ Rate limit expired — usage available again.")
@@ -995,7 +1079,7 @@ async def _disconnect_client(client: ClaudeSDKClient, label: str) -> None:
     _ensure_process_dead(pid, label)
 
 
-def _count_awake_agents() -> int:
+def count_awake_agents() -> int:
     """Count agents that are currently awake."""
     return sum(
         1
@@ -1014,7 +1098,7 @@ async def _evict_idle_agent(exclude: str | None = None) -> bool:
             continue
         if s.query_lock.locked():
             continue
-        if s._bridge_busy:
+        if s.bridge_busy:
             continue
         idle_duration = (datetime.now(UTC) - s.last_activity).total_seconds()
         candidates.append((idle_duration, name, s))
@@ -1036,10 +1120,10 @@ async def _evict_idle_agent(exclude: str | None = None) -> bool:
 
 async def _ensure_awake_slot(requesting_agent: str) -> bool:
     """Ensure there is a free awake-agent slot, evicting idle agents if needed."""
-    while _count_awake_agents() >= config.MAX_AWAKE_AGENTS:
+    while count_awake_agents() >= config.MAX_AWAKE_AGENTS:
         log.debug(
             "Awake slots full (%d/%d), attempting eviction for '%s'",
-            _count_awake_agents(),
+            count_awake_agents(),
             config.MAX_AWAKE_AGENTS,
             requesting_agent,
         )
@@ -1075,9 +1159,9 @@ async def sleep_agent(session: AgentSession, *, force: bool = False) -> None:
         return
 
     log.info("Sleeping agent '%s'", session.name)
-    if session._log:
-        session._log.info("SESSION_SLEEP")
-    session._bridge_busy = False
+    if session.agent_log:
+        session.agent_log.info("SESSION_SLEEP")
+    session.bridge_busy = False
     await _disconnect_client(session.client, session.name)
     session.client = None
     log.info("Agent '%s' is now sleeping", session.name)
@@ -1086,7 +1170,7 @@ async def sleep_agent(session: AgentSession, *, force: bool = False) -> None:
 def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions for a session."""
     return ClaudeAgentOptions(
-        model=config._get_model(),
+        model=config.get_model(),
         effort="high",
         thinking={"type": "enabled", "budget_tokens": 128000},
         setting_sources=["local"],
@@ -1117,7 +1201,7 @@ async def wake_agent(session: AgentSession) -> None:
         log.debug(
             "Wake lock acquired for '%s', awake_count=%d/%d",
             session.name,
-            _count_awake_agents(),
+            count_awake_agents(),
             config.MAX_AWAKE_AGENTS,
         )
 
@@ -1140,8 +1224,8 @@ async def wake_agent(session: AgentSession) -> None:
             await client.__aenter__()
             session.client = client
             log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
-            if session._log:
-                session._log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
+            if session.agent_log:
+                session.agent_log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
         except Exception:
             log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
             options = _make_agent_options(session, resume_id=None)
@@ -1155,12 +1239,12 @@ async def wake_agent(session: AgentSession) -> None:
                 except OSError:
                     pass
             log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
-            if session._log:
-                session._log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
+            if session.agent_log:
+                session.agent_log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
 
         prompt_changed = False
         if resume_id and session.system_prompt is not None:
-            current_hash = _compute_prompt_hash(session.system_prompt)
+            current_hash = compute_prompt_hash(session.system_prompt)
             if session.system_prompt_hash is not None and current_hash != session.system_prompt_hash:
                 prompt_changed = True
                 log.info(
@@ -1169,12 +1253,12 @@ async def wake_agent(session: AgentSession) -> None:
                 )
             session.system_prompt_hash = current_hash
 
-        if not session._system_prompt_posted and session.discord_channel_id:
-            session._system_prompt_posted = True
+        if not session.system_prompt_posted and session.discord_channel_id:
+            session.system_prompt_posted = True
             channel = _bot.get_channel(session.discord_channel_id)
             if channel and isinstance(channel, TextChannel):
                 try:
-                    await _post_system_prompt_to_channel(
+                    await post_system_prompt_to_channel(
                         channel,
                         session.system_prompt,
                         is_resume=bool(resume_id),
@@ -1204,14 +1288,14 @@ async def wake_or_queue(
     except ConcurrencyLimitError:
         session.message_queue.append((content, channel, orig_message))
         position = len(session.message_queue)
-        awake = _count_awake_agents()
+        awake = count_awake_agents()
         log.debug("Concurrency limit hit for '%s', queuing message (position %d)", session.name, position)
-        await _add_reaction(orig_message, "📨")
+        await add_reaction(orig_message, "📨")
         await send_system(channel, f"⏳ All {awake} agent slots busy. Message queued (position {position}).")
         return False
     except Exception:
         log.exception("Failed to wake agent '%s'", session.name)
-        await _add_reaction(orig_message, "❌")
+        await add_reaction(orig_message, "❌")
         await send_system(
             channel, f"Failed to wake agent **{session.name}**. Try `/kill-agent {session.name}` and respawn."
         )
@@ -1241,13 +1325,13 @@ async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
     old_channel_id = session.discord_channel_id if session else None
     old_mcp = getattr(session, "mcp_servers", None)
     resolved_cwd = cwd or old_cwd
-    prompt = session.system_prompt if session and session.system_prompt else _make_spawned_agent_system_prompt(resolved_cwd)
+    prompt = session.system_prompt if session and session.system_prompt else make_spawned_agent_system_prompt(resolved_cwd)
     await end_session(name)
     new_session = AgentSession(
         name=name,
         cwd=resolved_cwd,
         system_prompt=prompt,
-        system_prompt_hash=_compute_prompt_hash(prompt),
+        system_prompt_hash=compute_prompt_hash(prompt),
         client=None,
         session_id=None,
         discord_channel_id=old_channel_id,
@@ -1268,7 +1352,7 @@ def get_master_session() -> AgentSession | None:
 # ---------------------------------------------------------------------------
 
 
-def _normalize_channel_name(name: str) -> str:
+def normalize_channel_name(name: str) -> str:
     """Normalize an agent name to a valid Discord channel name."""
     name = name.lower().replace(" ", "-")
     name = re.sub(r"[^a-z0-9\-_]", "", name)
@@ -1377,7 +1461,7 @@ async def reconstruct_agents_from_channels() -> int:
         for ch in cat.text_channels:
             agent_name = ch.name
 
-            if agent_name == _normalize_channel_name(config.MASTER_AGENT_NAME):
+            if agent_name == normalize_channel_name(config.MASTER_AGENT_NAME):
                 channel_to_agent[ch.id] = config.MASTER_AGENT_NAME
                 continue
 
@@ -1390,7 +1474,7 @@ async def reconstruct_agents_from_channels() -> int:
                 log.debug("No cwd in topic for channel #%s, skipping", agent_name)
                 continue
 
-            prompt = _make_spawned_agent_system_prompt(cwd)
+            prompt = make_spawned_agent_system_prompt(cwd)
             mcp_servers: dict[str, Any] = {}
             if _utils_mcp_server is not None:
                 mcp_servers["utils"] = _utils_mcp_server
@@ -1424,7 +1508,7 @@ async def reconstruct_agents_from_channels() -> int:
 
 async def ensure_agent_channel(agent_name: str) -> TextChannel:
     """Find or create a text channel for an agent. Moves from Killed to Active if needed."""
-    normalized = _normalize_channel_name(agent_name)
+    normalized = normalize_channel_name(agent_name)
 
     if active_category:
         for ch in active_category.text_channels:
@@ -1444,8 +1528,8 @@ async def ensure_agent_channel(agent_name: str) -> TextChannel:
                 log.info("Moved channel #%s from Killed to Active", normalized)
                 return ch
 
-    already_guarded = normalized in _bot_creating_channels
-    _bot_creating_channels.add(normalized)
+    already_guarded = normalized in bot_creating_channels
+    bot_creating_channels.add(normalized)
     try:
         assert target_guild is not None
         channel = await target_guild.create_text_channel(normalized, category=active_category)
@@ -1455,7 +1539,7 @@ async def ensure_agent_channel(agent_name: str) -> TextChannel:
         raise
     finally:
         if not already_guarded:
-            _bot_creating_channels.discard(normalized)
+            bot_creating_channels.discard(normalized)
     channel_to_agent[channel.id] = agent_name
     log.info("Created channel #%s in Active category", normalized)
     return channel
@@ -1466,7 +1550,7 @@ async def move_channel_to_killed(agent_name: str) -> None:
     if agent_name == config.MASTER_AGENT_NAME:
         return
 
-    normalized = _normalize_channel_name(agent_name)
+    normalized = normalize_channel_name(agent_name)
     if active_category:
         for ch in active_category.text_channels:
             if ch.name == normalized:
@@ -1487,7 +1571,7 @@ async def get_agent_channel(agent_name: str) -> TextChannel | None:
         ch = _bot.get_channel(session.discord_channel_id)
         if isinstance(ch, TextChannel):
             return ch
-    normalized = _normalize_channel_name(agent_name)
+    normalized = normalize_channel_name(agent_name)
     if active_category:
         for ch in active_category.text_channels:
             if ch.name == normalized:
@@ -1508,16 +1592,16 @@ async def get_master_channel() -> TextChannel | None:
 async def _receive_response_safe(session: AgentSession):
     """Wrapper around receive_messages() that handles unknown message types."""
     assert session.client is not None
-    assert session.client._query is not None
-    async for data in session.client._query.receive_messages():
+    assert session.client._query is not None  # pyright: ignore[reportPrivateUsage]
+    async for data in session.client._query.receive_messages():  # pyright: ignore[reportPrivateUsage]
         try:
             parsed = parse_message(data)
         except MessageParseError:
             msg_type = data.get("type", "?")
             if msg_type == "rate_limit_event":
                 log.info("Rate limit event for '%s': %s", session.name, data)
-                if session._log:
-                    session._log.info("RATE_LIMIT_EVENT: %s", json.dumps(data)[:500])
+                if session.agent_log:
+                    session.agent_log.info("RATE_LIMIT_EVENT: %s", json.dumps(data)[:500])
                 _update_rate_limit_quota(data)
             else:
                 log.warning(
@@ -1526,8 +1610,8 @@ async def _receive_response_safe(session: AgentSession):
                     msg_type,
                     json.dumps(data)[:500],
                 )
-                if session._log:
-                    session._log.warning("UNKNOWN_MSG: type=%s data=%s", msg_type, json.dumps(data)[:500])
+                if session.agent_log:
+                    session.agent_log.warning("UNKNOWN_MSG: type=%s data=%s", msg_type, json.dumps(data)[:500])
                 preview = json.dumps(data)[:400]
                 await send_to_exceptions(
                     f"⚠️ Unknown SDK message type `{msg_type}` from **{session.name}**:\n```json\n{preview}\n```"
@@ -1594,7 +1678,7 @@ def _update_activity(session: AgentSession, event: dict[str, Any]) -> None:
             activity.phase = "waiting"
 
 
-def _extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
+def extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
     """Try to extract a useful preview from partial tool input JSON."""
     try:
         data = json.loads(raw_json)
@@ -1623,7 +1707,7 @@ async def _query_agent(
 ) -> None:
     """Send a message to an agent and stream the response."""
     assert session.client is not None
-    await session.client.query(_as_stream(content))
+    await session.client.query(as_stream(content))
     await stream_response_to_channel(session, channel, show_awaiting_input=show_awaiting_input)
 
 
@@ -1671,8 +1755,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
     async with channel.typing() as _typing_ctx:
         async for msg in _receive_response_safe(session):
             _msg_total += 1
-            if session._log:
-                session._log.debug(
+            if session.agent_log:
+                session.agent_log.debug(
                     "MSG_SEQ[%s][%d] type=%s buf_len=%d", stream_id, _msg_total, type(msg).__name__, len(text_buffer)
                 )
 
@@ -1705,34 +1789,34 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                                 session.activity.thinking_text = ""
                         elif session.activity.phase == "waiting" and session.activity.tool_name:
                             tool = session.activity.tool_name
-                            preview = _extract_tool_preview(tool, session.activity.tool_input_preview)
+                            preview = extract_tool_preview(tool, session.activity.tool_input_preview)
                             if preview:
                                 await channel.send(f"`🔧 {tool}: {preview[:120]}`")
                             else:
                                 await channel.send(f"`🔧 {tool}`")
 
                 # Log stream events
-                if session._log:
+                if session.agent_log:
                     if event_type == "content_block_delta":
                         delta = event.get("delta", {})
                         delta_type = delta.get("type", "")
                         if delta_type not in ("text_delta", "thinking_delta", "signature_delta"):
-                            session._log.debug("STREAM: %s delta=%s", event_type, delta_type)
+                            session.agent_log.debug("STREAM: %s delta=%s", event_type, delta_type)
                     elif event_type in ("content_block_start", "content_block_stop"):
                         block = event.get("content_block", {})
-                        session._log.debug(
+                        session.agent_log.debug(
                             "STREAM: %s type=%s index=%s", event_type, block.get("type", "?"), event.get("index")
                         )
                     elif event_type == "message_start":
                         msg_data = event.get("message", {})
-                        session._log.debug("STREAM: message_start model=%s", msg_data.get("model", "?"))
+                        session.agent_log.debug("STREAM: message_start model=%s", msg_data.get("model", "?"))
                     elif event_type == "message_delta":
                         delta = event.get("delta", {})
-                        session._log.debug("STREAM: message_delta stop_reason=%s", delta.get("stop_reason"))
+                        session.agent_log.debug("STREAM: message_delta stop_reason=%s", delta.get("stop_reason"))
                     elif event_type == "message_stop":
-                        session._log.debug("STREAM: message_stop")
+                        session.agent_log.debug("STREAM: message_stop")
                     else:
-                        session._log.debug("STREAM: %s %s", event_type, json.dumps(event)[:300])
+                        session.agent_log.debug("STREAM: %s %s", event_type, json.dumps(event)[:300])
 
                 if hit_rate_limit:
                     continue
@@ -1775,13 +1859,13 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                     text_buffer = ""
                     stop_typing()
 
-                if session._log:
+                if session.agent_log:
                     for block in msg.content or []:
                         block_any: Any = block
                         if hasattr(block, "text"):
-                            session._log.info("ASSISTANT: %s", block_any.text[:2000])
+                            session.agent_log.info("ASSISTANT: %s", block_any.text[:2000])
                         elif hasattr(block, "type") and block_any.type == "tool_use":
-                            session._log.info(
+                            session.agent_log.info(
                                 "TOOL_USE: %s(%s)",
                                 block_any.name,
                                 json.dumps(block_any.input)[:500] if hasattr(block, "input") else "",
@@ -1793,19 +1877,19 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                 if not hit_rate_limit:
                     await flush_text(text_buffer, "result_msg")
                 text_buffer = ""
-                if session._log:
-                    session._log.info(
+                if session.agent_log:
+                    session.agent_log.info(
                         "RESULT: cost=$%s turns=%d duration=%dms session=%s",
                         msg.total_cost_usd,
                         msg.num_turns,
                         msg.duration_ms,
                         msg.session_id,
                     )
-                _record_session_usage(session.name, msg)
+                _recordsession_usage(session.name, msg)
 
             elif isinstance(msg, SystemMessage):
-                if session._log:
-                    session._log.debug("SYSTEM_MSG: subtype=%s data=%s", msg.subtype, json.dumps(msg.data)[:500])
+                if session.agent_log:
+                    session.agent_log.debug("SYSTEM_MSG: subtype=%s data=%s", msg.subtype, json.dumps(msg.data)[:500])
                 if msg.subtype == "compact_boundary":
                     metadata = msg.data.get("compact_metadata", {})
                     trigger = metadata.get("trigger", "unknown")
@@ -1817,8 +1901,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                     await channel.send(f"🔄 Context compacted{token_info}")
 
             else:
-                if session._log:
-                    session._log.debug("OTHER_MSG: %s", type(msg).__name__)
+                if session.agent_log:
+                    session.agent_log.debug("OTHER_MSG: %s", type(msg).__name__)
 
             # Mid-turn flush
             if not hit_rate_limit and len(text_buffer) >= 1800:
@@ -1865,7 +1949,7 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
 # ---------------------------------------------------------------------------
 
 
-async def _stream_with_retry(session: AgentSession, channel: TextChannel) -> bool:
+async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool:
     """Stream response with retry on transient API errors. Returns True on success."""
     log.info("RETRY_ENTER[%s] starting initial stream", session.name)
     error = await stream_response_to_channel(session, channel)
@@ -1891,7 +1975,7 @@ async def _stream_with_retry(session: AgentSession, channel: TextChannel) -> boo
 
         try:
             assert session.client is not None
-            await session.client.query(_as_stream("Continue from where you left off."))
+            await session.client.query(as_stream("Continue from where you left off."))
         except Exception:
             log.exception("Agent '%s' retry query failed", session.name)
             continue
@@ -1909,7 +1993,7 @@ async def _stream_with_retry(session: AgentSession, channel: TextChannel) -> boo
     return False
 
 
-async def _handle_query_timeout(session: AgentSession, channel: TextChannel) -> None:
+async def handle_query_timeout(session: AgentSession, channel: TextChannel) -> None:
     """Handle a query timeout. Try interrupt first, then kill and resume."""
     log.warning("Query timeout for agent '%s', attempting interrupt", session.name)
 
@@ -1940,8 +2024,8 @@ async def _handle_query_timeout(session: AgentSession, channel: TextChannel) -> 
     old_session_id = session.session_id
     old_name = session.name
     old_cwd = session.cwd
-    old_prompt = session.system_prompt or _make_spawned_agent_system_prompt(session.cwd)
-    old_prompt_hash = session.system_prompt_hash or _compute_prompt_hash(old_prompt)
+    old_prompt = session.system_prompt or make_spawned_agent_system_prompt(session.cwd)
+    old_prompt_hash = session.system_prompt_hash or compute_prompt_hash(old_prompt)
     old_channel_id = session.discord_channel_id
     old_mcp = session.mcp_servers
     await end_session(old_name)
@@ -1999,19 +2083,19 @@ async def process_message(session: AgentSession, content: MessageContent, channe
         raise RuntimeError(f"Claude Code agent '{session.name}' not awake")
 
     _reset_session_activity(session)
-    session._bridge_busy = False
+    session.bridge_busy = False
     drain_stderr(session)
     drained = drain_sdk_buffer(session)
 
-    if session._log:
-        session._log.info("USER: %s", _content_summary(content))
+    if session.agent_log:
+        session.agent_log.info("USER: %s", content_summary(content))
     log.info("PROCESS[%s] drained=%d, calling query+stream", session.name, drained)
     try:
         async with asyncio.timeout(config.QUERY_TIMEOUT):
-            await session.client.query(_as_stream(content))
-            await _stream_with_retry(session, channel)
+            await session.client.query(as_stream(content))
+            await stream_with_retry(session, channel)
     except TimeoutError:
-        await _handle_query_timeout(session, channel)
+        await handle_query_timeout(session, channel)
     except Exception:
         log.exception("Error querying Claude Code agent '%s'", session.name)
         raise RuntimeError(f"Query failed for agent '{session.name}'") from None
@@ -2050,8 +2134,8 @@ async def spawn_agent(
         os.makedirs(cwd, exist_ok=True)
         log.info("Auto-created working directory: %s", cwd)
 
-    normalized = _normalize_channel_name(name)
-    _bot_creating_channels.add(normalized)
+    normalized = normalize_channel_name(name)
+    bot_creating_channels.add(normalized)
     channel = await ensure_agent_channel(name)
 
     if agent_type == "flowcoder":
@@ -2073,7 +2157,7 @@ async def spawn_agent(
             flowcoder_args=command_args,
         )
     else:
-        prompt = _make_spawned_agent_system_prompt(cwd, packs=packs)
+        prompt = make_spawned_agent_system_prompt(cwd, packs=packs)
         mcp_servers: dict[str, Any] = {}
         if _utils_mcp_server is not None:
             mcp_servers["utils"] = _utils_mcp_server
@@ -2083,7 +2167,7 @@ async def spawn_agent(
             name=name,
             cwd=cwd,
             system_prompt=prompt,
-            system_prompt_hash=_compute_prompt_hash(prompt),
+            system_prompt_hash=compute_prompt_hash(prompt),
             client=None,
             session_id=resume,
             discord_channel_id=channel.id,
@@ -2092,10 +2176,10 @@ async def spawn_agent(
 
     agents[name] = session
     channel_to_agent[channel.id] = name
-    _bot_creating_channels.discard(normalized)
+    bot_creating_channels.discard(normalized)
     log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)
 
-    desired_topic = _format_channel_topic(cwd, resume, session.system_prompt_hash)
+    desired_topic = format_channel_topic(cwd, resume, session.system_prompt_hash)
     if channel.topic != desired_topic:
         log.info("Updating topic on #%s: %r -> %r", channel.name, channel.topic, desired_topic)
         await channel.edit(topic=desired_topic)
@@ -2108,7 +2192,7 @@ async def spawn_agent(
         await send_system(channel, f"Agent **{name}** is ready (sleeping).")
         return
 
-    asyncio.create_task(_run_initial_prompt(session, initial_prompt, channel))
+    asyncio.create_task(run_initial_prompt(session, initial_prompt, channel))
 
 
 async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
@@ -2126,7 +2210,7 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
     ts_prefix = datetime.now(UTC).strftime("[%Y-%m-%d %H:%M:%S UTC] ")
     prompt = ts_prefix + prompt
 
-    asyncio.create_task(_run_initial_prompt(session, prompt, channel))
+    asyncio.create_task(run_initial_prompt(session, prompt, channel))
 
 
 # ---------------------------------------------------------------------------
@@ -2196,7 +2280,7 @@ async def _run_flowcoder(session: AgentSession, channel: TextChannel) -> None:
         await send_system(channel, f"Flowcoder agent **{session.name}** encountered an error.")
 
 
-async def _run_inline_flowchart(session: AgentSession, channel: TextChannel, command: str, args: str) -> None:
+async def run_inline_flowchart(session: AgentSession, channel: TextChannel, command: str, args: str) -> None:
     """Run a flowchart command inline in an agent's channel."""
     async with session.query_lock:
         session.last_activity = datetime.now(UTC)
@@ -2206,7 +2290,7 @@ async def _run_inline_flowchart(session: AgentSession, channel: TextChannel, com
         await send_system(channel, f"Running flowchart: `{cmd_display}`")
         await _run_and_stream_flowcoder(session, channel, command, args, f"Flowchart `{command}`")
 
-    await _process_message_queue(session)
+    await process_message_queue(session)
 
 
 async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChannel) -> None:
@@ -2327,7 +2411,7 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
 # ---------------------------------------------------------------------------
 
 
-async def _run_initial_prompt(session: AgentSession, prompt: MessageContent, channel: TextChannel) -> None:
+async def run_initial_prompt(session: AgentSession, prompt: MessageContent, channel: TextChannel) -> None:
     """Run the initial prompt for a spawned agent."""
     try:
         async with session.query_lock:
@@ -2337,7 +2421,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: MessageContent, cha
                 except ConcurrencyLimitError:
                     log.info("Concurrency limit hit for '%s' initial prompt — queuing", session.name)
                     session.message_queue.append((prompt, channel, None))
-                    awake = _count_awake_agents()
+                    awake = count_awake_agents()
                     await send_system(
                         channel,
                         f"⏳ All {awake} agent slots are busy. Initial prompt queued — will run when a slot opens.",
@@ -2355,9 +2439,9 @@ async def _run_initial_prompt(session: AgentSession, prompt: MessageContent, cha
             prompt_text = prompt if isinstance(prompt, str) else str(prompt)
             await send_long(channel, f"*System:* 📝 **Initial prompt:**\n{prompt_text}")
 
-            if session._log:
-                session._log.info("PROMPT: %s", _content_summary(prompt))
-            log.info("INITIAL_PROMPT[%s] running initial prompt: %s", session.name, _content_summary(prompt))
+            if session.agent_log:
+                session.agent_log.info("PROMPT: %s", content_summary(prompt))
+            log.info("INITIAL_PROMPT[%s] running initial prompt: %s", session.name, content_summary(prompt))
             session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
             try:
                 await process_message(session, prompt, channel)
@@ -2375,7 +2459,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: MessageContent, cha
         log.exception("Error running initial prompt for agent '%s'", session.name)
         await send_system(channel, f"Agent **{session.name}** encountered an error during initial task.")
 
-    await _process_message_queue(session)
+    await process_message_queue(session)
 
     try:
         await sleep_agent(session)
@@ -2383,7 +2467,7 @@ async def _run_initial_prompt(session: AgentSession, prompt: MessageContent, cha
         log.exception("Error sleeping agent '%s' after initial prompt", session.name)
 
 
-async def _process_message_queue(session: AgentSession) -> None:
+async def process_message_queue(session: AgentSession) -> None:
     """Process any queued messages for an agent after the current query finishes."""
     if session.message_queue:
         log.info("QUEUE[%s] processing %d queued messages", session.name, len(session.message_queue))
@@ -2395,10 +2479,10 @@ async def _process_message_queue(session: AgentSession) -> None:
 
         remaining = len(session.message_queue)
         log.debug("Processing queued message for '%s' (%d remaining)", session.name, remaining)
-        if session._log:
-            session._log.info("QUEUED_MSG: %s", _content_summary(content))
-        await _remove_reaction(orig_message, "📨")
-        preview = _content_summary(content)
+        if session.agent_log:
+            session.agent_log.info("QUEUED_MSG: %s", content_summary(content))
+        await remove_reaction(orig_message, "📨")
+        preview = content_summary(content)
         remaining_str = f" ({remaining} more in queue)" if remaining > 0 else ""
         await send_system(channel, f"Processing queued message{remaining_str}:\n> {preview}")
 
@@ -2409,15 +2493,15 @@ async def _process_message_queue(session: AgentSession) -> None:
                     await _post_model_warning(session)
                 except Exception:
                     log.exception("Failed to wake agent '%s' for queued message", session.name)
-                    await _add_reaction(orig_message, "❌")
+                    await add_reaction(orig_message, "❌")
                     await send_system(
                         channel,
                         f"Failed to wake agent **{session.name}** — dropping queued message.",
                     )
                     while session.message_queue:
                         _, ch, dropped_msg = session.message_queue.popleft()
-                        await _remove_reaction(dropped_msg, "📨")
-                        await _add_reaction(dropped_msg, "❌")
+                        await remove_reaction(dropped_msg, "📨")
+                        await add_reaction(dropped_msg, "❌")
                         await send_system(
                             ch,
                             f"Failed to wake agent **{session.name}** — dropping queued message.",
@@ -2427,21 +2511,21 @@ async def _process_message_queue(session: AgentSession) -> None:
             _reset_session_activity(session)
             try:
                 await process_message(session, content, channel)
-                await _add_reaction(orig_message, "✅")
+                await add_reaction(orig_message, "✅")
             except TimeoutError:
-                await _add_reaction(orig_message, "⏳")
-                await _handle_query_timeout(session, channel)
+                await add_reaction(orig_message, "⏳")
+                await handle_query_timeout(session, channel)
             except RuntimeError as e:
                 log.warning(
                     "Runtime error processing queued message for '%s': %s",
                     session.name,
                     e,
                 )
-                await _add_reaction(orig_message, "❌")
+                await add_reaction(orig_message, "❌")
                 await send_system(channel, str(e))
             except Exception:
                 log.exception("Error processing queued message for '%s'", session.name)
-                await _add_reaction(orig_message, "❌")
+                await add_reaction(orig_message, "❌")
                 await send_system(
                     channel,
                     f"Error processing queued message for **{session.name}**.",
@@ -2455,7 +2539,7 @@ async def _process_message_queue(session: AgentSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _deliver_inter_agent_message(
+async def deliver_inter_agent_message(
     sender_name: str,
     target_session: AgentSession,
     content: str,
@@ -2513,7 +2597,7 @@ async def _process_inter_agent_prompt(
                     await _post_model_warning(session)
                 except ConcurrencyLimitError:
                     session.message_queue.append((content, channel, None))
-                    awake = _count_awake_agents()
+                    awake = count_awake_agents()
                     log.info(
                         "Concurrency limit hit for '%s' inter-agent message — queuing",
                         session.name,
@@ -2538,7 +2622,7 @@ async def _process_inter_agent_prompt(
             try:
                 await process_message(session, content, channel)
             except TimeoutError:
-                await _handle_query_timeout(session, channel)
+                await handle_query_timeout(session, channel)
             except RuntimeError as e:
                 log.warning(
                     "Runtime error processing inter-agent message for '%s': %s",
@@ -2558,7 +2642,7 @@ async def _process_inter_agent_prompt(
             finally:
                 session.activity = ActivityState(phase="idle")
 
-        await _process_message_queue(session)
+        await process_message_queue(session)
     except Exception:
         log.exception(
             "Unhandled error in _process_inter_agent_prompt for '%s'",
@@ -2571,7 +2655,7 @@ async def _process_inter_agent_prompt(
 # ---------------------------------------------------------------------------
 
 
-async def _connect_bridge() -> None:
+async def connect_bridge() -> None:
     """Connect to the agent bridge and schedule reconnections for running agents."""
     global bridge_conn
 
@@ -2619,7 +2703,7 @@ async def _connect_bridge() -> None:
                 except Exception:
                     pass
                 continue
-            session._reconnecting = True
+            session.reconnecting = True
             asyncio.create_task(_reconnect_flowcoder(session, agent_name, info))
             continue
 
@@ -2641,7 +2725,7 @@ async def _connect_bridge() -> None:
             buffered,
         )
 
-        session._reconnecting = True
+        session.reconnecting = True
         asyncio.create_task(_reconnect_and_drain(session, info))
 
 
@@ -2651,7 +2735,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
         async with session.query_lock:
             if bridge_conn is None or not bridge_conn.is_alive:
                 log.warning("Bridge connection lost during reconnect of '%s'", session.name)
-                session._reconnecting = False
+                session.reconnecting = False
                 return
 
             transport = await _create_transport(session, reconnecting=True)
@@ -2684,8 +2768,8 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
             session.client = client
             session.last_activity = datetime.now(UTC)
 
-            if session._log:
-                session._log.info(
+            if session.agent_log:
+                session.agent_log.info(
                     "SESSION_RECONNECT via bridge (replayed=%d, idle=%s)",
                     replayed,
                     cli_idle,
@@ -2693,12 +2777,12 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
 
             if cli_status == "exited":
                 log.info("Agent '%s' CLI exited while we were down", session.name)
-                session._reconnecting = False
+                session.reconnecting = False
 
-            session._reconnecting = False
+            session.reconnecting = False
 
             if cli_status == "running" and not cli_idle:
-                session._bridge_busy = True
+                session.bridge_busy = True
                 channel = await get_agent_channel(session.name)
                 if replayed > 0 and channel:
                     log.info("RECONNECT_DRAIN[%s] draining buffered output (replayed=%d)", session.name, replayed)
@@ -2710,7 +2794,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
                         log.warning("Drain timeout for '%s' — continuing", session.name)
                     except Exception:
                         log.exception("Error draining buffered output for '%s'", session.name)
-                    session._bridge_busy = False
+                    session.bridge_busy = False
                     session.last_activity = datetime.now(UTC)
                 elif channel:
                     await send_system(channel, "*(reconnected after restart — task still running)*")
@@ -2718,7 +2802,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
                     "Agent '%s' reconnected mid-task (idle=False, replayed=%d, bridge_busy=%s)",
                     session.name,
                     replayed,
-                    session._bridge_busy,
+                    session.bridge_busy,
                 )
             elif cli_status == "running":
                 channel = await get_agent_channel(session.name)
@@ -2730,9 +2814,9 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
 
     except Exception:
         log.exception("Failed to reconnect agent '%s'", session.name)
-        session._reconnecting = False
+        session.reconnecting = False
 
-    await _process_message_queue(session)
+    await process_message_queue(session)
 
 
 async def _reconnect_flowcoder(session: AgentSession, bridge_name: str, bridge_info: dict[str, Any]) -> None:
@@ -2742,7 +2826,7 @@ async def _reconnect_flowcoder(session: AgentSession, bridge_name: str, bridge_i
         async with session.query_lock:
             if bridge_conn is None or not bridge_conn.is_alive:
                 log.warning("Bridge connection lost during flowcoder reconnect of '%s'", bridge_name)
-                session._reconnecting = False
+                session.reconnecting = False
                 return
 
             proc = BridgeFlowcoderProcess(
@@ -2754,7 +2838,7 @@ async def _reconnect_flowcoder(session: AgentSession, bridge_name: str, bridge_i
             )
             sub_result = await proc.subscribe()
             session.flowcoder_process = proc
-            session._reconnecting = False
+            session.reconnecting = False
 
             replayed = sub_result.replayed or 0
             log.info(
@@ -2780,9 +2864,9 @@ async def _reconnect_flowcoder(session: AgentSession, bridge_name: str, bridge_i
 
     except Exception:
         log.exception("Failed to reconnect flowcoder '%s'", bridge_name)
-        session._reconnecting = False
+        session.reconnecting = False
 
-    await _process_message_queue(session)
+    await process_message_queue(session)
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false, reportUnusedFunction=false
+# pyright: reportUnusedFunction=false
 """Discord bot orchestrator — event handlers, slash commands, and scheduler.
 
 Thin layer that wires Discord events to agent lifecycle functions in agents.py.
@@ -26,11 +26,11 @@ from discord.ext.commands import Bot
 import agents
 import config
 import tools
-from axi_types import ActivityState, AgentSession, _tool_display
+from axi_types import ActivityState, AgentSession, tool_display
 from prompts import (
     MASTER_SYSTEM_PROMPT,
-    _compute_prompt_hash,
-    _make_spawned_agent_system_prompt,
+    compute_prompt_hash,
+    make_spawned_agent_system_prompt,
 )
 from schedule_tools import make_schedule_mcp_server, schedule_key, schedules_lock
 from shutdown import ShutdownCoordinator, kill_supervisor
@@ -125,12 +125,12 @@ async def on_message(message: discord.Message) -> None:
     channel = message.channel
 
     # --- Get content and look up agent ---
-    content = await agents._extract_message_content(message)
+    content = await agents.extract_message_content(message)
     log.info(
         "Message from %s in #%s: %s",
         message.author,
         channel.name,
-        agents._content_summary(content),
+        agents.content_summary(content),
     )
 
     if agents.shutdown_coordinator and agents.shutdown_coordinator.requested:
@@ -164,13 +164,13 @@ async def on_message(message: discord.Message) -> None:
         text = re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\]\s*", "", raw).strip().lower()
         if text in ("approve", "approved", "yes", "y", "lgtm", "go", "proceed", "ok"):
             session.plan_approval_future.set_result({"approved": True, "message": ""})
-            await agents._add_reaction(message, "✅")
+            await agents.add_reaction(message, "✅")
             await agents.send_system(channel, "Plan approved — agent resuming implementation.")
         elif text in ("reject", "rejected", "no", "n", "cancel", "stop"):
             session.plan_approval_future.set_result(
                 {"approved": False, "message": "User rejected the plan. Please revise."}
             )
-            await agents._add_reaction(message, "❌")
+            await agents.add_reaction(message, "❌")
             await agents.send_system(channel, "Plan rejected — agent will revise.")
         else:
             feedback = content if isinstance(content, str) else str(content)
@@ -180,7 +180,7 @@ async def on_message(message: discord.Message) -> None:
                     "message": f"User wants changes to the plan: {feedback}",
                 }
             )
-            await agents._add_reaction(message, "📝")
+            await agents.add_reaction(message, "📝")
             await agents.send_system(channel, "Feedback received — agent will revise the plan.")
         return
 
@@ -197,13 +197,13 @@ async def on_message(message: discord.Message) -> None:
         agent_name,
         msg_id,
         agents.is_processing(session),
-        session._reconnecting,
+        session.reconnecting,
         len(session.message_queue),
         session.query_lock.locked(),
     )
 
     # 1. Reconnecting: queue messages
-    if session._reconnecting:
+    if session.reconnecting:
         session.message_queue.append((content, channel, message))
         position = len(session.message_queue)
         log.debug(
@@ -211,7 +211,7 @@ async def on_message(message: discord.Message) -> None:
             agent_name,
             position,
         )
-        await agents._add_reaction(message, "📨")
+        await agents.add_reaction(message, "📨")
         await agents.send_system(
             channel,
             f"Agent **{agent_name}** is reconnecting after restart — message queued (position {position}).",
@@ -222,7 +222,7 @@ async def on_message(message: discord.Message) -> None:
     if session.agent_type == "flowcoder" and agents.is_processing(session):
         try:
             await agents.process_message(session, content, channel)
-            await agents._add_reaction(message, "✅")
+            await agents.add_reaction(message, "✅")
             return
         except RuntimeError as e:
             await agents.send_system(channel, str(e))
@@ -233,7 +233,7 @@ async def on_message(message: discord.Message) -> None:
         session.message_queue.append((content, channel, message))
         position = len(session.message_queue)
         log.debug("Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position)
-        await agents._add_reaction(message, "📨")
+        await agents.add_reaction(message, "📨")
         await agents.send_system(
             channel,
             f"Agent **{agent_name}** is busy — message queued (position {position}). Will process after current turn.",
@@ -254,18 +254,18 @@ async def on_message(message: discord.Message) -> None:
 
         try:
             await agents.process_message(session, content, channel)
-            await agents._add_reaction(message, "✅")
+            await agents.add_reaction(message, "✅")
         except TimeoutError:
             log.warning("Query timeout for agent '%s'", agent_name)
-            await agents._add_reaction(message, "⏳")
-            await agents._handle_query_timeout(session, channel)
+            await agents.add_reaction(message, "⏳")
+            await agents.handle_query_timeout(session, channel)
         except RuntimeError as e:
             log.warning("Runtime error for agent '%s': %s", agent_name, e)
-            await agents._add_reaction(message, "❌")
+            await agents.add_reaction(message, "❌")
             await agents.send_system(channel, str(e))
         except Exception:
             log.exception("Error processing message for agent '%s'", agent_name)
-            await agents._add_reaction(message, "❌")
+            await agents.add_reaction(message, "❌")
             await agents.send_system(
                 channel,
                 f"Error communicating with agent **{agent_name}**. Try `/kill-agent {agent_name}` and respawn.",
@@ -274,7 +274,7 @@ async def on_message(message: discord.Message) -> None:
             session.activity = ActivityState(phase="idle")
 
     log.info("ON_MSG[%s][%s] query_lock RELEASED, checking queue", agent_name, msg_id)
-    await agents._process_message_queue(session)
+    await agents.process_message_queue(session)
     await bot.process_commands(message)
 
 
@@ -296,7 +296,7 @@ async def check_schedules() -> None:
     entries = agents.load_schedules()
     fired_one_off_keys: set[str] = set()
 
-    log.debug("Scheduler tick: %d entries, %d agents awake", len(entries), agents._count_awake_agents())
+    log.debug("Scheduler tick: %d entries, %d agents awake", len(entries), agents.count_awake_agents())
 
     master_ch = await agents.get_master_channel()
 
@@ -410,17 +410,17 @@ async def check_schedules() -> None:
         session.last_idle_notified = datetime.now(UTC)
 
     # --- Stranded-message safety net ---
-    if agents._count_awake_agents() < config.MAX_AWAKE_AGENTS:
+    if agents.count_awake_agents() < config.MAX_AWAKE_AGENTS:
         for agent_name, session in list(agents.agents.items()):
             if session.client is None and session.message_queue and not session.query_lock.locked():
                 content, ch, stranded_msg = session.message_queue.popleft()
                 log.info("Stranded message found for sleeping agent '%s', waking", agent_name)
-                await agents._remove_reaction(stranded_msg, "📨")
-                asyncio.create_task(agents._run_initial_prompt(session, content, ch))
+                await agents.remove_reaction(stranded_msg, "📨")
+                asyncio.create_task(agents.run_initial_prompt(session, content, ch))
                 break
 
     # --- Delayed sleep for idle awake agents ---
-    awake_count = agents._count_awake_agents()
+    awake_count = agents.count_awake_agents()
     under_pressure = awake_count >= config.MAX_AWAKE_AGENTS
     idle_threshold = timedelta(seconds=0) if under_pressure else timedelta(minutes=1)
     if under_pressure:
@@ -431,7 +431,7 @@ async def check_schedules() -> None:
             continue
         if session.query_lock.locked():
             continue
-        if session._bridge_busy:
+        if session.bridge_busy:
             continue
         idle_duration = now_utc - session.last_activity
         if idle_duration > idle_threshold:
@@ -571,20 +571,20 @@ async def claude_usage_command(interaction: discord.Interaction, history: int | 
     total_cost = 0.0
     total_queries = 0
 
-    if agents._session_usage:
+    if agents.session_usage:
         for sid, usage in sorted(
-            agents._session_usage.items(), key=lambda x: x[1].last_query or datetime.min.replace(tzinfo=UTC), reverse=True
+            agents.session_usage.items(), key=lambda x: x[1].last_query or datetime.min.replace(tzinfo=UTC), reverse=True
         ):
             total_cost += usage.total_cost_usd
             total_queries += usage.queries
 
             duration_s = usage.total_duration_ms // 1000
-            duration_str = agents._format_time_remaining(duration_s) if duration_s > 0 else "0s"
+            duration_str = agents.format_time_remaining(duration_s) if duration_s > 0 else "0s"
 
             active_str = ""
             if usage.first_query:
                 age_s = int((datetime.now(UTC) - usage.first_query).total_seconds())
-                active_str = f" | Active since {agents._format_time_remaining(age_s)} ago"
+                active_str = f" | Active since {agents.format_time_remaining(age_s)} ago"
 
             token_str = ""
             if usage.total_input_tokens or usage.total_output_tokens:
@@ -603,18 +603,18 @@ async def claude_usage_command(interaction: discord.Interaction, history: int | 
 
     lines.append("")
 
-    if agents._rate_limit_quotas:
+    if agents.rate_limit_quotas:
         now = datetime.now(UTC)
         lines.append("**Rate Limits**")
 
         display_order = ["five_hour", "seven_day"]
-        sorted_keys = [k for k in display_order if k in agents._rate_limit_quotas]
-        sorted_keys += [k for k in agents._rate_limit_quotas if k not in display_order]
+        sorted_keys = [k for k in display_order if k in agents.rate_limit_quotas]
+        sorted_keys += [k for k in agents.rate_limit_quotas if k not in display_order]
 
         for rl_type in sorted_keys:
-            q = agents._rate_limit_quotas[rl_type]
+            q = agents.rate_limit_quotas[rl_type]
             remaining_s = max(0, int((q.resets_at - now).total_seconds()))
-            resets_str = agents._format_time_remaining(remaining_s) if remaining_s > 0 else "now"
+            resets_str = agents.format_time_remaining(remaining_s) if remaining_s > 0 else "now"
 
             local_reset = q.resets_at.astimezone(config.SCHEDULE_TIMEZONE)
             reset_time_str = local_reset.strftime("%-I:%M %p")
@@ -637,12 +637,12 @@ async def claude_usage_command(interaction: discord.Interaction, history: int | 
             label = q.rate_limit_type.replace("_", " ")
             lines.append(f"  {label}: {status_str} — resets at {reset_time_str} (in {resets_str})")
 
-        latest_update = max(q.updated_at for q in agents._rate_limit_quotas.values())
+        latest_update = max(q.updated_at for q in agents.rate_limit_quotas.values())
         age_s = int((now - latest_update).total_seconds())
-        age_str = agents._format_time_remaining(age_s) if age_s > 0 else "just now"
+        age_str = agents.format_time_remaining(age_s) if age_s > 0 else "just now"
         lines.append(f"  Last checked: {age_str} ago")
-    elif agents._rate_limited_until:
-        remaining = agents._format_time_remaining(agents._rate_limit_remaining_seconds())
+    elif agents.rate_limited_until:
+        remaining = agents.format_time_remaining(agents.rate_limit_remaining_seconds())
         lines.append(f"**Rate Limit**: \U0001f6ab Rate limited (~{remaining} remaining)")
     else:
         lines.append("**Rate Limit**: No data yet (updates on next API call)")
@@ -657,10 +657,10 @@ async def model_command(interaction: discord.Interaction, name: str | None = Non
 
 
     if name is None:
-        current = config._get_model()
+        current = config.get_model()
         await interaction.response.send_message(f"Current model: **{current}**")
     else:
-        error = config._set_model(name)
+        error = config.set_model(name)
         if error:
             await interaction.response.send_message(f"*System:* {error}", ephemeral=True)
         else:
@@ -699,7 +699,7 @@ async def list_agents(interaction: discord.Interaction) -> None:
             f"- **{name}**{status}{killed_tag}{protected}{ch_mention} | cwd: `{session.cwd}` | idle: {idle_minutes}m{sid}"
         )
 
-    awake = agents._count_awake_agents()
+    awake = agents.count_awake_agents()
     header = f"*System:* **Agent Sessions** ({awake}/{config.MAX_AWAKE_AGENTS} awake):\n"
     await interaction.response.send_message(header + "\n".join(lines))
 
@@ -743,11 +743,11 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
                 lines.append(f"Current block: {activity.tool_name}")
             if activity.query_started:
                 elapsed = int((now - activity.query_started).total_seconds())
-                lines.append(f"Elapsed: {agents._format_time_remaining(elapsed)}")
+                lines.append(f"Elapsed: {agents.format_time_remaining(elapsed)}")
         else:
             lines.append("State: finished")
             idle = int((now - session.last_activity).total_seconds())
-            lines.append(f"Finished: {agents._format_time_remaining(idle)} ago")
+            lines.append(f"Finished: {agents.format_time_remaining(idle)} ago")
         lines.append(f"cwd: `{session.cwd}`")
         return "\n".join(lines)
 
@@ -755,13 +755,13 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
     if session.client is None:
         lines.append("State: sleeping")
         idle = int((now - session.last_activity).total_seconds())
-        lines.append(f"Last active: {agents._format_time_remaining(idle)} ago")
-    elif session._bridge_busy:
+        lines.append(f"Last active: {agents.format_time_remaining(idle)} ago")
+    elif session.bridge_busy:
         lines.append("State: **busy** (running in bridge)")
     elif not session.query_lock.locked():
         lines.append("State: awake, idle")
         idle = int((now - session.last_activity).total_seconds())
-        lines.append(f"Idle for: {agents._format_time_remaining(idle)}")
+        lines.append(f"Idle for: {agents.format_time_remaining(idle)}")
     else:
         activity = session.activity
 
@@ -770,14 +770,14 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
         elif activity.phase == "writing":
             lines.append(f"State: **writing response** ({activity.text_chars} chars so far)")
         elif activity.phase == "tool_use" and activity.tool_name:
-            display = _tool_display(activity.tool_name)
+            display = tool_display(activity.tool_name)
             lines.append(f"State: **{display}**")
             if activity.tool_name == "Bash" and activity.tool_input_preview:
-                preview = agents._extract_tool_preview(activity.tool_name, activity.tool_input_preview)
+                preview = agents.extract_tool_preview(activity.tool_name, activity.tool_input_preview)
                 if preview:
                     lines.append(f"```\n{preview}\n```")
             elif activity.tool_name in ("Read", "Write", "Edit", "Grep", "Glob") and activity.tool_input_preview:
-                preview = agents._extract_tool_preview(activity.tool_name, activity.tool_input_preview)
+                preview = agents.extract_tool_preview(activity.tool_name, activity.tool_input_preview)
                 if preview:
                     lines.append(f"`{preview}`")
         elif activity.phase == "waiting":
@@ -789,7 +789,7 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
 
         if activity.query_started:
             elapsed = int((now - activity.query_started).total_seconds())
-            lines.append(f"Query running for: {agents._format_time_remaining(elapsed)}")
+            lines.append(f"Query running for: {agents.format_time_remaining(elapsed)}")
 
         if activity.turn_count > 0:
             lines.append(f"API turns: {activity.turn_count}")
@@ -797,14 +797,14 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
         if activity.last_event:
             since_last = int((now - activity.last_event).total_seconds())
             if since_last > 30:
-                lines.append(f"No stream events for {agents._format_time_remaining(since_last)} (may be running a long tool)")
+                lines.append(f"No stream events for {agents.format_time_remaining(since_last)} (may be running a long tool)")
 
     queue_size = len(session.message_queue)
     if queue_size > 0:
         lines.append(f"Queued messages: {queue_size}")
 
-    if agents._is_rate_limited():
-        remaining = agents._format_time_remaining(agents._rate_limit_remaining_seconds())
+    if agents.is_rate_limited():
+        remaining = agents.format_time_remaining(agents.rate_limit_remaining_seconds())
         lines.append(f"Rate limited: ~{remaining} remaining")
 
     if session.plan_mode:
@@ -828,12 +828,12 @@ async def _show_all_agents_status(interaction: discord.Interaction) -> None:
     for name, session in agents.agents.items():
         if session.client is None:
             idle = int((now - session.last_activity).total_seconds())
-            status = f"sleeping ({agents._format_time_remaining(idle)})"
-        elif session._bridge_busy:
+            status = f"sleeping ({agents.format_time_remaining(idle)})"
+        elif session.bridge_busy:
             status = "busy (running in bridge)"
         elif not session.query_lock.locked():
             idle = int((now - session.last_activity).total_seconds())
-            status = f"idle ({agents._format_time_remaining(idle)})"
+            status = f"idle ({agents.format_time_remaining(idle)})"
         else:
             activity = session.activity
             if activity.phase == "thinking":
@@ -841,7 +841,7 @@ async def _show_all_agents_status(interaction: discord.Interaction) -> None:
             elif activity.phase == "writing":
                 status = "writing response..."
             elif activity.phase == "tool_use" and activity.tool_name:
-                status = _tool_display(activity.tool_name)
+                status = tool_display(activity.tool_name)
             elif activity.phase == "waiting":
                 status = "processing tool results..."
             else:
@@ -849,16 +849,16 @@ async def _show_all_agents_status(interaction: discord.Interaction) -> None:
 
             if activity.query_started:
                 elapsed = int((now - activity.query_started).total_seconds())
-                status += f" ({agents._format_time_remaining(elapsed)})"
+                status += f" ({agents.format_time_remaining(elapsed)})"
 
         queue = len(session.message_queue)
         queue_str = f" | {queue} queued" if queue > 0 else ""
         lines.append(f"- **{name}**: {status}{queue_str}")
 
-    awake = agents._count_awake_agents()
+    awake = agents.count_awake_agents()
     header = f"**Agent Status** ({awake}/{config.MAX_AWAKE_AGENTS} awake)"
-    if agents._is_rate_limited():
-        remaining = agents._format_time_remaining(agents._rate_limit_remaining_seconds())
+    if agents.is_rate_limited():
+        remaining = agents.format_time_remaining(agents.rate_limit_remaining_seconds())
         header += f" | rate limited (~{remaining})"
 
     await interaction.response.send_message(f"*System:* {header}\n" + "\n".join(lines), ephemeral=True)
@@ -988,7 +988,7 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
         cleared = 0
         while session.message_queue:
             _, ch, dropped_msg = session.message_queue.popleft()
-            await agents._remove_reaction(dropped_msg, "📨")
+            await agents.remove_reaction(dropped_msg, "📨")
             cleared += 1
 
         parts = [f"*System:* Interrupt signal sent to **{agent_name}**."]
@@ -1182,8 +1182,8 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
             session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
             try:
                 async with asyncio.timeout(config.QUERY_TIMEOUT):
-                    await session.client.query(agents._as_stream(command))
-                    await agents._stream_with_retry(session, channel)
+                    await session.client.query(agents.as_stream(command))
+                    await agents.stream_with_retry(session, channel)
                 await agents.send_system(channel, f"{label} for **{agent_name}**.")
             except TimeoutError:
                 await agents.send_system(channel, f"{label} timed out for **{agent_name}**.")
@@ -1245,8 +1245,8 @@ async def _run_agent_sdk_command(interaction: discord.Interaction, agent_name: s
                 assert session.discord_channel_id is not None
                 ch = bot.get_channel(session.discord_channel_id)
                 assert isinstance(ch, TextChannel)
-                await session.client.query(agents._as_stream(command))
-                await agents._stream_with_retry(session, ch)
+                await session.client.query(agents.as_stream(command))
+                await agents.stream_with_retry(session, ch)
             await interaction.followup.send(f"*System:* {label} for **{agent_name}**.")
         except TimeoutError:
             await interaction.followup.send(f"*System:* {label} timed out for **{agent_name}**.")
@@ -1303,8 +1303,8 @@ async def _run_telos_interview(session: AgentSession, channel: TextChannel) -> N
 
     log.info("Starting TELOS interview for agent '%s'", session.name)
     assert session.client is not None
-    await session.client.query(agents._as_stream(query))
-    await agents._stream_with_retry(session, channel)
+    await session.client.query(agents.as_stream(query))
+    await agents.stream_with_retry(session, channel)
 
 
 @bot.tree.command(
@@ -1443,7 +1443,7 @@ async def flowchart_cmd(interaction: discord.Interaction, name: str, args: str |
     assert session.discord_channel_id is not None
     ch = bot.get_channel(session.discord_channel_id)
     assert isinstance(ch, TextChannel)
-    asyncio.create_task(agents._run_inline_flowchart(session, ch, name, args or ""))
+    asyncio.create_task(agents.run_inline_flowchart(session, ch, name, args or ""))
 
     await interaction.followup.send(f"*System:* Flowchart `{name}` started on **{agent_name}**.")
 
@@ -1557,16 +1557,16 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
         return
     if not agents.active_category or channel.category_id != agents.active_category.id:
         return
-    if channel.name in agents._bot_creating_channels:
+    if channel.name in agents.bot_creating_channels:
         return
-    if channel.name == agents._normalize_channel_name(config.MASTER_AGENT_NAME):
+    if channel.name == agents.normalize_channel_name(config.MASTER_AGENT_NAME):
         return
 
     agent_name = channel.name
     cwd = os.path.join(config.AXI_USER_DATA, "agents", agent_name)
     os.makedirs(cwd, exist_ok=True)
 
-    prompt = _make_spawned_agent_system_prompt(cwd)
+    prompt = make_spawned_agent_system_prompt(cwd)
     mcp_servers: dict[str, Any] = {"utils": tools.utils_mcp_server}
     mcp_servers["schedule"] = make_schedule_mcp_server(agent_name, config.SCHEDULES_PATH)
 
@@ -1575,14 +1575,14 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
         client=None,
         cwd=cwd,
         system_prompt=prompt,
-        system_prompt_hash=_compute_prompt_hash(prompt),
+        system_prompt_hash=compute_prompt_hash(prompt),
         discord_channel_id=channel.id,
         mcp_servers=mcp_servers,
     )
     agents.agents[agent_name] = session
     agents.channel_to_agent[channel.id] = agent_name
 
-    desired_topic = agents._format_channel_topic(cwd, prompt_hash=session.system_prompt_hash)
+    desired_topic = agents.format_channel_topic(cwd, prompt_hash=session.system_prompt_hash)
     try:
         await channel.edit(topic=desired_topic)
     except discord.HTTPException as e:
@@ -1763,7 +1763,7 @@ async def on_ready() -> None:
         log.exception("Failed to reconstruct agents from channels")
 
     # Connect to the agent bridge (or start a new one)
-    await agents._connect_bridge()
+    await agents.connect_bridge()
 
     # Initialize shutdown coordinator now that all helpers are available
     agents.init_shutdown_coordinator()

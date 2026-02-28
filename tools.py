@@ -1,4 +1,3 @@
-# pyright: reportPrivateUsage=false
 """MCP tool definitions and server assembly for the Axi bot.
 
 All @tool-decorated functions and MCP server objects live here.
@@ -6,6 +5,14 @@ This module imports from agents.py (one-way: agents.py does NOT import tools.py)
 """
 
 from __future__ import annotations
+
+__all__ = [
+    "axi_master_mcp_server",
+    "axi_mcp_server",
+    "discord_mcp_server",
+    "sdk_mcp_servers_for_cwd",
+    "utils_mcp_server",
+]
 
 import asyncio
 import json
@@ -184,7 +191,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
                 packs=agent_packs,
             )
         except Exception:
-            agents._bot_creating_channels.discard(agents._normalize_channel_name(agent_name))
+            agents.bot_creating_channels.discard(agents.normalize_channel_name(agent_name))
             log.exception("Error in background spawn of agent '%s'", agent_name)
             try:
                 channel = await agents.get_agent_channel(agent_name)
@@ -204,7 +211,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     # Guard against on_guild_channel_create race: mark channel as bot-created
     # BEFORE the background task runs, so the guard is already set when the
     # gateway event fires.  spawn_agent will discard it after agents[name] is set.
-    agents._bot_creating_channels.add(agents._normalize_channel_name(agent_name))
+    agents.bot_creating_channels.add(agents.normalize_channel_name(agent_name))
     asyncio.create_task(_do_spawn())
     return {
         "content": [
@@ -346,7 +353,7 @@ async def axi_send_message(args: McpArgs) -> McpResult:
     sender_name = args.get("sender", "").strip() or config.MASTER_AGENT_NAME
     log.info("Inter-agent message: '%s' -> '%s': %s", sender_name, target_name, content[:200])
 
-    result = await agents._deliver_inter_agent_message(sender_name, target_session, content)
+    result = await agents.deliver_inter_agent_message(sender_name, target_session, content)
     return {"content": [{"type": "text", "text": result}]}
 
 
@@ -449,7 +456,7 @@ async def discord_send_file(args: McpArgs) -> McpResult:
         if content:
             data["content"] = content
         files = {"files[0]": (filename, file_data)}
-        resp = await config._discord_request(
+        resp = await config.discord_request(
             "POST",
             f"/channels/{channel_id}/messages",
             data=data,
@@ -480,7 +487,7 @@ async def discord_send_file(args: McpArgs) -> McpResult:
 async def discord_list_channels(args: McpArgs) -> McpResult:
     guild_id = args["guild_id"]
     try:
-        resp = await config._discord_request("GET", f"/guilds/{guild_id}/channels")
+        resp = await config.discord_request("GET", f"/guilds/{guild_id}/channels")
         channels: list[dict[str, Any]] = resp.json()
         # Filter to text channels (type 0) and format
         # Build category map
@@ -515,7 +522,7 @@ async def discord_read_messages(args: McpArgs) -> McpResult:
     channel_id = args["channel_id"]
     limit = min(args.get("limit", 20), 100)
     try:
-        resp = await config._discord_request("GET", f"/channels/{channel_id}/messages", params={"limit": limit})
+        resp = await config.discord_request("GET", f"/channels/{channel_id}/messages", params={"limit": limit})
         messages = resp.json()
         # Messages come newest-first; reverse for chronological order
         messages.reverse()
@@ -561,7 +568,7 @@ async def discord_send_message(args: McpArgs) -> McpResult:
             "is_error": True,
         }
     try:
-        resp = await config._discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
+        resp = await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
         msg = resp.json()
         return {"content": [{"type": "text", "text": f"Message sent (id: {msg['id']})"}]}
     except Exception as e:

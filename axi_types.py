@@ -1,4 +1,3 @@
-# pyright: reportPrivateUsage=false
 """Pure data types for the Axi bot.
 
 Dataclasses, type aliases, and exceptions. No methods that delegate to other modules.
@@ -8,7 +7,20 @@ functions in agents.py (e.g. agents.wake_agent(session)).
 
 from __future__ import annotations
 
-__all__ = ["_tool_display"]
+__all__ = [
+    "TOOL_DISPLAY_NAMES",
+    "ActivityState",
+    "AgentSession",
+    "ConcurrencyLimitError",
+    "ContentBlock",
+    "McpArgs",
+    "McpResult",
+    "MessageContent",
+    "PlanApprovalResult",
+    "RateLimitQuota",
+    "SessionUsage",
+    "tool_display",
+]
 
 import asyncio
 import logging
@@ -86,7 +98,7 @@ TOOL_DISPLAY_NAMES = {
 }
 
 
-def _tool_display(name: str) -> str:
+def tool_display(name: str) -> str:
     """Human-readable description of a tool call."""
     if name in TOOL_DISPLAY_NAMES:
         return TOOL_DISPLAY_NAMES[name]
@@ -114,15 +126,15 @@ class AgentSession:
     last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
     system_prompt: SystemPromptPreset | str | None = None
     system_prompt_hash: str | None = None  # Hash of system prompt text for change detection across restarts
-    _system_prompt_posted: bool = False  # Set True after posting system prompt to Discord
+    system_prompt_posted: bool = False  # Set True after posting system prompt to Discord
     last_idle_notified: datetime | None = None
     idle_reminder_count: int = 0
     session_id: str | None = None
     discord_channel_id: int | None = None
     message_queue: deque[tuple[MessageContent, Any, Any]] = field(default_factory=lambda: deque[tuple[MessageContent, Any, Any]]())
     mcp_servers: dict[str, Any] | None = None
-    _reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
-    _bridge_busy: bool = False  # True when reconnected to a mid-task CLI (bridge idle=False)
+    reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
+    bridge_busy: bool = False  # True when reconnected to a mid-task CLI (bridge idle=False)
     activity: ActivityState = field(default_factory=ActivityState)
     flowcoder_process: FlowcoderProcess | BridgeFlowcoderProcess | None = None
     flowcoder_command: str = ""
@@ -132,7 +144,7 @@ class AgentSession:
     )  # Post tool calls and thinking phases to Discord
     plan_approval_future: asyncio.Future[PlanApprovalResult] | None = None  # Set when waiting for user to approve/reject a plan
     plan_mode: bool = False  # When True, agent is in plan mode (read-only, plan before implement)
-    _log: logging.Logger | None = None
+    agent_log: logging.Logger | None = None
 
     def __post_init__(self) -> None:
         """Set up per-agent logger writing to <assistant_dir>/logs/<name>.log."""
@@ -151,14 +163,14 @@ class AgentSession:
             _agent_fmt.converter = time.gmtime
             fh.setFormatter(_agent_fmt)
             logger.addHandler(fh)
-        self._log = logger
+        self.agent_log = logger
 
     def close_log(self) -> None:
         """Remove all handlers from the per-agent logger."""
-        if self._log:
-            for handler in self._log.handlers[:]:
+        if self.agent_log:
+            for handler in self.agent_log.handlers[:]:
                 handler.close()
-                self._log.removeHandler(handler)
+                self.agent_log.removeHandler(handler)
 
 
 # ---------------------------------------------------------------------------
