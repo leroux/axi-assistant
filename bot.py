@@ -315,7 +315,10 @@ async def _fire_schedules(
 
                 skey = schedule_key(entry)
                 if skey not in agents.schedule_last_fired:
-                    agents.schedule_last_fired[skey] = datetime.min.replace(tzinfo=last_occurrence.tzinfo)
+                    # First time seeing this schedule (e.g. after restart):
+                    # assume it already fired, so we don't catch-up all
+                    # past occurrences at once.
+                    agents.schedule_last_fired[skey] = last_occurrence
 
                 if last_occurrence > agents.schedule_last_fired[skey]:
                     agents.schedule_last_fired[skey] = last_occurrence
