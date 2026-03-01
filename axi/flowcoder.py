@@ -29,11 +29,14 @@ from claudewire.types import ExitEvent, StderrEvent, StdoutEvent
 
 
 def build_engine_cmd(
-    command: str,
-    args: str = "",
     search_paths: list[str] | None = None,
 ) -> list[str]:
-    """Build flowcoder-engine argv (binary resolution + flags)."""
+    """Build flowcoder-engine argv (binary resolution + flags).
+
+    The engine is a persistent proxy — it waits for user messages on stdin
+    and intercepts slash commands matching known flowcharts. The command
+    and args are sent as a user message after starting, not as CLI flags.
+    """
 
     flowcoder_home = os.environ.get(
         "FLOWCODER_HOME",
@@ -53,9 +56,7 @@ def build_engine_cmd(
 
     default_search = os.path.join(flowcoder_home, "examples", "commands")
 
-    cmd: list[str] = [engine_bin, "--command", command]
-    if args:
-        cmd += ["--args", args]
+    cmd: list[str] = [engine_bin]
     for sp in [default_search] + (search_paths or []):
         cmd += ["--search-path", sp]
     return cmd
@@ -104,7 +105,7 @@ class FlowcoderProcess:
 
     async def start(self) -> None:
         """Spawn the flowcoder-engine subprocess."""
-        cmd = build_engine_cmd(self.command, self.args, self.search_paths)
+        cmd = build_engine_cmd(self.search_paths)
         env = build_engine_env()
 
         log.info("Starting flowcoder-engine: %s (cwd=%s)", " ".join(cmd), self.cwd)
@@ -257,7 +258,7 @@ class ManagedFlowcoderProcess:
 
     async def start(self) -> None:
         """Spawn the engine in procmux and subscribe to its output."""
-        cmd = build_engine_cmd(self.command, self.args, self.search_paths)
+        cmd = build_engine_cmd(self.search_paths)
         env = build_engine_env()
 
         log.info(

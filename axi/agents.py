@@ -9,9 +9,7 @@ import json
 import logging
 import os
 import re
-import time
 import traceback
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1377,6 +1375,20 @@ async def _receive_response_safe(session: AgentSession):
             return
 
 
+def _parse_flowcoder_message(data: dict[str, Any]) -> AssistantMessage | StreamEvent | ResultMessage | SystemMessage | None:
+    """Parse a flowcoder engine JSON message into an SDK typed object.
+
+    Returns None for message types not handled by SDK (e.g. rate_limit_event).
+    Fills missing fields that the engine doesn't emit but parse_message requires.
+    """
+    if data.get("type") == "result":
+        data.setdefault("duration_api_ms", 0)
+    try:
+        return parse_message(data)  # type: ignore[return-value]
+    except MessageParseError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Activity tracking
 # ---------------------------------------------------------------------------
@@ -1580,6 +1592,13 @@ async def _handle_assistant_message(
         ctx.text_buffer = ""
         ctx.hit_transient_error = msg.error
     else:
+        # When text arrives in full AssistantMessages (flowcoder engine path)
+        # rather than via StreamEvent deltas (Claude Code path), the buffer
+        # will be empty.  Extract text from content blocks in that case.
+        if not ctx.text_buffer.strip():
+            for block in msg.content or []:
+                if hasattr(block, "text"):
+                    ctx.text_buffer += cast("str", getattr(block, "text", ""))
         await _flush_text(ctx, session, channel, "assistant_msg")
         ctx.text_buffer = ""
         _stop_typing(ctx, typing_ctx)
@@ -1602,10 +1621,20 @@ async def _handle_result_message(
 ) -> None:
     """Handle a ResultMessage during response streaming."""
     _stop_typing(ctx, typing_ctx)
-    await _set_session_id(session, msg, channel=channel)
     if not ctx.hit_rate_limit:
         await _flush_text(ctx, session, channel, "result_msg")
     ctx.text_buffer = ""
+
+    # Flowchart results use session_id="flowchart" — don't update agent session or record usage
+    if msg.session_id == "flowchart":
+        if session.agent_log:
+            session.agent_log.info(
+                "FLOWCHART_RESULT: cost=$%s turns=%d duration=%dms error=%s",
+                msg.total_cost_usd, msg.num_turns, msg.duration_ms, msg.is_error,
+            )
+        return
+
+    await _set_session_id(session, msg, channel=channel)
     if session.agent_log:
         session.agent_log.info(
             "RESULT: cost=$%s turns=%d duration=%dms session=%s",
@@ -1617,7 +1646,12 @@ async def _handle_result_message(
     _record_session_usage(session.name, msg)
 
 
-async def _handle_system_message(session: AgentSession, channel: TextChannel, msg: SystemMessage) -> None:
+_SILENT_BLOCK_TYPES = {"start", "end", "variable"}
+
+
+async def _handle_system_message(
+    session: AgentSession, channel: TextChannel, msg: SystemMessage, ctx: _StreamCtx | None = None
+) -> None:
     """Handle a SystemMessage during response streaming."""
     if session.agent_log:
         session.agent_log.debug("SYSTEM_MSG: subtype=%s data=%s", msg.subtype, json.dumps(msg.data)[:500])
@@ -1628,6 +1662,46 @@ async def _handle_system_message(session: AgentSession, channel: TextChannel, ms
         log.info("Agent '%s' context compacted: trigger=%s pre_tokens=%s", session.name, trigger, pre_tokens)
         token_info = f" ({pre_tokens:,} tokens)" if pre_tokens else ""
         await channel.send(f"\U0001f504 Context compacted{token_info}")
+
+    # Flowchart events (emitted by flowcoder-engine during takeover mode)
+    elif msg.subtype == "block_start":
+        if ctx:
+            await _flush_text(ctx, session, channel, "block_start")
+            ctx.text_buffer = ""
+        data = msg.data.get("data", {})
+        block_name = data.get("block_name", "?")
+        block_type = data.get("block_type", "?")
+        session.activity = ActivityState(
+            phase="tool_use",
+            tool_name=f"flowcoder:{block_type}",
+            query_started=session.activity.query_started,
+        )
+        if block_type not in _SILENT_BLOCK_TYPES:
+            await channel.send(f"\u25b6 **{block_name}** (`{block_type}`)")
+
+    elif msg.subtype == "block_complete":
+        if ctx:
+            await _flush_text(ctx, session, channel, "block_complete")
+            ctx.text_buffer = ""
+        data = msg.data.get("data", {})
+        if not data.get("success", True):
+            block_name = data.get("block_name", "?")
+            await channel.send(f"> {block_name} **FAILED**")
+
+    elif msg.subtype == "flowchart_start":
+        data = msg.data.get("data", {})
+        log.info(
+            "Flowchart started for '%s': command=%s blocks=%s",
+            session.name, data.get("command"), data.get("block_count"),
+        )
+
+    elif msg.subtype == "flowchart_complete":
+        data = msg.data.get("data", {})
+        duration_s = data.get("duration_ms", 0) / 1000
+        cost = data.get("cost_usd", 0)
+        blocks = data.get("blocks_executed", 0)
+        status = "**completed**" if data.get("status") == "completed" else "**failed**"
+        await send_system(channel, f"Flowchart {status} in {duration_s:.0f}s | Cost: ${cost:.4f} | Blocks: {blocks}")
 
 
 # ---------------------------------------------------------------------------
@@ -2414,173 +2488,92 @@ async def _reconnect_flowcoder(session: AgentSession, process_name: str, process
 
 
 # ---------------------------------------------------------------------------
-# Flowcoder management: start, stream, and dispatch flowcoder events
+# Flowcoder streaming — reuses Claude Code message handlers
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _FlowcoderCtx:
-    """Mutable state for a single flowcoder streaming session."""
-
-    text_buffer: list[str] = field(default_factory=lambda: list[str]())
-    current_block: str = ""
-    block_count: int = 0
-    start_time: float = field(default_factory=time.monotonic)
-
-    async def flush_buffer(self, channel: TextChannel) -> None:
-        if self.text_buffer:
-            text = "".join(self.text_buffer)
-            self.text_buffer.clear()
-            if text.strip():
-                await send_long(channel, text)
-
-
-_SILENT_BLOCK_TYPES = {"start", "end", "variable"}
-
-
-# ---------------------------------------------------------------------------
-# Dispatch table handlers
-# ---------------------------------------------------------------------------
-
-
-async def _handle_block_start(
-    ctx: _FlowcoderCtx, session: AgentSession, channel: TextChannel, msg: dict[str, Any]
-) -> None:
-    await ctx.flush_buffer(channel)
-    data = msg.get("data", {})
-    ctx.block_count += 1
-    block_name = data.get("block_name", "?")
-    block_type = data.get("block_type", "?")
-    ctx.current_block = block_name
-    session.activity = ActivityState(
-        phase="tool_use",
-        tool_name=f"flowcoder:{block_type}",
-        query_started=session.activity.query_started,
-    )
-    if block_type not in _SILENT_BLOCK_TYPES:
-        await channel.send(f"\u25b6 **{block_name}** (`{block_type}`)")
-
-
-async def _handle_block_complete(
-    ctx: _FlowcoderCtx, session: AgentSession, channel: TextChannel, msg: dict[str, Any]
-) -> None:
-    await ctx.flush_buffer(channel)
-    data = msg.get("data", {})
-    success = data.get("success", True)
-    block_name = data.get("block_name", ctx.current_block)
-    if not success:
-        await channel.send(f"> {block_name} **FAILED**")
-
-
-async def _handle_session_message(
-    ctx: _FlowcoderCtx, session: AgentSession, channel: TextChannel, msg: dict[str, Any]
-) -> None:
-    data = msg.get("data", {})
-    inner = data.get("message", {})
-    inner_type = inner.get("type", "")
-
-    if inner_type == "assistant":
-        if ctx.text_buffer:
-            await ctx.flush_buffer(channel)
-        else:
-            message: dict[str, Any] = inner.get("message", {})
-            raw_content: Any = message.get("content", [])
-            parts: list[str] = []
-            if isinstance(raw_content, str):
-                parts.append(raw_content)
-            elif isinstance(raw_content, list):
-                content_blocks = cast("list[ContentBlock]", raw_content)
-                parts.extend(
-                    str(blk.get("text", ""))
-                    for blk in content_blocks
-                    if blk.get("type") == "text"
-                )
-            fallback_text = "\n".join(parts)
-            if fallback_text.strip():
-                await send_long(channel, fallback_text)
-
-    elif inner_type == "stream_event":
-        event = inner.get("event", {})
-        event_type = event.get("type", "")
-        if event_type == "content_block_delta":
-            delta = event.get("delta", {})
-            if delta.get("type") == "text_delta":
-                ctx.text_buffer.append(delta.get("text", ""))
-                buf_len = sum(len(t) for t in ctx.text_buffer)
-                if buf_len >= 1800:
-                    await ctx.flush_buffer(channel)
-
-
-async def _handle_fc_result(
-    ctx: _FlowcoderCtx, session: AgentSession, channel: TextChannel, msg: dict[str, Any]
-) -> bool:
-    """Returns True to signal the stream loop should break."""
-    await ctx.flush_buffer(channel)
-    elapsed = time.monotonic() - ctx.start_time
-    is_error = msg.get("is_error", False)
-    status = "**failed**" if is_error else "**completed**"
-    cost = msg.get("total_cost_usd", 0)
-    summary = f"Flowchart {status} in {elapsed:.0f}s | Cost: ${cost:.4f} | Blocks: {ctx.block_count}"
-    await send_system(channel, summary)
-    return True
-
-
-async def _handle_fc_status(
-    ctx: _FlowcoderCtx, session: AgentSession, channel: TextChannel, msg: dict[str, Any]
-) -> bool:
-    """Returns True to signal the stream loop should break."""
-    return bool(not msg.get("busy", False))
-
-
-async def _handle_fc_control(
-    ctx: _FlowcoderCtx, session: AgentSession, channel: TextChannel, msg: dict[str, Any]
-) -> None:
-    assert session.flowcoder_process is not None
-    request = msg.get("request", msg)
+async def _auto_approve_control(proc: Any, raw: dict[str, Any]) -> None:
+    """Auto-approve a control_request from the flowcoder engine."""
+    request = raw.get("request", raw)
     request_id = request.get("request_id", "")
-    response = {
+    await proc.send({
         "type": "control_response",
-        "response": {
-            "request_id": request_id,
-            "allowed": True,
-        },
-    }
-    await session.flowcoder_process.send(response)
-
-
-# ---------------------------------------------------------------------------
-# Stream flowcoder to channel (dispatch-table driven)
-# ---------------------------------------------------------------------------
+        "response": {"request_id": request_id, "allowed": True},
+    })
 
 
 async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChannel) -> None:
-    """Read flowcoder messages and translate to Discord output."""
+    """Stream flowcoder engine messages to Discord, reusing Claude Code handlers.
+
+    The engine emits the same message types as Claude Code (assistant,
+    stream_event, result, system) plus flowchart-specific system subtypes.
+    Messages are parsed into SDK typed objects and dispatched through the
+    same handlers used by stream_response_to_channel.
+    """
     proc = session.flowcoder_process
     assert proc is not None
 
-    ctx = _FlowcoderCtx()
+    ctx = _StreamCtx()
+    in_flowchart = False  # Track whether we're inside a flowchart execution
 
-    async for msg in proc.messages():
-        session.last_activity = datetime.now(UTC)
-        msg_type = msg.get("type", "")
-        msg_subtype = msg.get("subtype", "")
+    async with channel.typing() as typing_ctx:
+        log.info("Flowcoder streaming started for '%s', waiting for messages...", session.name)
+        async for raw in proc.messages():
+            session.last_activity = datetime.now(UTC)
+            raw_type = raw.get("type", "")
+            log.debug("Flowcoder raw message for '%s': type=%s", session.name, raw_type)
 
-        if msg_type == "system" and msg_subtype == "block_start":
-            await _handle_block_start(ctx, session, channel, msg)
-        elif msg_type == "system" and msg_subtype == "block_complete":
-            await _handle_block_complete(ctx, session, channel, msg)
-        elif msg_type == "system" and msg_subtype == "session_message":
-            await _handle_session_message(ctx, session, channel, msg)
-        elif msg_type == "result":
-            if await _handle_fc_result(ctx, session, channel, msg):
+            # Auto-approve control requests from inner Claude
+            if raw_type == "control_request":
+                await _auto_approve_control(proc, raw)
+                continue
+
+            # Skip status_response (used for reconnect polling)
+            if raw_type == "status_response":
+                if not raw.get("busy", False):
+                    break
+                continue
+
+            parsed = _parse_flowcoder_message(raw)
+            if parsed is None:
+                log.debug("Unhandled flowcoder message type=%s for '%s'", raw_type, session.name)
+                continue
+
+            if isinstance(parsed, StreamEvent):
+                await _handle_stream_event(ctx, session, channel, parsed, typing_ctx)
+            elif isinstance(parsed, AssistantMessage):
+                await _handle_assistant_message(ctx, session, channel, parsed, typing_ctx)
+            elif isinstance(parsed, ResultMessage):
+                # During flowcharts, inner block results should not end the stream —
+                # only the final result (session_id="flowchart") or a proxy turn result should.
+                if in_flowchart and parsed.session_id != "flowchart":
+                    # Inner block result — flush text buffer between blocks, then continue
+                    if ctx.text_buffer.strip():
+                        await _flush_text(ctx, session, channel, "block_result")
+                    continue
+                await _handle_result_message(ctx, session, channel, parsed, typing_ctx)
                 break
-        elif msg_type == "status_response":
-            if await _handle_fc_status(ctx, session, channel, msg):
-                break
-        elif msg_type == "control_request":
-            await _handle_fc_control(ctx, session, channel, msg)
+            else:  # SystemMessage
+                # Track flowchart state
+                if parsed.subtype == "flowchart_start":
+                    in_flowchart = True
+                elif parsed.subtype == "flowchart_complete":
+                    in_flowchart = False
+                await _handle_system_message(session, channel, parsed, ctx)
 
-    await ctx.flush_buffer(channel)
+            # Mid-turn flush (same as Claude Code path)
+            if not ctx.hit_rate_limit and len(ctx.text_buffer) >= 1800:
+                split_at = ctx.text_buffer.rfind("\n", 0, 1800)
+                if split_at == -1:
+                    split_at = 1800
+                remainder = ctx.text_buffer[split_at:].lstrip("\n")
+                ctx.text_buffer = ctx.text_buffer[:split_at]
+                await _flush_text(ctx, session, channel, "mid_turn_split")
+                ctx.text_buffer = remainder
+
+    # Final flush
+    if ctx.text_buffer.strip():
+        await _flush_text(ctx, session, channel, "flowcoder_end")
 
 
 # ---------------------------------------------------------------------------
@@ -2604,6 +2597,15 @@ async def _run_and_stream_flowcoder(
         proc = FlowcoderProcess(command=command, args=args, cwd=session.cwd)
     await proc.start()
     session.flowcoder_process = proc
+
+    # The engine is a persistent proxy — send the flowchart command as a
+    # user message with a slash command so the engine intercepts it.
+    slash_content = f"/{command}" + (f" {args}" if args else "")
+    await proc.send({
+        "type": "user",
+        "message": {"content": slash_content},
+    })
+    log.info("Sent flowchart command to engine: %s", slash_content)
 
     try:
         await _stream_flowcoder_to_channel(session, channel)
