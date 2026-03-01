@@ -8,7 +8,9 @@ import io
 import json
 import logging
 import os
+import pathlib
 import re
+import time
 import traceback
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -501,6 +503,40 @@ def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None 
     return _check_permission
 
 
+_PLAN_FILE_MAX_AGE_SECS = 120  # Only consider plan files modified within the last 2 minutes
+
+
+def _read_latest_plan_file() -> str | None:
+    """Read the most recently modified plan file from ~/.claude/plans/.
+
+    Claude Code writes plans to ~/.claude/plans/<random-name>.md.  The LLM
+    doesn't always include the plan content in the ExitPlanMode tool_input,
+    so this serves as a reliable fallback.
+    """
+    plans_dir = pathlib.Path.home() / ".claude" / "plans"
+    if not plans_dir.is_dir():
+        return None
+    try:
+        candidates = sorted(
+            plans_dir.glob("*.md"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    now = time.time()
+    for path in candidates[:1]:
+        try:
+            age = now - path.stat().st_mtime
+            if age > _PLAN_FILE_MAX_AGE_SECS:
+                return None
+            content = path.read_text(encoding="utf-8").strip()
+            return content or None
+        except OSError:
+            continue
+    return None
+
+
 async def _handle_exit_plan_mode(
     session: AgentSession | None,
     tool_input: dict[str, Any],
@@ -515,6 +551,14 @@ async def _handle_exit_plan_mode(
         return await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
 
     plan_content = (tool_input.get("plan") or "").strip() or None
+
+    # Fallback: the LLM doesn't always include the plan in tool_input.
+    # Claude Code writes the plan to ~/.claude/plans/<name>.md before ExitPlanMode fires,
+    # so read the most recently modified file as a fallback.
+    if not plan_content:
+        plan_content = _read_latest_plan_file()
+        if plan_content:
+            log.info("Read plan from disk for '%s' (tool_input had no plan key)", session.name)
 
     header = f"\U0001f4cb **Plan from {session.name}** \u2014 waiting for approval"
     try:
