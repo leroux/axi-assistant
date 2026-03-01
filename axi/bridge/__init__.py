@@ -6,7 +6,8 @@ Claude-aware transport and CLI arg building have moved to ``claudewire``.
 This module re-exports everything under the old names for backward compatibility.
 """
 
-from claudewire import BridgeTransport, build_cli_spawn_args
+from claudewire import BridgeTransport
+from claudewire.cli import build_cli_spawn_args
 from procmux import (
     CmdMsg,
     ExitMsg,

@@ -306,6 +306,11 @@ wheels = [
 ]
 
 [[package]]
+name = "claudewire"
+version = "0.1.0"
+source = { directory = "claudewire" }
+
+[[package]]
 name = "click"
 version = "8.1.8"
 source = { registry = "https://pypi.org/simple" }
@@ -444,11 +449,13 @@ name = "flowcoder-engine"
 version = "0.1.0"
 source = { directory = "../flowcoder-rewrite/packages/flowcoder-engine" }
 dependencies = [
+    { name = "claudewire" },
     { name = "flowcoder-flowchart" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "claudewire", directory = "claudewire" },
     { name = "flowcoder-flowchart", specifier = ">=0.1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
