@@ -552,21 +552,30 @@ async def _handle_exit_plan_mode(
 
     plan_content = (tool_input.get("plan") or "").strip() or None
 
-    # Fallback: the LLM doesn't always include the plan in tool_input.
-    # Claude Code writes the plan to ~/.claude/plans/<name>.md before ExitPlanMode fires,
-    # so read the most recently modified file as a fallback.
+    # Heuristic fallback: the LLM doesn't always include the plan in tool_input
+    # (the "plan" key is an additionalProperty, not a defined schema field).
+    # Claude Code always writes the plan to ~/.claude/plans/<name>.md before
+    # ExitPlanMode fires, so we pick the most recently modified file as a
+    # best-effort fallback.  This is imprecise when multiple agents exit plan
+    # mode within the same 2-minute window, but in practice that's rare.
+    used_heuristic = False
     if not plan_content:
         plan_content = _read_latest_plan_file()
         if plan_content:
+            used_heuristic = True
             log.info("Read plan from disk for '%s' (tool_input had no plan key)", session.name)
 
     header = f"\U0001f4cb **Plan from {session.name}** \u2014 waiting for approval"
     try:
         if plan_content:
             plan_bytes = plan_content.encode("utf-8")
+            heuristic_note = (
+                "\n*(Plan recovered from disk via heuristic — Claude Code bug omitted it from tool input)*"
+                if used_heuristic else ""
+            )
             await config.discord_request(
                 "POST", f"/channels/{channel_id}/messages",
-                data={"content": header},
+                data={"content": header + heuristic_note},
                 files={"files[0]": ("plan.txt", plan_bytes)},
             )
         else:
