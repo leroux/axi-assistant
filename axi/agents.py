@@ -129,6 +129,11 @@ _bg_tasks = BackgroundTaskSet()
 fire_and_forget = _bg_tasks.fire_and_forget
 
 
+def _user_mentions() -> str:
+    """Generate Discord @mention string for all allowed users."""
+    return " ".join(f"<@{uid}>" for uid in config.ALLOWED_USER_IDS)
+
+
 # ---------------------------------------------------------------------------
 # Initialization — called once from bot.py after Bot creation
 # ---------------------------------------------------------------------------
@@ -521,7 +526,7 @@ async def _handle_exit_plan_mode(
             )
 
         await _send_plan_msg(
-            "Reply with **approve** to proceed, **reject** to cancel, or type feedback to revise the plan."
+            f"Reply with **approve** to proceed, **reject** to cancel, or type feedback to revise the plan. {_user_mentions()}"
         )
     except Exception:
         log.exception("_handle_exit_plan_mode: failed to post plan to Discord \u2014 denying")
@@ -645,7 +650,7 @@ async def _handle_ask_user_question(
         await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
 
     try:
-        header = f"\u2753 **{session.name}** is asking you a question"
+        header = f"\u2753 **{session.name}** is asking you a question {_user_mentions()}"
         await _send_msg(header)
         for i, q in enumerate(questions):
             formatted = _format_question_for_discord(q, i, len(questions))
@@ -1992,11 +1997,11 @@ async def run_initial_prompt(session: AgentSession, prompt: MessageContent, chan
                 session.activity = ActivityState(phase="idle")
 
         log.debug("Initial prompt completed for '%s'", session.name)
-        await send_system(channel, f"Agent **{session.name}** finished initial task.")
+        await send_system(channel, f"Agent **{session.name}** finished initial task. {_user_mentions()}")
 
     except Exception:
         log.exception("Error running initial prompt for agent '%s'", session.name)
-        await send_system(channel, f"Agent **{session.name}** encountered an error during initial task.")
+        await send_system(channel, f"Agent **{session.name}** encountered an error during initial task. {_user_mentions()}")
 
     await process_message_queue(session)
 
