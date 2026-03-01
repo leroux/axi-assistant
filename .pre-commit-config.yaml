@@ -7,7 +7,7 @@ repos:
     hooks:
       - id: fixit
         name: fixit
-        entry: uv run python -m fixit lint
+        entry: uv run --no-sync python -m fixit lint
         language: system
         types: [python]
         pass_filenames: true
