@@ -89,12 +89,42 @@ async def on_error(event_method: str, *args: Any, **kwargs: Any) -> None:
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
-    """Handle reaction adds — used for AskUserQuestion emoji answers."""
+    """Handle reaction adds — plan approval and AskUserQuestion emoji answers."""
     # Ignore own reactions (bot pre-adding them)
     if bot.user and payload.user_id == bot.user.id:
         return
 
-    # Find a session waiting for an answer on this message
+    # --- Plan approval via reaction ---
+    if (
+        payload.guild_id == config.DISCORD_GUILD_ID
+        and payload.user_id in config.ALLOWED_USER_IDS
+    ):
+        agent_name = agents.channel_to_agent.get(payload.channel_id)
+        if agent_name is not None:
+            session = agents.agents.get(agent_name)
+            if (
+                session is not None
+                and session.plan_approval_message_id is not None
+                and session.plan_approval_message_id == payload.message_id
+                and session.plan_approval_future is not None
+                and not session.plan_approval_future.done()
+            ):
+                emoji = str(payload.emoji)
+                channel = bot.get_channel(payload.channel_id)
+                if emoji == "\u2705":
+                    session.plan_approval_future.set_result({"approved": True, "message": ""})
+                    if isinstance(channel, TextChannel):
+                        await agents.send_system(channel, "Plan approved — agent resuming implementation.")
+                    return
+                elif emoji == "\u274c":
+                    session.plan_approval_future.set_result(
+                        {"approved": False, "message": "User rejected the plan. Please revise."}
+                    )
+                    if isinstance(channel, TextChannel):
+                        await agents.send_system(channel, "Plan rejected — agent will revise.")
+                    return
+
+    # --- AskUserQuestion emoji answers ---
     session = agents.find_session_by_question_message(payload.message_id)
     if session is None or session.question_future is None or session.question_future.done():
         return
@@ -1038,6 +1068,7 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
 
         if session.plan_approval_future and not session.plan_approval_future.done():
             session.plan_approval_future.set_result({"approved": False, "message": "Interrupted by /stop."})
+        session.plan_approval_message_id = None
 
         if session.question_future and not session.question_future.done():
             session.question_future.set_result("")

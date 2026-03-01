@@ -172,6 +172,7 @@ from discord import Intents
 intents = Intents(
     guilds=True,
     guild_messages=True,
+    guild_reactions=True,
     message_content=True,
     dm_messages=True,
 )

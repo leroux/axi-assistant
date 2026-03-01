@@ -104,6 +104,7 @@ class AgentSession:
         default_factory=lambda: os.environ.get("DISCORD_DEBUG", "").strip().lower() in ("1", "true", "on")
     )  # Post tool calls and thinking phases to Discord
     plan_approval_future: asyncio.Future[PlanApprovalResult] | None = None  # Set when waiting for user to approve/reject a plan
+    plan_approval_message_id: int | None = None  # Discord message ID of the approval prompt (for reaction-based approval)
     plan_mode: bool = False  # When True, agent is in plan mode (read-only, plan before implement)
     question_future: asyncio.Future[str] | None = None  # Set when waiting for user to answer a single question
     question_data: dict[str, Any] | None = None  # Current question being asked (options, multiSelect, etc.)

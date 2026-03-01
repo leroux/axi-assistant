@@ -511,8 +511,8 @@ async def _handle_exit_plan_mode(
 
     channel_id = session.discord_channel_id
 
-    async def _send_plan_msg(content: str) -> None:
-        await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
+    async def _send_plan_msg(content: str) -> httpx.Response:
+        return await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
 
     plan_content = (tool_input.get("plan") or "").strip() or None
 
@@ -530,9 +530,18 @@ async def _handle_exit_plan_mode(
                 f"{header}\n\n*(Plan file not found \u2014 the agent should have described the plan in its messages above.)*"
             )
 
-        await _send_plan_msg(
-            f"Reply with **approve** to proceed, **reject** to cancel, or type feedback to revise the plan. {_user_mentions()}"
+        resp = await _send_plan_msg(
+            f"React with \u2705 to approve or \u274c to reject, or type feedback to revise the plan. {_user_mentions()}"
         )
+        approval_msg_id = resp.json()["id"]
+
+        # Pre-react with approval/rejection emojis so the user can click them
+        for emoji in ("\u2705", "\u274c"):
+            encoded = emoji.encode("utf-8").decode("utf-8")
+            await config.discord_request(
+                "PUT", f"/channels/{channel_id}/messages/{approval_msg_id}/reactions/{encoded}/@me",
+            )
+        session.plan_approval_message_id = int(approval_msg_id)
     except Exception:
         log.exception("_handle_exit_plan_mode: failed to post plan to Discord \u2014 denying")
         return PermissionResultDeny(
@@ -549,6 +558,16 @@ async def _handle_exit_plan_mode(
         result = await future
     finally:
         session.plan_approval_future = None
+        session.plan_approval_message_id = None
+
+    # Remove the unchosen reaction so the result is visually clear
+    remove_emoji = "\u274c" if result.get("approved") else "\u2705"
+    try:
+        await config.discord_request(
+            "DELETE", f"/channels/{channel_id}/messages/{approval_msg_id}/reactions/{remove_emoji}/@me",
+        )
+    except Exception:
+        log.debug("Failed to remove reaction from plan approval message", exc_info=True)
 
     if result.get("approved"):
         log.info("Agent '%s' plan approved by user", session.name)
