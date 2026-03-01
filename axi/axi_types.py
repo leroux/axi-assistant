@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk import ClaudeSDKClient
     from claude_agent_sdk.types import SystemPromptPreset
 
-    from axi.flowcoder import BridgeFlowcoderProcess, FlowcoderProcess
+    from axi.flowcoder import FlowcoderProcess, ManagedFlowcoderProcess
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -84,7 +84,7 @@ from claudewire.events import TOOL_DISPLAY_NAMES, ActivityState, tool_display
 @dataclass
 class AgentSession:
     name: str
-    agent_type: str = "claude_code"  # "claude_code" or "flowcoder"
+    agent_type: str = "flowcoder"  # "flowcoder" (default) or "claude_code"
     client: ClaudeSDKClient | None = None
     cwd: str = ""
     query_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -103,7 +103,7 @@ class AgentSession:
     reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
     bridge_busy: bool = False  # True when reconnected to a mid-task CLI (bridge idle=False)
     activity: ActivityState = field(default_factory=ActivityState)
-    flowcoder_process: FlowcoderProcess | BridgeFlowcoderProcess | None = None
+    flowcoder_process: FlowcoderProcess | ManagedFlowcoderProcess | None = None
     flowcoder_command: str = ""
     flowcoder_args: str = ""
     debug: bool = field(

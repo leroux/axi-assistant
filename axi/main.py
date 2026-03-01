@@ -244,17 +244,7 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
-    # 2. Flowcoder running: forward to stdin
-    if session.agent_type == "flowcoder" and agents.is_processing(session):
-        try:
-            await agents.process_message(session, content, channel)
-            await agents.add_reaction(message, "✅")
-            return
-        except RuntimeError as e:
-            await agents.send_system(channel, str(e))
-            return
-
-    # 3. Agent busy: queue messages for later
+    # 2. Agent busy: queue messages for later
     if agents.is_processing(session):
         session.message_queue.append((content, channel, message))
         position = len(session.message_queue)
@@ -1232,6 +1222,30 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
                 session.activity = ActivityState(phase="idle")
         return True
 
+    if cmd == "flowchart" and config.FLOWCODER_ENABLED:
+        if session.agent_type != "flowcoder":
+            await agents.send_system(channel, "Flowcharts are only available for **flowcoder** agents.")
+            return True
+
+        if not cmd_args:
+            await agents.send_system(channel, "Usage: `//flowchart <command> [args]`")
+            return True
+
+        fc_parts = cmd_args.split(None, 1)
+        fc_name = fc_parts[0]
+        fc_args = fc_parts[1] if len(fc_parts) > 1 else ""
+
+        if session.query_lock.locked():
+            await agents.send_system(channel, f"Agent **{agent_name}** is busy.")
+            return True
+
+        if session.flowcoder_process and session.flowcoder_process.is_running:
+            await agents.send_system(channel, f"Agent **{agent_name}** already has a flowchart running.")
+            return True
+
+        agents.fire_and_forget(agents.run_inline_flowchart(session, channel, fc_name, fc_args))
+        return True
+
     return False
 
 
@@ -1435,6 +1449,12 @@ async def flowchart_cmd(interaction: discord.Interaction, name: str, args: str |
     if resolved is None:
         return
     agent_name, session = resolved
+
+    if session.agent_type != "flowcoder":
+        await interaction.response.send_message(
+            "Flowcharts are only available for **flowcoder** agents.", ephemeral=True
+        )
+        return
 
     if session.query_lock.locked():
         await interaction.response.send_message(

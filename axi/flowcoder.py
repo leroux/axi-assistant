@@ -2,7 +2,7 @@
 
 Provides two implementations:
 - FlowcoderProcess: direct subprocess (default)
-- BridgeFlowcoderProcess: backed by the agent bridge for persistence across bot restarts
+- ManagedFlowcoderProcess: backed by procmux (via agenthub) for persistence across bot restarts
 """
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from procmux import ProcmuxConnection as BridgeConnection
+    from agenthub.procmux_wire import ProcmuxProcessConnection
 
 log = logging.getLogger(__name__)
 
-from procmux import ExitMsg, StderrMsg, StdoutMsg
+from claudewire.types import ExitEvent, StderrEvent, StdoutEvent
 
 # ------------------------------------------------------------------
 # Shared helpers
@@ -82,7 +82,7 @@ class FlowcoderProcess:
     (outbound).  Stderr is forwarded to the logger.
     """
 
-    is_bridge_backed: bool = False
+    is_managed: bool = False
 
     def __init__(
         self,
@@ -220,35 +220,35 @@ class FlowcoderProcess:
 
 
 # ------------------------------------------------------------------
-# Bridge-backed implementation
+# Managed (procmux-backed) implementation
 # ------------------------------------------------------------------
 
 
-class BridgeFlowcoderProcess:
-    """Flowcoder engine backed by the agent bridge.
+class ManagedFlowcoderProcess:
+    """Flowcoder engine managed by procmux via agenthub.
 
-    Same interface as FlowcoderProcess but the subprocess lives in the bridge,
-    surviving bot.py restarts. Uses bridge spawn/subscribe/kill commands.
+    Same interface as FlowcoderProcess but the subprocess lives in procmux,
+    surviving bot.py restarts. Uses the claudewire ProcessConnection protocol.
     """
 
-    is_bridge_backed: bool = True
+    is_managed: bool = True
 
     def __init__(
         self,
-        bridge_name: str,
-        conn: BridgeConnection,
+        process_name: str,
+        conn: ProcmuxProcessConnection,
         command: str,
         args: str = "",
         search_paths: list[str] | None = None,
         cwd: str | None = None,
     ) -> None:
-        self.bridge_name = bridge_name
+        self.process_name = process_name
         self.command = command
         self.args = args
         self.search_paths = search_paths or []
         self.cwd = cwd
         self._conn = conn
-        self._queue: asyncio.Queue[StdoutMsg | StderrMsg | ExitMsg | None] | None = None
+        self._queue: Any = None  # ProcessEventQueue
         self._running = False
 
     # ------------------------------------------------------------------
@@ -256,49 +256,48 @@ class BridgeFlowcoderProcess:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Spawn the engine in the bridge and subscribe to its output."""
+        """Spawn the engine in procmux and subscribe to its output."""
         cmd = build_engine_cmd(self.command, self.args, self.search_paths)
         env = build_engine_env()
 
         log.info(
-            "Starting bridge flowcoder '%s': %s (cwd=%s)",
-            self.bridge_name,
+            "Starting managed flowcoder '%s': %s (cwd=%s)",
+            self.process_name,
             " ".join(cmd),
             self.cwd,
         )
 
         # Register queue before spawn so we don't miss early output
-        self._queue = self._conn.register_process(self.bridge_name)
+        self._queue = self._conn.register(self.process_name)
 
-        result = await self._conn.send_command(
-            "spawn",
-            name=self.bridge_name,
+        result = await self._conn.spawn(
+            self.process_name,
             cli_args=cmd,
             env=env,
-            cwd=self.cwd,
+            cwd=self.cwd or "",
         )
         if not result.ok and not result.already_running:
-            self._conn.unregister_process(self.bridge_name)
+            self._conn.unregister(self.process_name)
             self._queue = None
-            raise RuntimeError(f"Bridge spawn failed for '{self.bridge_name}': {result.error}")
+            raise RuntimeError(f"Spawn failed for '{self.process_name}': {result.error}")
 
-        sub_result = await self._conn.send_command("subscribe", name=self.bridge_name)
+        sub_result = await self._conn.subscribe(self.process_name)
         if not sub_result.ok:
-            log.warning("Subscribe warning for '%s': %s", self.bridge_name, sub_result.error)
+            log.warning("Subscribe warning for '%s': %s", self.process_name, sub_result.error)
 
         self._running = True
 
     async def subscribe(self) -> Any:
         """Reconnect — register + subscribe without spawning.
 
-        Returns the subscribe ResultMsg (has .replayed, .status, .idle fields).
+        Returns the subscribe CommandResult (has .replayed, .status, .idle fields).
         """
-        self._queue = self._conn.register_process(self.bridge_name)
-        result = await self._conn.send_command("subscribe", name=self.bridge_name)
+        self._queue = self._conn.register(self.process_name)
+        result = await self._conn.subscribe(self.process_name)
         if not result.ok:
-            self._conn.unregister_process(self.bridge_name)
+            self._conn.unregister(self.process_name)
             self._queue = None
-            raise RuntimeError(f"Bridge subscribe failed for '{self.bridge_name}': {result.error}")
+            raise RuntimeError(f"Subscribe failed for '{self.process_name}': {result.error}")
         self._running = True
         return result
 
@@ -307,9 +306,9 @@ class BridgeFlowcoderProcess:
     # ------------------------------------------------------------------
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
-        """Async iterator reading from bridge agent queue.
+        """Async iterator reading from procmux agent queue.
 
-        Yields StdoutMsg.data dicts, logs StderrMsg, stops on ExitMsg/None.
+        Yields StdoutEvent.data dicts, logs StderrEvent, stops on ExitEvent/None.
         """
         if not self._queue:
             return
@@ -320,55 +319,55 @@ class BridgeFlowcoderProcess:
                 # Connection lost sentinel
                 self._running = False
                 break
-            if isinstance(msg, StdoutMsg):
+            if isinstance(msg, StdoutEvent):
                 yield msg.data
-            elif isinstance(msg, StderrMsg):
-                log.debug("[flowcoder-engine bridge stderr] %s", msg.text)
-            else:  # ExitMsg
+            elif isinstance(msg, StderrEvent):
+                log.debug("[flowcoder-engine stderr] %s", msg.text)
+            elif isinstance(msg, ExitEvent):
                 self._running = False
                 log.info(
-                    "Bridge flowcoder '%s' exited (code=%s)",
-                    self.bridge_name,
+                    "Managed flowcoder '%s' exited (code=%s)",
+                    self.process_name,
                     msg.code,
                 )
                 break
 
     async def send(self, msg: dict[str, Any]) -> None:
-        """Send a JSON message to the engine's stdin via the bridge."""
-        await self._conn.send_stdin(self.bridge_name, msg)
+        """Send a JSON message to the engine's stdin via procmux."""
+        await self._conn.send_stdin(self.process_name, msg)
 
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
 
     async def stop(self) -> None:
-        """Send shutdown message, then kill via bridge, then unregister."""
+        """Send shutdown message, then kill via procmux, then unregister."""
         try:
             await self.send({"type": "shutdown"})
         except Exception:
             pass
         try:
-            await self._conn.send_command("kill", name=self.bridge_name)
+            await self._conn.kill(self.process_name)
         except Exception:
             pass
-        self._conn.unregister_process(self.bridge_name)
+        self._conn.unregister(self.process_name)
         self._queue = None
         self._running = False
-        log.info("Bridge flowcoder '%s' stopped", self.bridge_name)
+        log.info("Managed flowcoder '%s' stopped", self.process_name)
 
     async def detach(self) -> None:
-        """Unsubscribe and unregister without killing — bridge buffers output.
+        """Unsubscribe and unregister without killing — procmux buffers output.
 
         Used during sleep/shutdown when the engine is mid-execution.
         """
         try:
-            await self._conn.send_command("unsubscribe", name=self.bridge_name)
+            await self._conn.send_raw_command("unsubscribe", name=self.process_name)
         except Exception:
             pass
-        self._conn.unregister_process(self.bridge_name)
+        self._conn.unregister(self.process_name)
         self._queue = None
         self._running = False
-        log.info("Bridge flowcoder '%s' detached (bridge buffering)", self.bridge_name)
+        log.info("Managed flowcoder '%s' detached (procmux buffering)", self.process_name)
 
     # ------------------------------------------------------------------
     # Properties
@@ -376,5 +375,5 @@ class BridgeFlowcoderProcess:
 
     @property
     def is_running(self) -> bool:
-        """True if the engine is believed to be running in the bridge."""
+        """True if the engine is believed to be running in procmux."""
         return self._running

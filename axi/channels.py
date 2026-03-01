@@ -70,6 +70,7 @@ def format_channel_topic(
     session_id: str | None = None,
     prompt_hash: str | None = None,
     todo_msg: int | None = None,
+    agent_type: str | None = None,
 ) -> str:
     """Format agent metadata for a Discord channel topic."""
     parts = [f"cwd: {cwd}"]
@@ -79,17 +80,22 @@ def format_channel_topic(
         parts.append(f"prompt_hash: {prompt_hash}")
     if todo_msg is not None:
         parts.append(f"todo_msg: {todo_msg}")
+    if agent_type and agent_type != "flowcoder":
+        parts.append(f"type: {agent_type}")
     return " | ".join(parts)
 
 
-def parse_channel_topic(topic: str | None) -> tuple[str | None, str | None, str | None, int | None]:
-    """Parse cwd, session_id, prompt_hash, and todo_msg from a channel topic."""
+def parse_channel_topic(
+    topic: str | None,
+) -> tuple[str | None, str | None, str | None, int | None, str | None]:
+    """Parse cwd, session_id, prompt_hash, todo_msg, and agent_type from a channel topic."""
     if not topic:
-        return None, None, None, None
+        return None, None, None, None, None
     cwd = None
     session_id = None
     prompt_hash = None
     todo_msg: int | None = None
+    agent_type: str | None = None
     for part in topic.split("|"):
         key, _, value = part.strip().partition(": ")
         if key == "cwd":
@@ -103,7 +109,9 @@ def parse_channel_topic(topic: str | None) -> tuple[str | None, str | None, str 
                 todo_msg = int(value.strip())
             except ValueError:
                 pass
-    return cwd, session_id, prompt_hash, todo_msg
+        elif key == "type":
+            agent_type = value.strip()
+    return cwd, session_id, prompt_hash, todo_msg, agent_type
 
 
 # ---------------------------------------------------------------------------

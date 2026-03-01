@@ -85,7 +85,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     agent_cwd = os.path.realpath(os.path.expanduser(args.get("cwd", default_cwd)))
     agent_prompt = args.get("prompt", "")
     agent_resume = args.get("resume")
-    agent_type = args.get("agent_type", "claude_code")
+    agent_type = args.get("agent_type", "flowcoder")
     fc_command = args.get("command", "")
     fc_command_args = args.get("command_args", "")
     agent_packs = args.get("packs")  # None = use defaults, [] = no packs
@@ -120,16 +120,6 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
         if not config.FLOWCODER_ENABLED:
             return {
                 "content": [{"type": "text", "text": "Error: flowcoder integration is disabled."}],
-                "is_error": True,
-            }
-        if not fc_command:
-            return {
-                "content": [{"type": "text", "text": "Error: 'command' is required when agent_type='flowcoder'."}],
-                "is_error": True,
-            }
-        if agent_resume:
-            return {
-                "content": [{"type": "text", "text": "Error: 'resume' is not supported for flowcoder agents."}],
                 "is_error": True,
             }
 
