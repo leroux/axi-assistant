@@ -85,7 +85,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     agent_cwd = os.path.realpath(os.path.expanduser(args.get("cwd", default_cwd)))
     agent_prompt = args.get("prompt", "")
     agent_resume = args.get("resume")
-    agent_type = args.get("agent_type", "flowcoder")
+    agent_type = args.get("agent_type", "claude_code")
     fc_command = args.get("command", "")
     fc_command_args = args.get("command_args", "")
     agent_packs = args.get("packs")  # None = use defaults, [] = no packs
