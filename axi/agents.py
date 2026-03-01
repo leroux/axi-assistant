@@ -661,6 +661,7 @@ async def _handle_ask_user_question(
 
     # Store question data for parsing the response
     session.question_data = questions
+    session.question_answers = {}
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[QuestionAnswerResult] = loop.create_future()
@@ -673,6 +674,7 @@ async def _handle_ask_user_question(
     finally:
         session.question_future = None
         session.question_data = None
+        session.question_answers = {}
 
     # Inject answers into tool input via updated_input
     answers = result.get("answers", {})

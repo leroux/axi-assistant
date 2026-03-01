@@ -194,20 +194,22 @@ async def on_message(message: discord.Message) -> None:
         raw = content.strip() if isinstance(content, str) else str(content)
         raw = re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\]\s*", "", raw).strip()
         questions = session.question_data or []
-        answers: dict[str, str] = {}
-        if len(questions) == 1:
-            # Single question — use the whole reply as the answer
-            q = questions[0]
-            answers[q.get("question", "")] = agents.parse_question_answer(raw, q)
-        else:
-            # Multiple questions — split by line or use the whole reply for the first unanswered
-            lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
-            for i, q in enumerate(questions):
-                answer_text = lines[i] if i < len(lines) else ""
-                answers[q.get("question", "")] = agents.parse_question_answer(answer_text, q) if answer_text else ""
-        session.question_future.set_result({"answers": answers})
-        await agents.add_reaction(message, "\u2705")
-        await agents.send_system(channel, "Answer received — agent resuming.")
+        pending_answers = session.question_answers
+
+        # Find the next unanswered question
+        answered_count = len(pending_answers)
+        if answered_count < len(questions):
+            q = questions[answered_count]
+            pending_answers[q.get("question", "")] = agents.parse_question_answer(raw, q)
+            await agents.add_reaction(message, "\u2705")
+
+        # If all questions answered, resolve the future
+        if len(pending_answers) >= len(questions):
+            session.question_future.set_result({"answers": dict(pending_answers)})
+            await agents.send_system(channel, "Answer received — agent resuming.")
+        elif len(questions) > 1:
+            next_num = len(pending_answers) + 1
+            await agents.send_system(channel, f"Got it. Now answer question {next_num}/{len(questions)}.")
         return
 
     # --- Text command handling (// prefix) ---
@@ -1031,6 +1033,7 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
         if session.question_future and not session.question_future.done():
             session.question_future.set_result({"answers": {}})
             session.question_data = None
+            session.question_answers = {}
 
         cleared = 0
         while session.message_queue:

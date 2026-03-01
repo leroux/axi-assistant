@@ -113,6 +113,7 @@ class AgentSession:
     plan_mode: bool = False  # When True, agent is in plan mode (read-only, plan before implement)
     question_future: asyncio.Future[QuestionAnswerResult] | None = None  # Set when waiting for user to answer AskUserQuestion
     question_data: list[dict[str, Any]] | None = None  # Active questions from AskUserQuestion (for parsing responses)
+    question_answers: dict[str, str] = field(default_factory=lambda: dict[str, str]())  # Partial answers collected so far (for multi-question)
     todo_message_id: int | None = None  # Discord message ID for the todo list display (edited in-place on updates)
     todo_items: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())  # Last known todo list from TodoWrite
     agent_log: logging.Logger | None = None
