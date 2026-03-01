@@ -575,7 +575,7 @@ async def _handle_exit_plan_mode(
 _TODO_STATUS = {"completed": "\u2705", "in_progress": "\U0001f504", "pending": "\u2b1c"}
 
 
-def _format_todo_list(todos: list[dict[str, Any]]) -> str:
+def format_todo_list(todos: list[dict[str, Any]]) -> str:
     """Format a todo list for Discord display."""
     lines: list[str] = []
     for item in todos:
@@ -589,7 +589,8 @@ def _format_todo_list(todos: list[dict[str, Any]]) -> str:
 async def _post_todo_list(session: AgentSession, tool_input: dict[str, Any]) -> None:
     """Post or update the todo list display in Discord."""
     todos = tool_input.get("todos", [])
-    body = _format_todo_list(todos)
+    session.todo_items = todos
+    body = format_todo_list(todos)
     channel_id = session.discord_channel_id
 
     try:
@@ -2630,6 +2631,7 @@ __all__ = [
     "extract_tool_preview",
     "format_channel_topic",
     "format_time_remaining",
+    "format_todo_list",
     "get_agent_channel",
     "get_master_channel",
     "get_master_session",

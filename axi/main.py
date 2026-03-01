@@ -1168,6 +1168,13 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
         await agents.send_long(channel, status_text)
         return True
 
+    if cmd == "todo":
+        if session.todo_items:
+            await agents.send_long(channel, agents.format_todo_list(session.todo_items))
+        else:
+            await agents.send_system(channel, f"No todo list for **{agent_name}**.")
+        return True
+
     if cmd in ("clear", "compact"):
         label = "Context cleared" if cmd == "clear" else "Context compacted"
         command = f"/{cmd}"

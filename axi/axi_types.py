@@ -145,6 +145,7 @@ class AgentSession:
     plan_approval_future: asyncio.Future[PlanApprovalResult] | None = None  # Set when waiting for user to approve/reject a plan
     plan_mode: bool = False  # When True, agent is in plan mode (read-only, plan before implement)
     todo_message_id: int | None = None  # Discord message ID for the todo list display (edited in-place on updates)
+    todo_items: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())  # Last known todo list from TodoWrite
     agent_log: logging.Logger | None = None
 
     def __post_init__(self) -> None:
