@@ -2536,15 +2536,29 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
                     break
                 continue
 
+            # Replace inner Claude session_ids with the agent's own session_id
+            # so they don't overwrite the agent's real session.  Keep session_id
+            # on result messages — we need the original value to detect flowchart
+            # results (session_id=="flowchart") vs inner Claude results.
+            # We replace rather than remove because parse_message requires
+            # session_id for stream_event messages.
+            if raw_type != "result" and "session_id" in raw:
+                raw["session_id"] = session.session_id or ""
+
             parsed = _parse_flowcoder_message(raw)
             if parsed is None:
                 log.debug("Unhandled flowcoder message type=%s for '%s'", raw_type, session.name)
                 continue
 
+            # During flowcharts, don't stop the typing indicator on inner
+            # Claude assistant messages — the flowchart is still running.
+            # The final result handler will stop typing.
+            fc_typing = None if in_flowchart else typing_ctx
+
             if isinstance(parsed, StreamEvent):
-                await _handle_stream_event(ctx, session, channel, parsed, typing_ctx)
+                await _handle_stream_event(ctx, session, channel, parsed, fc_typing)
             elif isinstance(parsed, AssistantMessage):
-                await _handle_assistant_message(ctx, session, channel, parsed, typing_ctx)
+                await _handle_assistant_message(ctx, session, channel, parsed, fc_typing)
             elif isinstance(parsed, ResultMessage):
                 # During flowcharts, inner block results should not end the stream —
                 # only the final result (session_id="flowchart") or a proxy turn result should.
