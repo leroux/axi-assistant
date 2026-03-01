@@ -77,10 +77,11 @@ ignore = [
 "axi/discord_rest.py" = ["T20"]   # CLI helper — print() for error reporting
 "axi/wait_for_message.py" = ["T20"]  # CLI tool
 "axi/bridge/server.py" = ["T20"]  # CLI entrypoint
+"procmux/server.py" = ["T20"]  # CLI entrypoint
 "lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
 
 [tool.ruff.lint.isort]
-known-first-party = ["axi"]
+known-first-party = ["axi", "procmux", "claudewire", "agenthub"]
 
 [tool.ruff.format]
 quote-style = "double"

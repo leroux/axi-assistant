@@ -1,25 +1,13 @@
-"""Agent bridge — persistent relay between bot.py and Claude CLI subprocesses.
+"""Agent bridge -- compatibility shim.
 
-This package contains both the bridge server (runs as a separate process) and the
-client-side transport (imported by bot.py). The bridge is intentionally dumb — it
-routes JSON lines between a single bot.py connection and N CLI subprocesses, buffering
-output when bot.py is disconnected.
+The core process multiplexer has been extracted to ``procmux``.
+Claude-aware transport and CLI arg building have moved to ``claudewire``.
 
-Server usage (separate process):
-    python -m axi.bridge /path/to/.bridge.sock
-
-Client usage (from bot.py):
-    from axi.bridge import BridgeConnection, BridgeTransport, ensure_bridge
-
-Architecture:
-    bot.py <── Unix socket ──> bridge server ──stdio──> CLI 1
-                                              ──stdio──> CLI 2
-                                              ──stdio──> CLI 3
+This module re-exports everything under the old names for backward compatibility.
 """
 
-from axi.bridge.client import BridgeConnection, BridgeTransport
-from axi.bridge.helpers import build_cli_spawn_args, connect_to_bridge, ensure_bridge, start_bridge
-from axi.bridge.protocol import (
+from claudewire import BridgeTransport, build_cli_spawn_args
+from procmux import (
     CmdMsg,
     ExitMsg,
     ResultMsg,
@@ -27,7 +15,24 @@ from axi.bridge.protocol import (
     StdinMsg,
     StdoutMsg,
 )
-from axi.bridge.server import BridgeServer, CliProcess
+from procmux import (
+    ManagedProcess as CliProcess,
+)
+from procmux import (
+    ProcmuxConnection as BridgeConnection,
+)
+from procmux import (
+    ProcmuxServer as BridgeServer,
+)
+from procmux import (
+    connect as connect_to_bridge,
+)
+from procmux import (
+    ensure_running as ensure_bridge,
+)
+from procmux import (
+    start as start_bridge,
+)
 
 __all__ = [
     "BridgeConnection",

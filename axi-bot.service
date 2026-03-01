@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=ubuntu
 WorkingDirectory=/home/ubuntu/axi-assistant
 ExecStart=/home/ubuntu/.local/bin/uv run python -m axi.supervisor
 ExecReload=kill -HUP $MAINPID

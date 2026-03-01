@@ -63,8 +63,8 @@ async def _cleanup(server: BridgeServer, srv: asyncio.Server, conn: BridgeConnec
     wait_closed() — those block indefinitely when the server handler
     is also stuck. For tests this is fine.
     """
-    for cp in list(server._cli_procs.values()):
-        await server._kill_cli(cp)
+    for cp in list(server._procs.values()):
+        await server._kill_process(cp)
     conn._demux_task.cancel()
     try:
         conn._writer.close()
@@ -314,7 +314,7 @@ class TestServerSubscribeRelay:
                 ),
                 timeout=3,
             )
-            q = conn.register_agent("sr")
+            q = conn.register_process("sr")
             sub = await asyncio.wait_for(conn.send_command("subscribe", name="sr"), timeout=3)
             assert sub.ok is True
 
@@ -361,7 +361,7 @@ class TestServerSubscribeRelay:
                 conn.send_command("spawn", name="se", cli_args=_stderr_cli_script(), env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
-            q = conn.register_agent("se")
+            q = conn.register_process("se")
             await asyncio.wait_for(conn.send_command("subscribe", name="se"), timeout=3)
 
             msgs = []
@@ -401,7 +401,7 @@ class TestServerStdin:
                 conn.send_command("spawn", name="echo", cli_args=_echo_cli_script(), env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
-            q = conn.register_agent("echo")
+            q = conn.register_process("echo")
             await asyncio.wait_for(conn.send_command("subscribe", name="echo"), timeout=3)
 
             # Send data to stdin
@@ -438,7 +438,7 @@ class TestServerBufferReplay:
                 ),
                 timeout=3,
             )
-            q1 = conn1.register_agent("buf")
+            q1 = conn1.register_process("buf")
             await asyncio.wait_for(conn1.send_command("subscribe", name="buf"), timeout=3)
 
             # Receive first message
@@ -459,7 +459,7 @@ class TestServerBufferReplay:
             assert buffered > 0, f"Expected buffered > 0, got {buffered}"
 
             # Subscribe to replay
-            q2 = conn2.register_agent("buf")
+            q2 = conn2.register_process("buf")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="buf"), timeout=3)
             assert sub.replayed == buffered
 
@@ -478,8 +478,8 @@ class TestServerBufferReplay:
 
             assert len(msgs) >= buffered
         finally:
-            for cp in list(server._cli_procs.values()):
-                await server._kill_cli(cp)
+            for cp in list(server._procs.values()):
+                await server._kill_process(cp)
             if conn2:
                 conn2._demux_task.cancel()
                 try:
@@ -503,7 +503,7 @@ class TestServerBufferReplay:
                 ),
                 timeout=3,
             )
-            conn1.register_agent("res")
+            conn1.register_process("res")
             await asyncio.wait_for(conn1.send_command("subscribe", name="res"), timeout=3)
 
             # Verify subscribed
@@ -571,8 +571,8 @@ class TestBridgeConnectionDemux:
                 timeout=3,
             )
 
-            q1 = conn.register_agent("a1")
-            q2 = conn.register_agent("a2")
+            q1 = conn.register_process("a1")
+            q2 = conn.register_process("a2")
 
             await asyncio.wait_for(conn.send_command("subscribe", name="a1"), timeout=3)
             await asyncio.wait_for(conn.send_command("subscribe", name="a2"), timeout=3)
@@ -609,7 +609,7 @@ class TestBridgeConnectionDemux:
         server, srv = await _start_server(sock)
         conn = await _connect(sock)
         try:
-            q = conn.register_agent("phantom")
+            q = conn.register_process("phantom")
             await asyncio.sleep(0.1)  # let server register the client
 
             # Close the server-side writer to break the connection
@@ -1084,7 +1084,7 @@ class TestShutdownBridgeMode:
         sleep_fn = AsyncMock()
         kill_fn = MagicMock()
 
-        with patch("shutdown._start_deadline_thread"):
+        with patch("axi.shutdown._start_deadline_thread"):
             c = ShutdownCoordinator(
                 agents={"a": type("A", (), {"name": "a", "client": "x", "query_lock": asyncio.Lock()})()},
                 sleep_fn=sleep_fn,
@@ -1121,7 +1121,7 @@ class TestClientReconnection:
                 timeout=3,
             )
             # Subscribe but immediately disconnect before reading
-            conn1.register_agent("rc")
+            conn1.register_process("rc")
             await asyncio.wait_for(conn1.send_command("subscribe", name="rc"), timeout=3)
 
             # Kill connection
@@ -1136,7 +1136,7 @@ class TestClientReconnection:
             assert buffered > 0
 
             # Subscribe and replay
-            q = conn2.register_agent("rc")
+            q = conn2.register_process("rc")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="rc"), timeout=3)
             assert sub.ok is True
             assert sub.replayed == buffered
@@ -1154,8 +1154,8 @@ class TestClientReconnection:
 
             assert len(msgs) >= buffered
         finally:
-            for cp in list(server._cli_procs.values()):
-                await server._kill_cli(cp)
+            for cp in list(server._procs.values()):
+                await server._kill_process(cp)
             if conn2:
                 conn2._demux_task.cancel()
                 try:
@@ -1189,7 +1189,7 @@ class TestExitDuringDisconnect:
                 timeout=3,
             )
             # Subscribe then disconnect immediately
-            conn1.register_agent("de")
+            conn1.register_process("de")
             await asyncio.wait_for(conn1.send_command("subscribe", name="de"), timeout=3)
 
             conn1._demux_task.cancel()
@@ -1203,7 +1203,7 @@ class TestExitDuringDisconnect:
             assert ls.agents["de"]["buffered_msgs"] > 0
 
             # Subscribe and check for exit message
-            q = conn2.register_agent("de")
+            q = conn2.register_process("de")
             await asyncio.wait_for(conn2.send_command("subscribe", name="de"), timeout=3)
 
             msgs = []
@@ -1220,8 +1220,8 @@ class TestExitDuringDisconnect:
             assert len(exit_msgs) == 1
             assert exit_msgs[0].name == "de"
         finally:
-            for cp in list(server._cli_procs.values()):
-                await server._kill_cli(cp)
+            for cp in list(server._procs.values()):
+                await server._kill_process(cp)
             if conn2:
                 conn2._demux_task.cancel()
                 try:
@@ -1291,7 +1291,7 @@ class TestSendToClientFailure:
                 ),
                 timeout=3,
             )
-            conn.register_agent("wf")
+            conn.register_process("wf")
             await asyncio.wait_for(conn.send_command("subscribe", name="wf"), timeout=3)
 
             # Forcefully close the client connection
@@ -1312,8 +1312,8 @@ class TestSendToClientFailure:
             except Exception:
                 pass
         finally:
-            for cp in list(server._cli_procs.values()):
-                await server._kill_cli(cp)
+            for cp in list(server._procs.values()):
+                await server._kill_process(cp)
             srv.close()
             if os.path.exists(sock):
                 os.unlink(sock)
@@ -1327,7 +1327,7 @@ class TestSendToClientFailure:
 class TestKillEscalation:
     @pytest.mark.asyncio
     async def test_kill_terminates_process(self):
-        """_kill_cli terminates a running process."""
+        """_kill_process terminates a running process."""
         sock = _tmp_sock()
         server, srv = await _start_server(sock)
         conn = await _connect(sock)
@@ -1339,10 +1339,10 @@ class TestKillEscalation:
                 ),
                 timeout=3,
             )
-            cp = server._cli_procs["ke"]
+            cp = server._procs["ke"]
             assert cp.status == "running"
 
-            await server._kill_cli(cp)
+            await server._kill_process(cp)
 
             assert cp.status == "exited"
             assert cp.proc.returncode is not None
@@ -1364,13 +1364,13 @@ class TestKillEscalation:
                 timeout=3,
             )
             await asyncio.sleep(0.3)  # let it exit
-            cp = server._cli_procs["ae"]
+            cp = server._procs["ae"]
 
             # Mark as exited (the relay task may have already done this)
             cp.status = "exited"
 
             # Should be a no-op
-            await server._kill_cli(cp)
+            await server._kill_process(cp)
             assert cp.status == "exited"
         finally:
             await _cleanup(server, srv, conn, sock)
@@ -1454,7 +1454,7 @@ class TestBufferReplayOrder:
 
             # Reconnect and subscribe
             conn2 = await _connect(sock)
-            q = conn2.register_agent("ord")
+            q = conn2.register_process("ord")
             await asyncio.wait_for(conn2.send_command("subscribe", name="ord"), timeout=3)
 
             # Collect all messages
@@ -1476,8 +1476,8 @@ class TestBufferReplayOrder:
             # Exit should be last
             assert msgs[-1].type == "exit"
         finally:
-            for cp in list(server._cli_procs.values()):
-                await server._kill_cli(cp)
+            for cp in list(server._procs.values()):
+                await server._kill_process(cp)
             if conn2:
                 conn2._demux_task.cancel()
                 try:
@@ -1512,7 +1512,7 @@ class TestSubscribeToExited:
             await asyncio.sleep(0.5)  # let it exit
 
             # Subscribe
-            q = conn.register_agent("se")
+            q = conn.register_process("se")
             result = await asyncio.wait_for(conn.send_command("subscribe", name="se"), timeout=3)
             assert result.ok is True
             assert result.status == "exited"
@@ -1650,7 +1650,7 @@ class TestMcpBridgeSpawn:
             original_pid = result.pid
 
             # Subscribe to start receiving output
-            conn1.register_agent("mcp_rc")
+            conn1.register_process("mcp_rc")
             await asyncio.wait_for(conn1.send_command("subscribe", name="mcp_rc"), timeout=3)
 
             # Disconnect client 1
@@ -1669,7 +1669,7 @@ class TestMcpBridgeSpawn:
             assert ls.agents["mcp_rc"]["subscribed"] is False
 
             # Re-subscribe — should work and replay any buffered output
-            q = conn2.register_agent("mcp_rc")
+            q = conn2.register_process("mcp_rc")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="mcp_rc"), timeout=3)
             assert sub.ok is True
             assert sub.status == "running"
@@ -1678,8 +1678,8 @@ class TestMcpBridgeSpawn:
             ls2 = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
             assert ls2.agents["mcp_rc"]["subscribed"] is True
         finally:
-            for cp in list(server._cli_procs.values()):
-                await server._kill_cli(cp)
+            for cp in list(server._procs.values()):
+                await server._kill_process(cp)
             if conn2:
                 conn2._demux_task.cancel()
                 try:
@@ -1751,7 +1751,7 @@ class TestAgentSurvivesReconnect:
             assert spawn.ok is True
 
             # Subscribe and read a few heartbeats to confirm it's working
-            q1 = conn1.register_agent("poller")
+            q1 = conn1.register_process("poller")
             await asyncio.wait_for(conn1.send_command("subscribe", name="poller"), timeout=3)
 
             heartbeats_before = []
@@ -1775,7 +1775,7 @@ class TestAgentSurvivesReconnect:
             assert ls.agents["poller"]["buffered_msgs"] > 0
 
             # --- Reconnect: subscribe to the agent ---
-            q2 = conn2.register_agent("poller")
+            q2 = conn2.register_process("poller")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="poller"), timeout=3)
             assert sub.ok is True
             assert sub.replayed > 0  # buffered heartbeats
@@ -1810,8 +1810,8 @@ class TestAgentSurvivesReconnect:
             assert exit_msg.code == 0
 
         finally:
-            for cp in list(server._cli_procs.values()):
-                await server._kill_cli(cp)
+            for cp in list(server._procs.values()):
+                await server._kill_process(cp)
             if conn2:
                 conn2._demux_task.cancel()
                 try:
@@ -1874,8 +1874,8 @@ def _exit_with_code_script(code: int) -> list[str]:
 
 async def _cleanup_multi(server, srv, conns: list, sock: str):
     """Cleanup helper for tests with multiple connections."""
-    for cp in list(server._cli_procs.values()):
-        await server._kill_cli(cp)
+    for cp in list(server._procs.values()):
+        await server._kill_process(cp)
     for conn in conns:
         if conn is not None:
             conn._demux_task.cancel()
@@ -1914,7 +1914,7 @@ class TestReconnectScenarios:
                 timeout=3,
             )
             # Subscribe briefly to confirm it's running
-            conn1.register_agent("silent")
+            conn1.register_process("silent")
             sub = await asyncio.wait_for(conn1.send_command("subscribe", name="silent"), timeout=3)
             assert sub.status == "running"
 
@@ -1931,7 +1931,7 @@ class TestReconnectScenarios:
             assert ls.agents["silent"]["subscribed"] is False
 
             # Subscribe and wait for the "done" message
-            q = conn2.register_agent("silent")
+            q = conn2.register_process("silent")
             sub2 = await asyncio.wait_for(conn2.send_command("subscribe", name="silent"), timeout=3)
             assert sub2.replayed == 0
             assert sub2.status == "running"
@@ -1975,7 +1975,7 @@ class TestReconnectScenarios:
                 timeout=3,
             )
             # Subscribe and read first 2 messages
-            q1 = conn1.register_agent("burst")
+            q1 = conn1.register_process("burst")
             await asyncio.wait_for(conn1.send_command("subscribe", name="burst"), timeout=3)
             for _ in range(2):
                 msg = await asyncio.wait_for(q1.get(), timeout=3)
@@ -1994,7 +1994,7 @@ class TestReconnectScenarios:
             assert buffered > 0, f"Expected buffered > 0, got {buffered}"
 
             # Subscribe — get replayed messages
-            q2 = conn2.register_agent("burst")
+            q2 = conn2.register_process("burst")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="burst"), timeout=3)
             assert sub.replayed == buffered
 
@@ -2044,7 +2044,7 @@ class TestReconnectScenarios:
                 timeout=3,
             )
             # Subscribe and read "ready"
-            q1 = conn1.register_agent("idle")
+            q1 = conn1.register_process("idle")
             await asyncio.wait_for(conn1.send_command("subscribe", name="idle"), timeout=3)
             msg = await asyncio.wait_for(q1.get(), timeout=3)
             assert msg.data["type"] == "ready"
@@ -2067,7 +2067,7 @@ class TestReconnectScenarios:
             assert ls.agents["idle"]["buffered_msgs"] == 0
 
             # Subscribe
-            q2 = conn2.register_agent("idle")
+            q2 = conn2.register_process("idle")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="idle"), timeout=3)
             assert sub.replayed == 0
             assert sub.status == "running"
@@ -2100,7 +2100,7 @@ class TestReconnectScenarios:
                 timeout=3,
             )
             # Subscribe and read 1 message
-            q1 = conn1.register_agent("short")
+            q1 = conn1.register_process("short")
             await asyncio.wait_for(conn1.send_command("subscribe", name="short"), timeout=3)
             msg = await asyncio.wait_for(q1.get(), timeout=3)
             assert msg.type == "stdout"
@@ -2118,7 +2118,7 @@ class TestReconnectScenarios:
             assert ls.agents["short"]["buffered_msgs"] > 0
 
             # Subscribe and verify exit message is in buffer
-            q2 = conn2.register_agent("short")
+            q2 = conn2.register_process("short")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="short"), timeout=3)
             assert sub.status == "exited"
             assert sub.exit_code == 0
@@ -2162,7 +2162,7 @@ class TestReconnectScenarios:
             assert ls.agents["crash"]["exit_code"] == 7
 
             # Subscribe and verify
-            q2 = conn2.register_agent("crash")
+            q2 = conn2.register_process("crash")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="crash"), timeout=3)
             assert sub.exit_code == 7
 
@@ -2195,7 +2195,7 @@ class TestReconnectScenarios:
                 )
             # Subscribe to both and read a heartbeat from each
             for name in ("alpha", "beta"):
-                conn1.register_agent(name)
+                conn1.register_process(name)
                 await asyncio.wait_for(conn1.send_command("subscribe", name=name), timeout=3)
 
             # Disconnect
@@ -2214,7 +2214,7 @@ class TestReconnectScenarios:
             # Subscribe to each and verify independent output
             queues = {}
             for name in ("alpha", "beta"):
-                queues[name] = conn2.register_agent(name)
+                queues[name] = conn2.register_process(name)
                 sub = await asyncio.wait_for(conn2.send_command("subscribe", name=name), timeout=3)
                 assert sub.ok is True
                 assert sub.status == "running"
@@ -2260,7 +2260,7 @@ class TestReconnectScenarios:
             )
 
             # Subscribe to "active" to start its output flowing
-            conn1.register_agent("active")
+            conn1.register_process("active")
             await asyncio.wait_for(conn1.send_command("subscribe", name="active"), timeout=3)
 
             # Disconnect
@@ -2307,7 +2307,7 @@ class TestReconnectScenarios:
             all_ns = []
 
             for _cycle in range(3):
-                q = conn.register_agent("multi")
+                q = conn.register_process("multi")
                 sub = await asyncio.wait_for(conn.send_command("subscribe", name="multi"), timeout=3)
 
                 # Read some messages (replayed + live)
@@ -2356,7 +2356,7 @@ class TestReconnectScenarios:
                 timeout=3,
             )
             # Subscribe but disconnect immediately without reading
-            conn1.register_agent("burst")
+            conn1.register_process("burst")
             await asyncio.wait_for(conn1.send_command("subscribe", name="burst"), timeout=3)
             conn1._demux_task.cancel()
             conn1._writer.close()
@@ -2369,7 +2369,7 @@ class TestReconnectScenarios:
             buffered = ls.agents["burst"]["buffered_msgs"]
             assert buffered > 0
 
-            q2 = conn2.register_agent("burst")
+            q2 = conn2.register_process("burst")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="burst"), timeout=3)
             assert sub.replayed == buffered
 
@@ -2441,7 +2441,7 @@ class TestIdleField:
                 ),
                 timeout=3,
             )
-            q = conn.register_agent("turn")
+            q = conn.register_process("turn")
             await asyncio.wait_for(conn.send_command("subscribe", name="turn"), timeout=3)
 
             # Read "ready" — agent has produced stdout -> idle=True
@@ -2487,7 +2487,7 @@ class TestIdleField:
                 conn.send_command("spawn", name="slow", cli_args=script, env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
-            q = conn.register_agent("slow")
+            q = conn.register_process("slow")
             await asyncio.wait_for(conn.send_command("subscribe", name="slow"), timeout=3)
 
             # Read "ready"
@@ -2525,7 +2525,7 @@ class TestIdleField:
                 ),
                 timeout=3,
             )
-            conn.register_agent("sub")
+            conn.register_process("sub")
             sub = await asyncio.wait_for(conn.send_command("subscribe", name="sub"), timeout=3)
             assert sub.idle is not None
             assert sub.idle is True  # never queried
@@ -2554,7 +2554,7 @@ class TestIdleField:
                 conn1.send_command("spawn", name="persist", cli_args=script, env=dict(os.environ), cwd="/tmp"),
                 timeout=3,
             )
-            q = conn1.register_agent("persist")
+            q = conn1.register_process("persist")
             await asyncio.wait_for(conn1.send_command("subscribe", name="persist"), timeout=3)
 
             # Read "ready", send stdin to start long task
@@ -2579,7 +2579,7 @@ class TestIdleField:
             assert ls.agents["persist"]["idle"] is False
 
             # Subscribe also reports idle=False
-            conn2.register_agent("persist")
+            conn2.register_process("persist")
             sub = await asyncio.wait_for(conn2.send_command("subscribe", name="persist"), timeout=3)
             assert sub.idle is False
         finally:
@@ -2850,7 +2850,7 @@ class TestFlowcoderBridgeIntegration:
                 timeout=3,
             )
 
-            q = conn.register_agent(name)
+            q = conn.register_process(name)
             await asyncio.wait_for(
                 conn.send_command("subscribe", name=name),
                 timeout=3,
@@ -2897,7 +2897,7 @@ class TestFlowcoderBridgeIntegration:
             )
 
             # Subscribe and read first message
-            q1 = conn1.register_agent(name)
+            q1 = conn1.register_process(name)
             await asyncio.wait_for(
                 conn1.send_command("subscribe", name=name),
                 timeout=3,
@@ -2926,7 +2926,7 @@ class TestFlowcoderBridgeIntegration:
                 assert name in list_result.agents
 
                 # Subscribe should replay buffered messages
-                q2 = conn2.register_agent(name)
+                q2 = conn2.register_process(name)
                 sub = await asyncio.wait_for(
                     conn2.send_command("subscribe", name=name),
                     timeout=3,
@@ -2941,8 +2941,8 @@ class TestFlowcoderBridgeIntegration:
                     pass
         finally:
             # Clean up remaining processes
-            for cp in list(server._cli_procs.values()):
-                await server._kill_cli(cp)
+            for cp in list(server._procs.values()):
+                await server._kill_process(cp)
             srv.close()
             if os.path.exists(sock):
                 os.unlink(sock)

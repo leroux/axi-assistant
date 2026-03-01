@@ -17,11 +17,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from axi.bridge.client import BridgeConnection
+    from procmux import ProcmuxConnection as BridgeConnection
 
 log = logging.getLogger(__name__)
 
-from axi.bridge.protocol import ExitMsg, StderrMsg, StdoutMsg
+from procmux import ExitMsg, StderrMsg, StdoutMsg
 
 # ------------------------------------------------------------------
 # Shared helpers
@@ -268,7 +268,7 @@ class BridgeFlowcoderProcess:
         )
 
         # Register queue before spawn so we don't miss early output
-        self._queue = self._conn.register_agent(self.bridge_name)
+        self._queue = self._conn.register_process(self.bridge_name)
 
         result = await self._conn.send_command(
             "spawn",
@@ -278,7 +278,7 @@ class BridgeFlowcoderProcess:
             cwd=self.cwd,
         )
         if not result.ok and not result.already_running:
-            self._conn.unregister_agent(self.bridge_name)
+            self._conn.unregister_process(self.bridge_name)
             self._queue = None
             raise RuntimeError(f"Bridge spawn failed for '{self.bridge_name}': {result.error}")
 
@@ -293,10 +293,10 @@ class BridgeFlowcoderProcess:
 
         Returns the subscribe ResultMsg (has .replayed, .status, .idle fields).
         """
-        self._queue = self._conn.register_agent(self.bridge_name)
+        self._queue = self._conn.register_process(self.bridge_name)
         result = await self._conn.send_command("subscribe", name=self.bridge_name)
         if not result.ok:
-            self._conn.unregister_agent(self.bridge_name)
+            self._conn.unregister_process(self.bridge_name)
             self._queue = None
             raise RuntimeError(f"Bridge subscribe failed for '{self.bridge_name}': {result.error}")
         self._running = True
@@ -351,7 +351,7 @@ class BridgeFlowcoderProcess:
             await self._conn.send_command("kill", name=self.bridge_name)
         except Exception:
             pass
-        self._conn.unregister_agent(self.bridge_name)
+        self._conn.unregister_process(self.bridge_name)
         self._queue = None
         self._running = False
         log.info("Bridge flowcoder '%s' stopped", self.bridge_name)
@@ -365,7 +365,7 @@ class BridgeFlowcoderProcess:
             await self._conn.send_command("unsubscribe", name=self.bridge_name)
         except Exception:
             pass
-        self._conn.unregister_agent(self.bridge_name)
+        self._conn.unregister_process(self.bridge_name)
         self._queue = None
         self._running = False
         log.info("Bridge flowcoder '%s' detached (bridge buffering)", self.bridge_name)

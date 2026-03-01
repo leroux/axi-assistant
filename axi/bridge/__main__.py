@@ -1,6 +1,9 @@
-"""Entry point for running the bridge server: python -m bridge <socket_path>"""
+"""Entry point for running the bridge server: python -m axi.bridge <socket_path>
 
-from axi.bridge.server import main
+Delegates to procmux.server.main().
+"""
+
+from procmux.server import main
 
 if __name__ == "__main__":
     main()

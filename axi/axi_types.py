@@ -71,50 +71,10 @@ class QuestionAnswerResult(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# Activity tracking
+# Activity tracking (canonical definitions live in claudewire.events)
 # ---------------------------------------------------------------------------
 
-
-@dataclass
-class ActivityState:
-    """Real-time activity tracking for an agent during a query."""
-
-    phase: str = "idle"  # "thinking", "writing", "tool_use", "waiting", "starting", "idle"
-    tool_name: str | None = None  # Current tool being called (e.g. "Bash", "Read")
-    tool_input_preview: str = ""  # First ~200 chars of tool input JSON
-    thinking_text: str = ""  # Accumulated thinking content for debug display
-    turn_count: int = 0  # Number of API turns in current query
-    query_started: datetime | None = None  # When the current query began
-    last_event: datetime | None = None  # When the last stream event arrived
-    text_chars: int = 0  # Characters of text generated in current turn
-
-
-TOOL_DISPLAY_NAMES = {
-    "Bash": "running bash command",
-    "Read": "reading file",
-    "Write": "writing file",
-    "Edit": "editing file",
-    "MultiEdit": "editing file",
-    "Glob": "searching for files",
-    "Grep": "searching code",
-    "WebSearch": "searching the web",
-    "WebFetch": "fetching web page",
-    "Task": "running subagent",
-    "NotebookEdit": "editing notebook",
-    "TodoWrite": "updating tasks",
-}
-
-
-def tool_display(name: str) -> str:
-    """Human-readable description of a tool call."""
-    if name in TOOL_DISPLAY_NAMES:
-        return TOOL_DISPLAY_NAMES[name]
-    if name.startswith("mcp__"):
-        parts = name.split("__", 2)
-        if len(parts) == 3:
-            return f"{parts[1]}: {parts[2]}"
-    return f"using {name}"
-
+from claudewire.events import TOOL_DISPLAY_NAMES, ActivityState, tool_display
 
 # ---------------------------------------------------------------------------
 # Agent session
@@ -212,9 +172,7 @@ class RateLimitQuota:
 
 
 # ---------------------------------------------------------------------------
-# Exceptions
+# Exceptions (canonical definition in agenthub.types)
 # ---------------------------------------------------------------------------
 
-
-class ConcurrencyLimitError(Exception):
-    """Raised when the awake-agent concurrency limit is reached and no slots can be freed."""
+from agenthub.types import ConcurrencyLimitError

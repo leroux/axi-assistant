@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import re
-import signal
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -33,6 +32,7 @@ from claude_agent_sdk.types import (
 )
 from discord import TextChannel
 
+from agenthub.tasks import BackgroundTaskSet
 from axi import channels as _channels_mod
 from axi import config
 from axi.axi_types import (
@@ -81,6 +81,8 @@ from axi.rate_limits import (
 )
 from axi.schedule_tools import make_schedule_mcp_server
 from axi.shutdown import ShutdownCoordinator, exit_for_restart, kill_supervisor
+from claudewire.events import as_stream, update_activity
+from claudewire.session import disconnect_client, get_stdio_logger
 
 if TYPE_CHECKING:
     from discord.ext.commands import Bot
@@ -119,25 +121,9 @@ _stream_counter = 0
 # MCP server injection (set by bot.py after tools.py creates them)
 _utils_mcp_server: Any = None
 
-# Background task references — prevents GC of fire-and-forget tasks.
-# In Python 3.12+ the event loop only keeps weak references to tasks,
-# so untracked tasks may be collected before completion.
-_background_tasks: set[asyncio.Task[None]] = set()
-
-
-def _on_background_task_done(task: asyncio.Task[None]) -> None:
-    """Remove finished task from tracking set and log any unhandled exception."""
-    _background_tasks.discard(task)
-    if not task.cancelled() and task.exception() is not None:
-        log.error("Background task %s failed: %s", task.get_name(), task.exception(), exc_info=task.exception())
-
-
-def fire_and_forget(coro: Any) -> asyncio.Task[None]:
-    """Schedule a coroutine as a background task, preventing GC before completion."""
-    task: asyncio.Task[None] = asyncio.create_task(coro)
-    _background_tasks.add(task)
-    task.add_done_callback(_on_background_task_done)
-    return task
+# Background task manager — prevents GC of fire-and-forget tasks.
+_bg_tasks = BackgroundTaskSet()
+fire_and_forget = _bg_tasks.fire_and_forget
 
 
 # ---------------------------------------------------------------------------
@@ -195,16 +181,6 @@ def drain_stderr(session: AgentSession) -> list[str]:
         msgs = list(session.stderr_buffer)
         session.stderr_buffer.clear()
     return msgs
-
-
-async def as_stream(content: MessageContent):
-    """Wrap a prompt as an AsyncIterable for streaming mode."""
-    yield {
-        "type": "user",
-        "session_id": "",
-        "message": {"role": "user", "content": content},
-        "parent_tool_use_id": None,
-    }
 
 
 def drain_sdk_buffer(session: AgentSession) -> int:
@@ -904,57 +880,6 @@ def _reset_session_activity(session: AgentSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _get_subprocess_pid(client: ClaudeSDKClient) -> int | None:
-    """Extract the PID of the underlying CLI subprocess from a ClaudeSDKClient."""
-    try:
-        transport = getattr(client, "_transport", None) or getattr(getattr(client, "_query", None), "transport", None)
-        if transport is None:
-            return None
-        proc = getattr(transport, "_process", None)
-        if proc is None:
-            return None
-        return proc.pid  # type: ignore[no-any-return]
-    except Exception:
-        return None
-
-
-def _ensure_process_dead(pid: int | None, label: str) -> None:
-    """Send SIGTERM to *pid* if it is still alive."""
-    if pid is None:
-        return
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return
-    log.warning("Subprocess %d for '%s' survived disconnect \u2014 sending SIGTERM (SDK bug workaround)", pid, label)
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        pass
-
-
-def _get_stdio_logger(agent_name: str) -> logging.Logger:
-    """Get or create a per-agent bridge stdio logger."""
-    from logging.handlers import RotatingFileHandler
-
-    name = f"bridge.stdio.{agent_name}"
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        logger.setLevel(logging.DEBUG)
-        logger.propagate = False
-        fh = RotatingFileHandler(
-            os.path.join(config.LOG_DIR, f"bridge-stdio-{agent_name}.log"),
-            maxBytes=5 * 1024 * 1024,  # 5 MB
-            backupCount=2,
-        )
-        fh.setLevel(logging.DEBUG)
-        fmt = logging.Formatter("%(asctime)s %(message)s")
-        fmt.converter = time.gmtime
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-    return logger
-
-
 async def _create_transport(session: AgentSession, reconnecting: bool = False):
     """Create a transport for Claude Code agent (bridge or direct)."""
     if bridge_conn and bridge_conn.is_alive:
@@ -963,7 +888,7 @@ async def _create_transport(session: AgentSession, reconnecting: bool = False):
             bridge_conn,
             reconnecting=reconnecting,
             stderr_callback=make_stderr_callback(session),
-            stdio_logger=_get_stdio_logger(session.name),
+            stdio_logger=get_stdio_logger(session.name, config.LOG_DIR),
         )
         await transport.connect()
         return transport
@@ -971,29 +896,8 @@ async def _create_transport(session: AgentSession, reconnecting: bool = False):
         return None
 
 
-async def _disconnect_client(client: ClaudeSDKClient, label: str) -> None:
-    """Disconnect a ClaudeSDKClient and ensure its subprocess is terminated."""
-    transport = getattr(client, "_transport", None)
-    if isinstance(transport, BridgeTransport):
-        try:
-            await asyncio.wait_for(transport.close(), timeout=5.0)
-        except (TimeoutError, asyncio.CancelledError):
-            log.warning("'%s' bridge transport close timed out", label)
-        except Exception:
-            log.exception("'%s' error closing bridge transport", label)
-        return
-
-    pid = _get_subprocess_pid(client)
-    try:
-        await asyncio.wait_for(client.__aexit__(None, None, None), timeout=5.0)
-    except (TimeoutError, asyncio.CancelledError):
-        log.warning("'%s' shutdown timed out or was cancelled", label)
-    except RuntimeError as e:
-        if "cancel scope" in str(e):
-            log.debug("'%s' cross-task cleanup (expected): %s", label, e)
-        else:
-            raise
-    _ensure_process_dead(pid, label)
+# Alias for callers within this module
+_disconnect_client = disconnect_client
 
 
 # ---------------------------------------------------------------------------
@@ -1472,58 +1376,7 @@ async def _receive_response_safe(session: AgentSession):
 
 def _update_activity(session: AgentSession, event: dict[str, Any]) -> None:
     """Update the agent's activity state from a raw Anthropic stream event."""
-    activity = session.activity
-    activity.last_event = datetime.now(UTC)
-    event_type = event.get("type", "")
-
-    if event_type == "content_block_start":
-        block = event.get("content_block", {})
-        block_type = block.get("type", "")
-
-        if block_type == "tool_use":
-            activity.phase = "tool_use"
-            activity.tool_name = block.get("name")
-            activity.tool_input_preview = ""
-        elif block_type == "thinking":
-            activity.phase = "thinking"
-            activity.tool_name = None
-            activity.tool_input_preview = ""
-            activity.thinking_text = ""
-        elif block_type == "text":
-            activity.phase = "writing"
-            activity.tool_name = None
-            activity.tool_input_preview = ""
-            activity.text_chars = 0
-
-    elif event_type == "content_block_delta":
-        delta = event.get("delta", {})
-        delta_type = delta.get("type", "")
-
-        if delta_type == "thinking_delta":
-            activity.phase = "thinking"
-            activity.thinking_text += delta.get("thinking", "")
-        elif delta_type == "text_delta":
-            activity.phase = "writing"
-            activity.text_chars += len(delta.get("text", ""))
-        elif delta_type == "input_json_delta":
-            if len(activity.tool_input_preview) < 200:
-                activity.tool_input_preview += delta.get("partial_json", "")
-                activity.tool_input_preview = activity.tool_input_preview[:200]
-
-    elif event_type == "content_block_stop":
-        if activity.phase == "tool_use":
-            activity.phase = "waiting"
-
-    elif event_type == "message_start":
-        activity.turn_count += 1
-
-    elif event_type == "message_delta":
-        stop_reason = event.get("delta", {}).get("stop_reason")
-        if stop_reason == "end_turn":
-            activity.phase = "idle"
-            activity.tool_name = None
-        elif stop_reason == "tool_use":
-            activity.phase = "waiting"
+    update_activity(session.activity, event)
 
 
 def extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
@@ -1654,7 +1507,7 @@ async def _handle_stream_event(
         _log_stream_event(session, event_type, event)
 
     # Raw stdio log
-    _get_stdio_logger(session.name).debug("<<< STDOUT %s", json.dumps(event))
+    get_stdio_logger(session.name, config.LOG_DIR).debug("<<< STDOUT %s", json.dumps(event))
 
     if ctx.hit_rate_limit:
         return
@@ -1875,7 +1728,7 @@ async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool
 
         try:
             assert session.client is not None
-            _get_stdio_logger(session.name).debug(">>> STDIN  %s", json.dumps({"type": "retry", "content": "Continue from where you left off."}))
+            get_stdio_logger(session.name, config.LOG_DIR).debug(">>> STDIN  %s", json.dumps({"type": "retry", "content": "Continue from where you left off."}))
             await session.client.query(as_stream("Continue from where you left off."))
         except Exception:
             log.exception("Agent '%s' retry query failed", session.name)
@@ -1973,7 +1826,7 @@ async def process_message(session: AgentSession, content: MessageContent, channe
     if session.agent_log:
         session.agent_log.info("USER: %s", content_summary(content))
     log.info("PROCESS[%s] drained=%d, calling query+stream", session.name, drained)
-    _get_stdio_logger(session.name).debug(
+    get_stdio_logger(session.name, config.LOG_DIR).debug(
         ">>> STDIN  %s", json.dumps({"type": "user", "content": content if isinstance(content, str) else "[blocks]"})
     )
     try:
