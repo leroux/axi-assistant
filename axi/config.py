@@ -98,7 +98,7 @@ log.addHandler(_file_handler)
 # Feature flags
 # ---------------------------------------------------------------------------
 
-FLOWCODER_ENABLED = os.environ.get("FLOWCODER_ENABLED", "").lower() in ("1", "true", "yes")
+FLOWCODER_ENABLED = os.environ.get("FLOWCODER_ENABLED", "1").lower() in ("1", "true", "yes")
 
 # ---------------------------------------------------------------------------
 # Discord token resolution
