@@ -473,11 +473,14 @@ def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None 
         tool_input: dict[str, Any],
         ctx: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
-        forbidden_tools = {"AskUserQuestion", "TodoWrite", "Skill", "EnterWorktree", "Task"}
+        forbidden_tools = {"AskUserQuestion", "Skill", "EnterWorktree", "Task"}
         if tool_name in forbidden_tools:
             return PermissionResultDeny(
                 message=f"{tool_name} is not compatible with Discord-based agent mode. Use text messages to communicate instead."
             )
+
+        if tool_name == "TodoWrite":
+            return PermissionResultAllow()
 
         if tool_name == "EnterPlanMode":
             return PermissionResultAllow()
@@ -563,6 +566,52 @@ async def _handle_exit_plan_mode(
         message = result.get("message", "User rejected the plan.")
         log.info("Agent '%s' plan rejected: %s", session.name, message)
         return PermissionResultDeny(message=json.dumps(message) if not isinstance(message, str) else message)
+
+
+# ---------------------------------------------------------------------------
+# TodoWrite display
+# ---------------------------------------------------------------------------
+
+_TODO_STATUS = {"completed": "\u2705", "in_progress": "\U0001f504", "pending": "\u2b1c"}
+
+
+def _format_todo_list(todos: list[dict[str, Any]]) -> str:
+    """Format a todo list for Discord display."""
+    lines: list[str] = []
+    for item in todos:
+        status = item.get("status", "pending")
+        icon = _TODO_STATUS.get(status, "\u2b1c")
+        content = item.get("content", "???")
+        lines.append(f"{icon} {content}")
+    return "\n".join(lines) or "*Empty todo list*"
+
+
+async def _post_todo_list(session: AgentSession, tool_input: dict[str, Any]) -> None:
+    """Post or update the todo list display in Discord."""
+    todos = tool_input.get("todos", [])
+    body = _format_todo_list(todos)
+    channel_id = session.discord_channel_id
+
+    try:
+        if session.todo_message_id is not None:
+            # Edit existing message
+            await config.discord_request(
+                "PATCH",
+                f"/channels/{channel_id}/messages/{session.todo_message_id}",
+                json={"content": body},
+            )
+        else:
+            # Create new message
+            resp = await config.discord_request(
+                "POST",
+                f"/channels/{channel_id}/messages",
+                json={"content": body},
+            )
+            session.todo_message_id = resp.json().get("id")
+            if session.todo_message_id is not None:
+                session.todo_message_id = int(session.todo_message_id)
+    except Exception:
+        log.exception("Failed to post todo list for agent '%s'", session.name)
 
 
 # ---------------------------------------------------------------------------
@@ -1299,7 +1348,7 @@ def extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
 class _StreamCtx:
     """Mutable state for a single stream_response_to_channel invocation."""
 
-    __slots__ = ("flush_count", "hit_rate_limit", "hit_transient_error", "msg_total", "text_buffer", "typing_stopped")
+    __slots__ = ("flush_count", "hit_rate_limit", "hit_transient_error", "msg_total", "text_buffer", "tool_input_json", "typing_stopped")
 
     def __init__(self) -> None:
         self.text_buffer: str = ""
@@ -1308,6 +1357,7 @@ class _StreamCtx:
         self.typing_stopped: bool = False
         self.flush_count: int = 0
         self.msg_total: int = 0
+        self.tool_input_json: str = ""  # Accumulates full tool input JSON for current tool_use block
 
 
 async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChannel, reason: str = "?") -> None:
@@ -1352,6 +1402,26 @@ async def _handle_stream_event(
         await _set_session_id(session, msg.session_id, channel=channel)
 
     _update_activity(session, event)
+
+    # Track tool input JSON for TodoWrite display
+    if event_type == "content_block_start":
+        block = event.get("content_block", {})
+        if block.get("type") == "tool_use":
+            ctx.tool_input_json = ""
+    elif event_type == "content_block_delta":
+        delta = event.get("delta", {})
+        if delta.get("type") == "input_json_delta":
+            ctx.tool_input_json += delta.get("partial_json", "")
+
+    # TodoWrite display — post/update todo list in Discord
+    if event_type == "content_block_stop" and session.activity.phase == "waiting":
+        if session.activity.tool_name == "TodoWrite":
+            try:
+                tool_input: dict[str, Any] = json.loads(ctx.tool_input_json) if ctx.tool_input_json else {}
+                await _post_todo_list(session, tool_input)
+            except Exception:
+                log.exception("Failed to parse/post TodoWrite for '%s'", session.name)
+        ctx.tool_input_json = ""
 
     # Debug output
     if session.debug and event_type == "content_block_stop":

@@ -155,8 +155,8 @@ def test_forbidden_tool_ask_user_question(discord: Discord, master_channel: str)
     )
 
 
-def test_forbidden_tool_todo_write(discord: Discord, master_channel: str):
-    """Test 44: Spawned agent cannot use TodoWrite tool."""
+def test_todo_write_display(discord: Discord, master_channel: str):
+    """Test 44: Spawned agent can use TodoWrite and it displays in Discord."""
     discord.send_and_wait(
         master_channel,
         'Spawn an agent named "smoke-todo" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-todo" and prompt "Wait for instructions."',
@@ -177,10 +177,10 @@ def test_forbidden_tool_todo_write(discord: Discord, master_channel: str):
 
     passed, reason = llm_assert(
         text,
-        "The response indicates the TodoWrite tool is not available, forbidden, or the agent writes the list in plain text instead",
-        context="Asked spawned agent to use forbidden TodoWrite tool",
+        "The response shows checkbox/todo items were created (may include status icons like checkmarks or squares) OR the agent confirms the todo list was created",
+        context="Asked spawned agent to use TodoWrite tool — should be allowed and displayed",
     )
-    assert passed, f"Forbidden tool not blocked: {reason}"
+    assert passed, f"TodoWrite display not working: {reason}"
 
     discord.send_and_wait(
         master_channel, 'Kill the agent named "smoke-todo"', timeout=60.0
