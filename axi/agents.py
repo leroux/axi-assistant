@@ -1377,17 +1377,23 @@ async def _receive_response_safe(session: AgentSession):
             return
 
 
+_KNOWN_ENGINE_TYPES = {"assistant", "stream_event", "result", "system"}
+
+
 def _parse_flowcoder_message(data: dict[str, Any]) -> AssistantMessage | StreamEvent | ResultMessage | SystemMessage | None:
     """Parse a flowcoder engine JSON message into an SDK typed object.
 
     Returns None for message types not handled by SDK (e.g. rate_limit_event).
     Fills missing fields that the engine doesn't emit but parse_message requires.
     """
+    msg_type = data.get("type", "")
     if data.get("type") == "result":
         data.setdefault("duration_api_ms", 0)
     try:
         return parse_message(data)  # type: ignore[return-value]
-    except MessageParseError:
+    except MessageParseError as exc:
+        if msg_type in _KNOWN_ENGINE_TYPES:
+            log.warning("Failed to parse flowcoder %s message: %s  data=%s", msg_type, exc, str(data)[:300])
         return None
 
 
@@ -2547,7 +2553,6 @@ async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChann
 
             parsed = _parse_flowcoder_message(raw)
             if parsed is None:
-                log.debug("Unhandled flowcoder message type=%s for '%s'", raw_type, session.name)
                 continue
 
             # During flowcharts, don't stop the typing indicator on inner
