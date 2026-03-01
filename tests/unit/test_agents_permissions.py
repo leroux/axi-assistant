@@ -37,7 +37,7 @@ class TestMakeCwdPermissionCallback:
     @pytest.mark.asyncio
     async def test_denies_forbidden_tool(self) -> None:
         cb = make_cwd_permission_callback("/tmp/project")
-        result = await cb("AskUserQuestion", {}, MagicMock(spec=ToolPermissionContext))
+        result = await cb("Skill", {}, MagicMock(spec=ToolPermissionContext))
         assert isinstance(result, PermissionResultDeny)
 
     @pytest.mark.asyncio

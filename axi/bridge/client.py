@@ -138,11 +138,13 @@ class BridgeTransport:
         *,
         reconnecting: bool = False,
         stderr_callback: Callable[[str], None] | None = None,
+        stdio_logger: logging.Logger | None = None,
     ):
         self._name = name
         self._conn = conn
         self._reconnecting = reconnecting
         self._stderr_callback = stderr_callback
+        self._stdio_logger = stdio_logger
         self._queue: asyncio.Queue[AgentMsg] | None = None
         self._ready = False
         self._cli_exited = False
@@ -206,6 +208,8 @@ class BridgeTransport:
             self._reconnecting = False
             return
 
+        if self._stdio_logger:
+            self._stdio_logger.debug(">>> STDIN  %s", json.dumps(msg))
         await self._conn.send_stdin(self._name, msg)
 
     async def read_messages(self):
@@ -221,13 +225,19 @@ class BridgeTransport:
             if isinstance(msg, StdoutMsg):
                 msg_type = msg.data.get("type", "?")
                 log.debug("[read][%s] yielding StdoutMsg type=%s", self._name, msg_type)
+                if self._stdio_logger:
+                    self._stdio_logger.debug("<<< STDOUT %s", json.dumps(msg.data))
                 yield msg.data
             elif isinstance(msg, StderrMsg):
                 log.debug("[read][%s] stderr: %.200s", self._name, msg.text)
+                if self._stdio_logger:
+                    self._stdio_logger.debug("<<< STDERR %s", msg.text)
                 if self._stderr_callback:
                     self._stderr_callback(msg.text)
             else:  # ExitMsg
                 log.debug("[read][%s] ExitMsg code=%s", self._name, msg.code)
+                if self._stdio_logger:
+                    self._stdio_logger.debug("--- EXIT   code=%s", msg.code)
                 self._cli_exited = True
                 self._exit_code = msg.code
                 return

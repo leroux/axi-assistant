@@ -191,6 +191,27 @@ async def on_message(message: discord.Message) -> None:
             await agents.send_system(channel, "Feedback received — agent will revise the plan.")
         return
 
+    # --- AskUserQuestion gate ---
+    if session.question_future is not None and not session.question_future.done():
+        raw = content.strip() if isinstance(content, str) else str(content)
+        raw = re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\]\s*", "", raw).strip()
+        questions = session.question_data or []
+        answers: dict[str, str] = {}
+        if len(questions) == 1:
+            # Single question — use the whole reply as the answer
+            q = questions[0]
+            answers[q.get("question", "")] = agents.parse_question_answer(raw, q)
+        else:
+            # Multiple questions — split by line or use the whole reply for the first unanswered
+            lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+            for i, q in enumerate(questions):
+                answer_text = lines[i] if i < len(lines) else ""
+                answers[q.get("question", "")] = agents.parse_question_answer(answer_text, q) if answer_text else ""
+        session.question_future.set_result({"answers": answers})
+        await agents.add_reaction(message, "\u2705")
+        await agents.send_system(channel, "Answer received — agent resuming.")
+        return
+
     # --- Text command handling (// prefix) ---
     if message.content.strip().startswith("//"):
         handled = await _handle_text_command(message, session, agent_name)
@@ -1021,6 +1042,10 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
 
         if session.plan_approval_future and not session.plan_approval_future.done():
             session.plan_approval_future.set_result({"approved": False, "message": "Interrupted by /stop."})
+
+        if session.question_future and not session.question_future.done():
+            session.question_future.set_result({"answers": {}})
+            session.question_data = None
 
         cleared = 0
         while session.message_queue:

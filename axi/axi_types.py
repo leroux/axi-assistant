@@ -17,6 +17,7 @@ __all__ = [
     "McpResult",
     "MessageContent",
     "PlanApprovalResult",
+    "QuestionAnswerResult",
     "RateLimitQuota",
     "SessionUsage",
     "tool_display",
@@ -61,6 +62,12 @@ class PlanApprovalResult(TypedDict):
 
     approved: bool
     message: str  # empty string when no feedback
+
+
+class QuestionAnswerResult(TypedDict):
+    """Result from the AskUserQuestion gate in on_message."""
+
+    answers: dict[str, str]  # question_text -> selected option or custom text
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +151,8 @@ class AgentSession:
     )  # Post tool calls and thinking phases to Discord
     plan_approval_future: asyncio.Future[PlanApprovalResult] | None = None  # Set when waiting for user to approve/reject a plan
     plan_mode: bool = False  # When True, agent is in plan mode (read-only, plan before implement)
+    question_future: asyncio.Future[QuestionAnswerResult] | None = None  # Set when waiting for user to answer AskUserQuestion
+    question_data: list[dict[str, Any]] | None = None  # Active questions from AskUserQuestion (for parsing responses)
     todo_message_id: int | None = None  # Discord message ID for the todo list display (edited in-place on updates)
     todo_items: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())  # Last known todo list from TodoWrite
     agent_log: logging.Logger | None = None

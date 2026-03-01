@@ -10,6 +10,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass, field
+from logging.handlers import RotatingFileHandler
 from typing import Any, cast
 
 from .protocol import (
@@ -63,6 +64,42 @@ class BridgeServer:
         self._server: asyncio.Server | None = None
         self._shutdown_event = asyncio.Event()
         self._start_time = time.monotonic()
+        self._stdio_loggers: dict[str, logging.Logger] = {}
+        # Derive log dir from socket path (sibling "logs/" directory)
+        self._stdio_log_dir = os.environ.get(
+            "BRIDGE_STDIO_LOG_DIR",
+            os.path.join(os.path.dirname(os.path.abspath(socket_path)), "logs"),
+        )
+        os.makedirs(self._stdio_log_dir, exist_ok=True)
+
+    def _get_stdio_logger(self, agent_name: str) -> logging.Logger:
+        """Get or create a per-agent stdio logger with rotating file handler."""
+        if agent_name in self._stdio_loggers:
+            return self._stdio_loggers[agent_name]
+        logger = logging.getLogger(f"bridge.stdio.{agent_name}")
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        if not logger.handlers:
+            fh = RotatingFileHandler(
+                os.path.join(self._stdio_log_dir, f"bridge-stdio-{agent_name}.log"),
+                maxBytes=5 * 1024 * 1024,  # 5 MB
+                backupCount=2,
+            )
+            fh.setLevel(logging.DEBUG)
+            fmt = logging.Formatter("%(asctime)s %(message)s")
+            fmt.converter = time.gmtime
+            fh.setFormatter(fmt)
+            logger.addHandler(fh)
+        self._stdio_loggers[agent_name] = logger
+        return logger
+
+    def _close_stdio_logger(self, agent_name: str) -> None:
+        """Close and remove a per-agent stdio logger."""
+        logger = self._stdio_loggers.pop(agent_name, None)
+        if logger:
+            for handler in logger.handlers[:]:
+                handler.close()
+                logger.removeHandler(handler)
 
     async def start(self):
         """Start listening on the Unix socket."""
@@ -310,6 +347,7 @@ class BridgeServer:
         try:
             line = json.dumps(msg.data) + "\n"
             log.debug("[stdin][%s] forwarding %d bytes: %.200s", msg.name, len(line), line.rstrip())
+            self._get_stdio_logger(msg.name).debug(">>> STDIN  %s", line.rstrip())
             cp.proc.stdin.write(line.encode())
             await cp.proc.stdin.drain()
             cp.last_stdin_at = asyncio.get_running_loop().time()
@@ -331,6 +369,7 @@ class BridgeServer:
         """Read JSON lines from CLI stdout, relay or buffer."""
         assert cp.proc.stdout is not None
         normal_eof = False
+        stdio_log = self._get_stdio_logger(cp.name)
         try:
             while True:
                 line = await cp.proc.stdout.readline()
@@ -339,6 +378,7 @@ class BridgeServer:
                     break  # EOF
                 raw = line.decode().strip()
                 log.debug("[stdout][%s] raw line (%d bytes): %.200s", cp.name, len(line), raw)
+                stdio_log.debug("<<< STDOUT %s", raw)
                 try:
                     data: Any = json.loads(raw)
                 except json.JSONDecodeError:
@@ -381,6 +421,7 @@ class BridgeServer:
     async def _relay_stderr(self, cp: CliProcess):
         """Read lines from CLI stderr, relay or buffer."""
         assert cp.proc.stderr is not None
+        stdio_log = self._get_stdio_logger(cp.name)
         try:
             while True:
                 line = await cp.proc.stderr.readline()
@@ -389,6 +430,7 @@ class BridgeServer:
                 text = line.decode().strip()
                 if not text:
                     continue
+                stdio_log.debug("<<< STDERR %s", text)
                 await self._relay_or_buffer(cp, StderrMsg(name=cp.name, text=text))
         except Exception:
             log.exception("Error relaying stderr for '%s'", cp.name)
@@ -410,6 +452,8 @@ class BridgeServer:
             pass  # Already dead
         except Exception:
             log.exception("Error killing CLI '%s'", cp.name)
+        self._get_stdio_logger(cp.name).debug("--- KILLED (exit_code=%s)", cp.proc.returncode)
+        self._close_stdio_logger(cp.name)
         cp.status = "exited"
         cp.exit_code = cp.proc.returncode
         if cp.stdout_task:

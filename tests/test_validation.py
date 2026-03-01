@@ -123,35 +123,46 @@ def test_special_chars_in_name(discord: Discord, master_channel: str):
             break
 
 
-def test_forbidden_tool_ask_user_question(discord: Discord, master_channel: str):
-    """Test 43: Spawned agent cannot use AskUserQuestion tool."""
+def test_ask_user_question(discord: Discord, master_channel: str):
+    """Test 43: Spawned agent can use AskUserQuestion and it appears in Discord."""
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-forbidden" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-forbidden" and prompt "Wait for instructions."',
+        'Spawn an agent named "smoke-ask" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-ask" and prompt "Wait for instructions."',
         timeout=180.0,
     )
     time.sleep(3)
-    agent_ch = discord.find_channel("smoke-forbidden")
+    agent_ch = discord.find_channel("smoke-ask")
     assert agent_ch is not None, "Agent channel not found"
     discord.wait_for_bot(agent_ch, after="0", timeout=120.0)
 
     # Ask agent to use AskUserQuestion
     msgs = discord.send_and_wait(
         agent_ch,
-        "Use the AskUserQuestion tool to ask me what my favorite color is. You must use the AskUserQuestion tool specifically.",
+        "Use the AskUserQuestion tool to ask me what my favorite color is. Give me options: Red, Blue, Green. You must use the AskUserQuestion tool specifically.",
         timeout=60.0,
     )
     text = discord.bot_response_text(msgs)
 
     passed, reason = llm_assert(
         text,
-        "The response indicates the tool is not available, forbidden, or the agent asks the question in plain text instead of using a structured tool",
-        context="Asked spawned agent to use forbidden AskUserQuestion tool",
+        "The response shows a structured question with numbered options for the user to pick from (e.g. 1. Red, 2. Blue, 3. Green)",
+        context="Asked spawned agent to use AskUserQuestion tool — should show options in Discord",
     )
-    assert passed, f"Forbidden tool not blocked: {reason}"
+    assert passed, f"AskUserQuestion not displayed properly: {reason}"
+
+    # Answer the question
+    msgs = discord.send_and_wait(agent_ch, "1", timeout=60.0)
+    text = discord.bot_response_text(msgs)
+
+    passed, reason = llm_assert(
+        text,
+        "The response acknowledges the user's answer or continues the conversation normally (not stuck waiting)",
+        context="Answered AskUserQuestion with option 1",
+    )
+    assert passed, f"Agent didn't resume after answer: {reason}"
 
     discord.send_and_wait(
-        master_channel, 'Kill the agent named "smoke-forbidden"', timeout=60.0
+        master_channel, 'Kill the agent named "smoke-ask"', timeout=60.0
     )
 
 

@@ -35,7 +35,14 @@ from discord import TextChannel
 
 from axi import channels as _channels_mod
 from axi import config
-from axi.axi_types import ActivityState, AgentSession, ConcurrencyLimitError, ContentBlock, MessageContent
+from axi.axi_types import (
+    ActivityState,
+    AgentSession,
+    ConcurrencyLimitError,
+    ContentBlock,
+    MessageContent,
+    QuestionAnswerResult,
+)
 from axi.bridge import BridgeTransport, ensure_bridge
 from axi.channels import (
     ensure_agent_channel,
@@ -473,7 +480,7 @@ def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None 
         tool_input: dict[str, Any],
         ctx: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
-        forbidden_tools = {"AskUserQuestion", "Skill", "EnterWorktree", "Task"}
+        forbidden_tools = {"Skill", "EnterWorktree", "Task"}
         if tool_name in forbidden_tools:
             return PermissionResultDeny(
                 message=f"{tool_name} is not compatible with Discord-based agent mode. Use text messages to communicate instead."
@@ -487,6 +494,9 @@ def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None 
 
         if tool_name == "ExitPlanMode":
             return await _handle_exit_plan_mode(session, tool_input)
+
+        if tool_name == "AskUserQuestion":
+            return await _handle_ask_user_question(session, tool_input)
 
         if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
             path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
@@ -566,6 +576,129 @@ async def _handle_exit_plan_mode(
         message = result.get("message", "User rejected the plan.")
         log.info("Agent '%s' plan rejected: %s", session.name, message)
         return PermissionResultDeny(message=json.dumps(message) if not isinstance(message, str) else message)
+
+
+# ---------------------------------------------------------------------------
+# AskUserQuestion
+# ---------------------------------------------------------------------------
+
+
+def _format_question_for_discord(q: dict[str, Any], index: int, total: int) -> str:
+    """Format a single AskUserQuestion question for Discord display."""
+    prefix = f"**Question {index + 1}/{total}:** " if total > 1 else ""
+    header = q.get("header", "")
+    question_text = q.get("question", "")
+    multi = q.get("multiSelect", False)
+
+    lines: list[str] = []
+    if header:
+        lines.append(f"{prefix}[{header}] {question_text}")
+    else:
+        lines.append(f"{prefix}{question_text}")
+
+    options = q.get("options", [])
+    for i, opt in enumerate(options, 1):
+        label = opt.get("label", "")
+        desc = opt.get("description", "")
+        if desc:
+            lines.append(f"  **{i}.** {label} — {desc}")
+        else:
+            lines.append(f"  **{i}.** {label}")
+
+    lines.append(f"  **{len(options) + 1}.** Other (type your own answer)")
+
+    if multi:
+        lines.append("\n*Multiple selections allowed — reply with numbers separated by commas (e.g. `1, 3`)*")
+    else:
+        lines.append("\n*Reply with a number, or type a custom answer.*")
+
+    return "\n".join(lines)
+
+
+def parse_question_answer(raw: str, question: dict[str, Any]) -> str:
+    """Parse a user's reply into an answer string for one question."""
+    options = question.get("options", [])
+    multi = question.get("multiSelect", False)
+    stripped = raw.strip()
+
+    if multi:
+        # Try to parse comma-separated numbers
+        parts = [p.strip() for p in stripped.split(",")]
+        selected: list[str] = []
+        for part in parts:
+            try:
+                idx = int(part)
+                if 1 <= idx <= len(options):
+                    selected.append(options[idx - 1].get("label", part))
+                elif idx == len(options) + 1:
+                    selected.append("Other")
+                else:
+                    selected.append(part)  # out of range, treat as custom text
+            except ValueError:
+                selected.append(part)  # non-numeric, treat as custom text
+        return ", ".join(selected) if selected else stripped
+    else:
+        try:
+            idx = int(stripped)
+            if 1 <= idx <= len(options):
+                return options[idx - 1].get("label", stripped)
+            elif idx == len(options) + 1:
+                return "Other"
+        except ValueError:
+            pass
+        return stripped  # custom text answer
+
+
+async def _handle_ask_user_question(
+    session: AgentSession | None,
+    tool_input: dict[str, Any],
+) -> PermissionResultAllow | PermissionResultDeny:
+    """Handle AskUserQuestion by posting questions to Discord and waiting for user reply."""
+    if session is None or session.discord_channel_id is None:
+        return PermissionResultAllow()
+
+    channel_id = session.discord_channel_id
+    questions = tool_input.get("questions", [])
+    if not questions:
+        return PermissionResultAllow()
+
+    async def _send_msg(content: str) -> None:
+        await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
+
+    try:
+        header = f"\u2753 **{session.name}** is asking you a question"
+        await _send_msg(header)
+        for i, q in enumerate(questions):
+            formatted = _format_question_for_discord(q, i, len(questions))
+            await _send_msg(formatted)
+    except Exception:
+        log.exception("_handle_ask_user_question: failed to post to Discord — denying")
+        return PermissionResultDeny(
+            message="Could not post question to Discord. Try using text messages instead."
+        )
+
+    # Store question data for parsing the response
+    session.question_data = questions
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[QuestionAnswerResult] = loop.create_future()
+    session.question_future = future
+
+    log.info("Agent '%s' paused waiting for user answer (%d questions)", session.name, len(questions))
+
+    try:
+        result = await future
+    finally:
+        session.question_future = None
+        session.question_data = None
+
+    # Inject answers into tool input via updated_input
+    answers = result.get("answers", {})
+    log.info("Agent '%s' got answers: %s", session.name, answers)
+
+    updated = dict(tool_input)
+    updated["answers"] = answers
+    return PermissionResultAllow(updated_input=updated)
 
 
 # ---------------------------------------------------------------------------
@@ -800,6 +933,28 @@ def _ensure_process_dead(pid: int | None, label: str) -> None:
         pass
 
 
+def _get_stdio_logger(agent_name: str) -> logging.Logger:
+    """Get or create a per-agent bridge stdio logger."""
+    from logging.handlers import RotatingFileHandler
+
+    name = f"bridge.stdio.{agent_name}"
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        fh = RotatingFileHandler(
+            os.path.join(config.LOG_DIR, f"bridge-stdio-{agent_name}.log"),
+            maxBytes=5 * 1024 * 1024,  # 5 MB
+            backupCount=2,
+        )
+        fh.setLevel(logging.DEBUG)
+        fmt = logging.Formatter("%(asctime)s %(message)s")
+        fmt.converter = time.gmtime
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+    return logger
+
+
 async def _create_transport(session: AgentSession, reconnecting: bool = False):
     """Create a transport for Claude Code agent (bridge or direct)."""
     if bridge_conn and bridge_conn.is_alive:
@@ -808,6 +963,7 @@ async def _create_transport(session: AgentSession, reconnecting: bool = False):
             bridge_conn,
             reconnecting=reconnecting,
             stderr_callback=make_stderr_callback(session),
+            stdio_logger=_get_stdio_logger(session.name),
         )
         await transport.connect()
         return transport
@@ -1497,6 +1653,9 @@ async def _handle_stream_event(
     if session.agent_log:
         _log_stream_event(session, event_type, event)
 
+    # Raw stdio log
+    _get_stdio_logger(session.name).debug("<<< STDOUT %s", json.dumps(event))
+
     if ctx.hit_rate_limit:
         return
 
@@ -1716,6 +1875,7 @@ async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool
 
         try:
             assert session.client is not None
+            _get_stdio_logger(session.name).debug(">>> STDIN  %s", json.dumps({"type": "retry", "content": "Continue from where you left off."}))
             await session.client.query(as_stream("Continue from where you left off."))
         except Exception:
             log.exception("Agent '%s' retry query failed", session.name)
@@ -1813,6 +1973,9 @@ async def process_message(session: AgentSession, content: MessageContent, channe
     if session.agent_log:
         session.agent_log.info("USER: %s", content_summary(content))
     log.info("PROCESS[%s] drained=%d, calling query+stream", session.name, drained)
+    _get_stdio_logger(session.name).debug(
+        ">>> STDIN  %s", json.dumps({"type": "user", "content": content if isinstance(content, str) else "[blocks]"})
+    )
     try:
         async with asyncio.timeout(config.QUERY_TIMEOUT):
             await session.client.query(as_stream(content))
