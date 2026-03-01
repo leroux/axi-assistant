@@ -15,20 +15,52 @@ MAX_RETRIES = 3
 
 
 def get_token() -> str:
-    """Get bot token from DISCORD_TOKEN env var or test-config.json fallback."""
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        config_path = os.path.expanduser("~/.config/axi/test-config.json")
-        try:
+    """Get Discord bot token for CLI scripts.
+
+    Resolution order:
+    1. Slot-based: derive instance name from this file's path, look up reserved
+       bot token in ~/.config/axi/.test-slots.json + test-config.json.
+       This takes priority so agents in test worktrees use the test instance's
+       token, not the inherited DISCORD_TOKEN from the parent process.
+    2. DISCORD_TOKEN env var (set by prime's .env, or explicitly).
+    3. sender_token from test-config.json defaults (last resort).
+    """
+    config_dir = os.path.expanduser("~/.config/axi")
+    config_path = os.path.join(config_dir, "test-config.json")
+
+    # Try slot-based resolution first: instance name = basename of repo/worktree root
+    slots_path = os.path.join(config_dir, ".test-slots.json")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    instance_name = os.path.basename(repo_root)
+
+    try:
+        with open(slots_path) as f:
+            slots = json.load(f)
+        slot = slots.get(instance_name)
+        if slot:
             with open(config_path) as f:
                 config = json.load(f)
-            token = config.get("defaults", {}).get("sender_token")
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-    if not token:
-        print("Error: DISCORD_TOKEN not set and no sender_token in test config.", file=sys.stderr)
-        sys.exit(1)
-    return token
+            return config["bots"][slot["token_id"]]["token"]
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+    # No slot — use env var (works for prime and explicit overrides)
+    token = os.environ.get("DISCORD_TOKEN")
+    if token:
+        return token
+
+    # Last resort: sender_token (works for guilds the sender bot is a member of)
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        token = config.get("defaults", {}).get("sender_token")
+        if token:
+            return token
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    print("Error: No Discord token found (no slot, no DISCORD_TOKEN, no sender_token).", file=sys.stderr)
+    sys.exit(1)
 
 
 def make_client(token: str, *, timeout: float = 30.0) -> httpx.Client:
