@@ -40,7 +40,6 @@ from axi.axi_types import (
     ConcurrencyLimitError,
     ContentBlock,
     MessageContent,
-    QuestionAnswerResult,
 )
 from axi.bridge import BridgeTransport, ensure_bridge
 from axi.channels import (
@@ -104,6 +103,14 @@ _bot: Bot | None = None
 agents: dict[str, AgentSession] = {}
 channel_to_agent: dict[int, str] = {}  # channel_id -> agent_name
 _wake_lock = asyncio.Lock()
+
+
+def find_session_by_question_message(message_id: int) -> AgentSession | None:
+    """Find the agent session waiting for a reaction answer on this message."""
+    for session in agents.values():
+        if session.question_message_id == message_id:
+            return session
+    return None
 
 # Bridge connection — initialized in on_ready(), used by wake_agent/sleep_agent
 bridge_conn: BridgeConnection | None = None
@@ -564,6 +571,10 @@ async def _handle_exit_plan_mode(
 # AskUserQuestion
 # ---------------------------------------------------------------------------
 
+# Keycap emoji for options 1-9
+_NUMBER_EMOJI = ["1\ufe0f\u20e3", "2\ufe0f\u20e3", "3\ufe0f\u20e3", "4\ufe0f\u20e3", "5\ufe0f\u20e3", "6\ufe0f\u20e3", "7\ufe0f\u20e3", "8\ufe0f\u20e3", "9\ufe0f\u20e3"]
+_CUSTOM_EMOJI = "\U0001f4dd"  # 📝 for "Other"
+
 
 def _format_question_for_discord(q: dict[str, Any], index: int, total: int) -> str:
     """Format a single AskUserQuestion question for Discord display."""
@@ -579,32 +590,32 @@ def _format_question_for_discord(q: dict[str, Any], index: int, total: int) -> s
         lines.append(f"{prefix}{question_text}")
 
     options = q.get("options", [])
-    for i, opt in enumerate(options, 1):
+    for i, opt in enumerate(options):
+        emoji = _NUMBER_EMOJI[i] if i < len(_NUMBER_EMOJI) else f"**{i + 1}.**"
         label = opt.get("label", "")
         desc = opt.get("description", "")
         if desc:
-            lines.append(f"  **{i}.** {label} — {desc}")
+            lines.append(f"  {emoji} {label} — {desc}")
         else:
-            lines.append(f"  **{i}.** {label}")
+            lines.append(f"  {emoji} {label}")
 
-    lines.append(f"  **{len(options) + 1}.** Other (type your own answer)")
+    lines.append(f"  {_CUSTOM_EMOJI} Other (type your own answer)")
 
     if multi:
-        lines.append("\n*Multiple selections allowed — reply with numbers separated by commas (e.g. `1, 3`)*")
+        lines.append("\n*React to choose, or type a custom answer.*")
     else:
-        lines.append("\n*Reply with a number, or type a custom answer.*")
+        lines.append("\n*React to choose, or type a custom answer.*")
 
     return "\n".join(lines)
 
 
 def parse_question_answer(raw: str, question: dict[str, Any]) -> str:
-    """Parse a user's reply into an answer string for one question."""
+    """Parse a user's text reply into an answer string for one question."""
     options = question.get("options", [])
     multi = question.get("multiSelect", False)
     stripped = raw.strip()
 
     if multi:
-        # Try to parse comma-separated numbers
         parts = [p.strip() for p in stripped.split(",")]
         selected: list[str] = []
         for part in parts:
@@ -612,30 +623,37 @@ def parse_question_answer(raw: str, question: dict[str, Any]) -> str:
                 idx = int(part)
                 if 1 <= idx <= len(options):
                     selected.append(options[idx - 1].get("label", part))
-                elif idx == len(options) + 1:
-                    selected.append("Other")
                 else:
-                    selected.append(part)  # out of range, treat as custom text
+                    selected.append(part)
             except ValueError:
-                selected.append(part)  # non-numeric, treat as custom text
+                selected.append(part)
         return ", ".join(selected) if selected else stripped
     else:
         try:
             idx = int(stripped)
             if 1 <= idx <= len(options):
                 return options[idx - 1].get("label", stripped)
-            elif idx == len(options) + 1:
-                return "Other"
         except ValueError:
             pass
-        return stripped  # custom text answer
+        return stripped
+
+
+def resolve_reaction_answer(emoji_str: str, question: dict[str, Any]) -> str | None:
+    """Map a reaction emoji to an answer string. Returns None if unrecognized."""
+    options = question.get("options", [])
+    for i, e in enumerate(_NUMBER_EMOJI):
+        if emoji_str == e and i < len(options):
+            return options[i].get("label", str(i + 1))
+    if emoji_str == _CUSTOM_EMOJI:
+        return "Other"
+    return None
 
 
 async def _handle_ask_user_question(
     session: AgentSession | None,
     tool_input: dict[str, Any],
 ) -> PermissionResultAllow | PermissionResultDeny:
-    """Handle AskUserQuestion by posting questions to Discord and waiting for user reply."""
+    """Handle AskUserQuestion by posting questions one at a time and waiting for each answer."""
     if session is None or session.discord_channel_id is None:
         return PermissionResultAllow()
 
@@ -644,40 +662,57 @@ async def _handle_ask_user_question(
     if not questions:
         return PermissionResultAllow()
 
-    async def _send_msg(content: str) -> None:
-        await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
+    loop = asyncio.get_running_loop()
+    answers: dict[str, str] = {}
 
     try:
         header = f"\u2753 **{session.name}** is asking you a question {_user_mentions()}"
-        await _send_msg(header)
-        for i, q in enumerate(questions):
-            formatted = _format_question_for_discord(q, i, len(questions))
-            await _send_msg(formatted)
+        await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": header})
     except Exception:
-        log.exception("_handle_ask_user_question: failed to post to Discord — denying")
-        return PermissionResultDeny(
-            message="Could not post question to Discord. Try using text messages instead."
-        )
+        log.exception("_handle_ask_user_question: failed to post header — denying")
+        return PermissionResultDeny(message="Could not post question to Discord.")
 
-    # Store question data for parsing the response
-    session.question_data = questions
-    session.question_answers = {}
+    for i, q in enumerate(questions):
+        # Post the question and get message ID
+        try:
+            formatted = _format_question_for_discord(q, i, len(questions))
+            resp = await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": formatted})
+            msg_id = int(resp.json()["id"])
+        except Exception:
+            log.exception("_handle_ask_user_question: failed to post question %d — denying", i)
+            return PermissionResultDeny(message="Could not post question to Discord.")
 
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[QuestionAnswerResult] = loop.create_future()
-    session.question_future = future
+        # Pre-add reaction emojis for each option
+        options = q.get("options", [])
+        for j in range(min(len(options), len(_NUMBER_EMOJI))):
+            try:
+                encoded = _NUMBER_EMOJI[j].encode("utf-8").decode("utf-8")
+                await config.discord_request("PUT", f"/channels/{channel_id}/messages/{msg_id}/reactions/{encoded}/@me")
+            except Exception:
+                log.debug("Failed to add reaction %d to question message", j + 1)
 
-    log.info("Agent '%s' paused waiting for user answer (%d questions)", session.name, len(questions))
+        # Set session state for this question
+        session.question_message_id = msg_id
+        session.question_data = q
 
-    try:
-        result = await future
-    finally:
-        session.question_future = None
-        session.question_data = None
-        session.question_answers = {}
+        future: asyncio.Future[str] = loop.create_future()
+        session.question_future = future
 
-    # Inject answers into tool input via updated_input
-    answers = result.get("answers", {})
+        log.info("Agent '%s' waiting for answer to question %d/%d", session.name, i + 1, len(questions))
+
+        try:
+            answer = await future
+        finally:
+            session.question_future = None
+            session.question_message_id = None
+            session.question_data = None
+
+        # Empty answer means interrupted (e.g. /stop)
+        if not answer:
+            break
+
+        answers[q.get("question", "")] = answer
+
     log.info("Agent '%s' got answers: %s", session.name, answers)
 
     updated = dict(tool_input)

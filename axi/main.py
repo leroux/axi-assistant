@@ -88,6 +88,28 @@ async def on_error(event_method: str, *args: Any, **kwargs: Any) -> None:
 
 
 @bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
+    """Handle reaction adds — used for AskUserQuestion emoji answers."""
+    # Ignore own reactions (bot pre-adding them)
+    if bot.user and payload.user_id == bot.user.id:
+        return
+
+    # Find a session waiting for an answer on this message
+    session = agents.find_session_by_question_message(payload.message_id)
+    if session is None or session.question_future is None or session.question_future.done():
+        return
+
+    emoji_str = str(payload.emoji)
+    q = session.question_data or {}
+    answer = agents.resolve_reaction_answer(emoji_str, q)
+    if answer is None:
+        return  # Unrecognized emoji, ignore
+
+    session.question_future.set_result(answer)
+    log.info("Question answered via reaction: %s -> %s", emoji_str, answer)
+
+
+@bot.event
 async def on_message(message: discord.Message) -> None:
     """Handle incoming Discord messages."""
     # Dedup: Discord may deliver the same message twice on gateway reconnects
@@ -189,27 +211,14 @@ async def on_message(message: discord.Message) -> None:
             await agents.send_system(channel, "Feedback received — agent will revise the plan.")
         return
 
-    # --- AskUserQuestion gate ---
+    # --- AskUserQuestion gate (text reply) ---
     if session.question_future is not None and not session.question_future.done():
         raw = content.strip() if isinstance(content, str) else str(content)
         raw = re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\]\s*", "", raw).strip()
-        questions = session.question_data or []
-        pending_answers = session.question_answers
-
-        # Find the next unanswered question
-        answered_count = len(pending_answers)
-        if answered_count < len(questions):
-            q = questions[answered_count]
-            pending_answers[q.get("question", "")] = agents.parse_question_answer(raw, q)
-            await agents.add_reaction(message, "\u2705")
-
-        # If all questions answered, resolve the future
-        if len(pending_answers) >= len(questions):
-            session.question_future.set_result({"answers": dict(pending_answers)})
-            await agents.send_system(channel, "Answer received — agent resuming.")
-        elif len(questions) > 1:
-            next_num = len(pending_answers) + 1
-            await agents.send_system(channel, f"Got it. Now answer question {next_num}/{len(questions)}.")
+        q = session.question_data or {}
+        answer = agents.parse_question_answer(raw, q)
+        session.question_future.set_result(answer)
+        await agents.add_reaction(message, "\u2705")
         return
 
     # --- Text command handling (// prefix) ---
@@ -1031,9 +1040,9 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
             session.plan_approval_future.set_result({"approved": False, "message": "Interrupted by /stop."})
 
         if session.question_future and not session.question_future.done():
-            session.question_future.set_result({"answers": {}})
+            session.question_future.set_result("")
             session.question_data = None
-            session.question_answers = {}
+            session.question_message_id = None
 
         cleared = 0
         while session.message_queue:
