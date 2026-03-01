@@ -165,12 +165,12 @@ def _next_stream_id(agent_name: str) -> str:
     return f"{agent_name}:S{_stream_counter}"
 
 
-def _build_mcp_servers(agent_name: str) -> dict[str, Any]:
+def _build_mcp_servers(agent_name: str, cwd: str | None = None) -> dict[str, Any]:
     """Build the standard MCP server dict for an agent."""
     servers: dict[str, Any] = {}
     if _utils_mcp_server is not None:
         servers["utils"] = _utils_mcp_server
-    servers["schedule"] = make_schedule_mcp_server(agent_name, config.SCHEDULES_PATH)
+    servers["schedule"] = make_schedule_mcp_server(agent_name, config.SCHEDULES_PATH, cwd)
     return servers
 
 
@@ -1319,7 +1319,7 @@ async def reconstruct_agents_from_channels() -> int:
                 continue
 
             prompt = make_spawned_agent_system_prompt(cwd)
-            mcp_servers = _build_mcp_servers(agent_name)
+            mcp_servers = _build_mcp_servers(agent_name, cwd)
 
             session = AgentSession(
                 name=agent_name,
@@ -2042,7 +2042,7 @@ async def spawn_agent(
         )
     else:
         prompt = make_spawned_agent_system_prompt(cwd, packs=packs)
-        mcp_servers = _build_mcp_servers(name)
+        mcp_servers = _build_mcp_servers(name, cwd)
 
         session = AgentSession(
             name=name,

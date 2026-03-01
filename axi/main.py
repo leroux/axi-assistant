@@ -31,11 +31,9 @@ from axi.prompts import (
 )
 from axi.schedule_tools import (
     append_history,
-    check_skip,
     load_schedules,
     make_schedule_mcp_server,
     prune_history,
-    prune_skips,
     save_schedules,
     schedule_key,
     schedules_lock,
@@ -341,12 +339,8 @@ async def _fire_schedules(
                 if last_occurrence > agents.schedule_last_fired[skey]:
                     agents.schedule_last_fired[skey] = last_occurrence
 
-                    if check_skip(skey):
-                        log.info("Skipping recurring event (one-off skip): %s", name)
-                        continue
-
                     log.info("Firing recurring event: %s", name)
-                    agent_name = entry.get("session", name)
+                    agent_name = entry.get("owner") or entry.get("session") or name
                     agent_cwd = entry.get("cwd", os.path.join(config.AXI_USER_DATA, "agents", agent_name))
 
                     sched_ch = await agents.get_agent_channel(agent_name) if agent_name in agents.agents else None
@@ -360,12 +354,14 @@ async def _fire_schedules(
                         await agents.reclaim_agent_name(agent_name)
                         await agents.spawn_agent(agent_name, agent_cwd, entry["prompt"])
 
+                    append_history(entry, now_utc, dedup_minutes=5)
+
             elif "at" in entry:
                 fire_at = datetime.fromisoformat(entry["at"])
 
                 if fire_at <= now_utc:
                     log.info("Firing one-off event: %s", name)
-                    agent_name = entry.get("session", name)
+                    agent_name = entry.get("owner") or entry.get("session") or name
                     agent_cwd = entry.get("cwd", os.path.join(config.AXI_USER_DATA, "agents", agent_name))
 
                     sched_ch = await agents.get_agent_channel(agent_name) if agent_name in agents.agents else None
@@ -479,7 +475,6 @@ async def check_schedules() -> None:
         return
 
     prune_history()
-    prune_skips()
 
     now_utc = datetime.now(UTC)
     now_local = datetime.now(config.SCHEDULE_TIMEZONE)
@@ -1575,7 +1570,7 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
 
     prompt = make_spawned_agent_system_prompt(cwd)
     mcp_servers: dict[str, Any] = {"utils": tools.utils_mcp_server}
-    mcp_servers["schedule"] = make_schedule_mcp_server(agent_name, config.SCHEDULES_PATH)
+    mcp_servers["schedule"] = make_schedule_mcp_server(agent_name, config.SCHEDULES_PATH, cwd)
 
     session = AgentSession(
         name=agent_name,
@@ -1714,6 +1709,10 @@ def _load_master_session_data() -> tuple[str | None, str | None, int | None]:
 def _register_master_agent(resume_id: str | None, prompt_hash: str | None, todo_msg_id: int | None = None) -> AgentSession:
     """Create and register the master AgentSession (sleeping)."""
     master_mcp: dict[str, Any] = {"axi": tools.axi_master_mcp_server}
+    master_mcp["utils"] = tools.utils_mcp_server
+    master_mcp["schedule"] = make_schedule_mcp_server(
+        config.MASTER_AGENT_NAME, config.SCHEDULES_PATH, config.DEFAULT_CWD,
+    )
     if os.path.isdir(config.BOT_WORKTREES_DIR):
         master_mcp["discord"] = tools.discord_mcp_server
     session = AgentSession(

@@ -621,6 +621,7 @@ def sdk_mcp_servers_for_cwd(cwd: str, agent_name: str | None = None) -> dict[str
         servers["schedule"] = make_schedule_mcp_server(
             agent_name,
             config.SCHEDULES_PATH,
+            cwd,
         )
     if is_admin:
         servers["axi"] = axi_mcp_server

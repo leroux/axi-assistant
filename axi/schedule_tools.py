@@ -6,7 +6,7 @@ The module is self-contained — no imports from bot.py.
 
 Exports:
     make_schedule_mcp_server  — factory returning a per-agent McpSdkServerConfig
-    schedule_key              — composite key helper for schedule_last_fired / check_skip
+    schedule_key              — composite key helper for schedule_last_fired
     schedules_lock            — shared asyncio.Lock for schedules.json access
 """
 
@@ -47,7 +47,7 @@ _MAX_PROMPT_LEN = 2000
 
 
 def schedule_key(entry: dict[str, Any]) -> str:
-    """Compute a globally-unique key for schedule_last_fired / check_skip.
+    """Compute a globally-unique key for schedule_last_fired.
 
     Entries with an ``owner`` field produce ``"{owner}/{name}"``.
     Legacy entries (no owner) produce just ``"{name}"``.
@@ -88,15 +88,26 @@ def load_history() -> list[dict[str, Any]]:
     return _load(config.HISTORY_PATH)
 
 
-def append_history(entry: dict[str, Any], fired_at: datetime) -> None:
+def append_history(entry: dict[str, Any], fired_at: datetime, *, dedup_minutes: int = 0) -> None:
     history = load_history()
-    history.append(
-        {
-            "name": entry["name"],
-            "prompt": entry["prompt"],
-            "fired_at": fired_at.isoformat(),
-        }
-    )
+
+    # Dedup: skip if the same schedule fired within dedup_minutes
+    if dedup_minutes > 0:
+        sched_name = entry["name"]
+        owner = entry.get("owner")
+        for h in reversed(history):
+            if h.get("name") == sched_name and h.get("owner") == owner:
+                last = datetime.fromisoformat(h["fired_at"])
+                if (fired_at - last) < timedelta(minutes=dedup_minutes):
+                    return
+                break
+
+    record: dict[str, Any] = {"name": entry["name"], "fired_at": fired_at.isoformat()}
+    owner = entry.get("owner")
+    if owner:
+        record["owner"] = owner
+    record["prompt"] = entry["prompt"]
+    history.append(record)
     _save(config.HISTORY_PATH, history)
 
 
@@ -107,34 +118,6 @@ def prune_history() -> None:
     if len(pruned) != len(history):
         _save(config.HISTORY_PATH, pruned)
 
-
-def load_skips() -> list[dict[str, Any]]:
-    return _load(config.SKIPS_PATH)
-
-
-def save_skips(skips: list[dict[str, Any]]) -> None:
-    _save(config.SKIPS_PATH, skips)
-
-
-def prune_skips() -> None:
-    """Remove skip entries whose date has passed."""
-    skips = load_skips()
-    today = datetime.now(config.SCHEDULE_TIMEZONE).date()
-    pruned = [s for s in skips if datetime.strptime(s["skip_date"], "%Y-%m-%d").replace(tzinfo=UTC).date() >= today]
-    if len(pruned) != len(skips):
-        save_skips(pruned)
-
-
-def check_skip(name: str) -> bool:
-    """Check if a recurring event should be skipped today."""
-    skips = load_skips()
-    today = datetime.now(config.SCHEDULE_TIMEZONE).strftime("%Y-%m-%d")
-    for skip in skips:
-        if skip.get("name") == name and skip.get("skip_date") == today:
-            skips.remove(skip)
-            save_skips(skips)
-            return True
-    return False
 
 
 def _text(msg: str) -> dict[str, Any]:
@@ -152,12 +135,13 @@ def _error(msg: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def make_schedule_mcp_server(agent_name: str, schedules_path: str):
+def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: str | None = None):
     """Create a per-agent schedule MCP server.
 
     Args:
         agent_name: The owning agent's name (captured in tool closures).
         schedules_path: Absolute path to schedules.json.
+        agent_cwd: The agent's working directory (captured in schedule entries).
 
     Returns:
         McpSdkServerConfig with schedule_list, schedule_create, and
@@ -260,6 +244,8 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str):
                 "prompt": prompt,
                 "owner": agent_name,
             }
+            if agent_cwd:
+                entry["cwd"] = agent_cwd
             if stype == "recurring":
                 entry["schedule"] = cron_expr
             else:
