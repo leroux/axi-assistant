@@ -1,8 +1,11 @@
-"""BridgeTransport -- SDK Transport that routes through procmux.
+"""BridgeTransport -- SDK Transport that routes through a ProcessConnection.
 
 Implements the claude_agent_sdk Transport interface (6 abstract methods).
 For reconnecting agents, intercepts the initialize control_request and
 fakes a success response -- the CLI is already initialized.
+
+This module has NO dependency on procmux. It works with any backend that
+satisfies the ProcessConnection protocol defined in claudewire.types.
 """
 
 from __future__ import annotations
@@ -11,19 +14,18 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from procmux import ProcmuxConnection, ResultMsg, StderrMsg, StdoutMsg
+from claudewire.types import CommandResult, ExitEvent, StderrEvent, StdoutEvent
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Callable
 
-    from procmux.client import ProcessMsg
+    from claudewire.types import ProcessConnection, ProcessEventQueue
 
 log = logging.getLogger(__name__)
 
 
 class BridgeTransport:
-    """SDK Transport that routes through procmux for one agent.
+    """SDK Transport that routes through a ProcessConnection for one agent.
 
     Implements the claude_agent_sdk.Transport interface (6 abstract methods).
     For reconnecting agents, intercepts the initialize control_request and
@@ -33,7 +35,7 @@ class BridgeTransport:
     def __init__(
         self,
         name: str,
-        conn: ProcmuxConnection,
+        conn: ProcessConnection,
         *,
         reconnecting: bool = False,
         stderr_callback: Callable[[str], None] | None = None,
@@ -44,44 +46,34 @@ class BridgeTransport:
         self._reconnecting = reconnecting
         self._stderr_callback = stderr_callback
         self._stdio_logger = stdio_logger
-        self._queue: asyncio.Queue[ProcessMsg] | None = None
+        self._queue: ProcessEventQueue | None = None
         self._ready = False
         self._cli_exited = False
         self._exit_code: int | None = None
 
     async def connect(self) -> None:
-        """Register with procmux for this agent's output.
-
-        SPAWN is handled separately via spawn() before connect().
-        SUBSCRIBE is handled separately via subscribe() after connect().
-        """
-        self._queue = self._conn.register_process(self._name)
+        """Register with the process connection for this agent's output."""
+        self._queue = self._conn.register(self._name)
         self._ready = True
 
-    async def spawn(self, cli_args: list[str], env: dict[str, str], cwd: str) -> ResultMsg:
-        """Tell procmux to spawn a new CLI process for this agent."""
-        result = await self._conn.send_command(
-            "spawn",
-            name=self._name,
-            cli_args=cli_args,
-            env=env,
-            cwd=cwd,
-        )
+    async def spawn(self, cli_args: list[str], env: dict[str, str], cwd: str) -> CommandResult:
+        """Tell the process connection to spawn a new CLI process."""
+        result = await self._conn.spawn(self._name, cli_args=cli_args, env=env, cwd=cwd)
         if not result.ok:
-            raise RuntimeError(f"Procmux spawn failed for '{self._name}': {result}")
+            raise RuntimeError(f"Spawn failed for '{self._name}': {result}")
         return result
 
-    async def subscribe(self) -> ResultMsg:
-        """Subscribe to this agent's output from procmux (triggers buffer replay)."""
-        result = await self._conn.send_command("subscribe", name=self._name)
+    async def subscribe(self) -> CommandResult:
+        """Subscribe to this agent's output (triggers buffer replay)."""
+        result = await self._conn.subscribe(self._name)
         if not result.ok:
-            raise RuntimeError(f"Procmux subscribe failed for '{self._name}': {result}")
+            raise RuntimeError(f"Subscribe failed for '{self._name}': {result}")
         return result
 
     async def write(self, data: str) -> None:
-        """Write data to the CLI's stdin via procmux."""
+        """Write data to the CLI's stdin."""
         if not self._conn.is_alive:
-            raise ConnectionError("Procmux connection is dead")
+            raise ConnectionError("Process connection is dead")
         msg = json.loads(data)
 
         # Intercept initialize for reconnecting agents -- fake success
@@ -100,7 +92,7 @@ class BridgeTransport:
                 },
             }
             if self._queue:
-                await self._queue.put(StdoutMsg(name=self._name, data=fake_response))
+                await self._queue.put(StdoutEvent(name=self._name, data=fake_response))
             self._reconnecting = False
             return
 
@@ -113,25 +105,25 @@ class BridgeTransport:
         if not self._queue:
             return
         if not self._conn.is_alive:
-            raise ConnectionError("Procmux connection is dead")
+            raise ConnectionError("Process connection is dead")
         while True:
             msg = await self._queue.get()
             if msg is None:
-                raise ConnectionError("Procmux connection lost during read")
-            if isinstance(msg, StdoutMsg):
+                raise ConnectionError("Process connection lost during read")
+            if isinstance(msg, StdoutEvent):
                 msg_type = msg.data.get("type", "?")
-                log.debug("[read][%s] yielding StdoutMsg type=%s", self._name, msg_type)
+                log.debug("[read][%s] yielding stdout type=%s", self._name, msg_type)
                 if self._stdio_logger:
                     self._stdio_logger.debug("<<< STDOUT %s", json.dumps(msg.data))
                 yield msg.data
-            elif isinstance(msg, StderrMsg):
+            elif isinstance(msg, StderrEvent):
                 log.debug("[read][%s] stderr: %.200s", self._name, msg.text)
                 if self._stdio_logger:
                     self._stdio_logger.debug("<<< STDERR %s", msg.text)
                 if self._stderr_callback:
                     self._stderr_callback(msg.text)
-            else:  # ExitMsg
-                log.debug("[read][%s] ExitMsg code=%s", self._name, msg.code)
+            elif isinstance(msg, ExitEvent):
+                log.debug("[read][%s] exit code=%s", self._name, msg.code)
                 if self._stdio_logger:
                     self._stdio_logger.debug("--- EXIT   code=%s", msg.code)
                 self._cli_exited = True
@@ -139,13 +131,13 @@ class BridgeTransport:
                 return
 
     async def close(self) -> None:
-        """Kill the CLI process and unregister from procmux."""
+        """Kill the CLI process and unregister."""
         if self._ready and not self._cli_exited:
             try:
-                await self._conn.send_command("kill", name=self._name)
+                await self._conn.kill(self._name)
             except Exception:
                 pass
-        self._conn.unregister_process(self._name)
+        self._conn.unregister(self._name)
         self._ready = False
 
     def is_ready(self) -> bool:

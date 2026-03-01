@@ -17,6 +17,7 @@ import uuid
 
 import pytest
 
+from agenthub.procmux_wire import ProcmuxProcessConnection
 from axi.bridge import (
     BridgeConnection,
     BridgeServer,
@@ -26,6 +27,7 @@ from axi.bridge import (
     connect_to_bridge,
     ensure_bridge,
 )
+from claudewire.types import StdoutEvent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -54,6 +56,11 @@ async def _connect(sock: str) -> BridgeConnection:
     """Connect a BridgeConnection to a socket."""
     reader, writer = await asyncio.open_unix_connection(sock)
     return BridgeConnection(reader, writer)
+
+
+def _adapt(conn: BridgeConnection) -> ProcmuxProcessConnection:
+    """Wrap a ProcmuxConnection for use with BridgeTransport."""
+    return ProcmuxProcessConnection(conn)
 
 
 async def _cleanup(server: BridgeServer, srv: asyncio.Server, conn: BridgeConnection, sock: str):
@@ -649,7 +656,7 @@ class TestBridgeTransportInterception:
                 timeout=3,
             )
 
-            transport = BridgeTransport("rc", conn, reconnecting=True)
+            transport = BridgeTransport("rc", _adapt(conn), reconnecting=True)
             await transport.connect()
             await asyncio.wait_for(transport.subscribe(), timeout=3)
 
@@ -665,7 +672,7 @@ class TestBridgeTransportInterception:
 
             # Should get a fake response from the queue
             msg = await asyncio.wait_for(transport._queue.get(), timeout=2)
-            assert msg.type == "stdout"
+            assert isinstance(msg, StdoutEvent)
             assert msg.data["type"] == "control_response"
             assert msg.data["response"]["request_id"] == "test-init-42"
             assert msg.data["response"]["subtype"] == "success"
@@ -687,7 +694,7 @@ class TestBridgeTransportInterception:
                 timeout=3,
             )
 
-            transport = BridgeTransport("nr", conn, reconnecting=False)
+            transport = BridgeTransport("nr", _adapt(conn), reconnecting=False)
             await transport.connect()
             await asyncio.wait_for(transport.subscribe(), timeout=3)
 
@@ -703,7 +710,7 @@ class TestBridgeTransportInterception:
 
             # Should get the echo back (not a fake response)
             msg = await asyncio.wait_for(transport._queue.get(), timeout=3)
-            assert msg.type == "stdout"
+            assert isinstance(msg, StdoutEvent)
             assert msg.data["type"] == "echo"
         finally:
             await _cleanup(server, srv, conn, sock)
@@ -729,7 +736,7 @@ class TestBridgeTransportReadMessages:
                 timeout=3,
             )
 
-            transport = BridgeTransport("rd", conn)
+            transport = BridgeTransport("rd", _adapt(conn))
             await transport.connect()
             await asyncio.wait_for(transport.subscribe(), timeout=3)
 
@@ -759,7 +766,7 @@ class TestBridgeTransportReadMessages:
                 timeout=3,
             )
 
-            transport = BridgeTransport("ex", conn)
+            transport = BridgeTransport("ex", _adapt(conn))
             await transport.connect()
             await asyncio.wait_for(transport.subscribe(), timeout=3)
 
@@ -783,7 +790,7 @@ class TestBridgeTransportReadMessages:
             )
 
             stderr_lines = []
-            transport = BridgeTransport("sc", conn, stderr_callback=stderr_lines.append)
+            transport = BridgeTransport("sc", _adapt(conn), stderr_callback=stderr_lines.append)
             await transport.connect()
             await asyncio.wait_for(transport.subscribe(), timeout=3)
 
@@ -808,7 +815,7 @@ class TestBridgeTransportLifecycle:
         server, srv = await _start_server(sock)
         conn = await _connect(sock)
         try:
-            transport = BridgeTransport("lc", conn)
+            transport = BridgeTransport("lc", _adapt(conn))
             assert transport.is_ready() is False
             await transport.connect()
             assert transport.is_ready() is True
@@ -829,7 +836,7 @@ class TestBridgeTransportLifecycle:
                 timeout=3,
             )
 
-            transport = BridgeTransport("cl", conn)
+            transport = BridgeTransport("cl", _adapt(conn))
             await transport.connect()
             await asyncio.wait_for(transport.subscribe(), timeout=3)
 
@@ -849,7 +856,7 @@ class TestBridgeTransportLifecycle:
         server, srv = await _start_server(sock)
         conn = await _connect(sock)
         try:
-            transport = BridgeTransport("ei", conn)
+            transport = BridgeTransport("ei", _adapt(conn))
             await transport.connect()
             await transport.end_input()  # should not raise
         finally:

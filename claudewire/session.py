@@ -12,8 +12,6 @@ import os
 import signal
 import time
 
-from claudewire.transport import BridgeTransport
-
 log = logging.getLogger(__name__)
 
 
@@ -47,15 +45,20 @@ def ensure_process_dead(pid: int | None, label: str) -> None:
 
 
 async def disconnect_client(client: object, label: str) -> None:
-    """Disconnect a ClaudeSDKClient and ensure its subprocess is terminated."""
+    """Disconnect a ClaudeSDKClient and ensure its subprocess is terminated.
+
+    If the client's transport has an async close() method (e.g. BridgeTransport),
+    uses that. Otherwise falls back to __aexit__ + process cleanup.
+    """
     transport = getattr(client, "_transport", None)
-    if isinstance(transport, BridgeTransport):
+    # Duck-type check: any transport with an async close() method
+    if hasattr(transport, "close") and asyncio.iscoroutinefunction(getattr(transport, "close", None)):
         try:
             await asyncio.wait_for(transport.close(), timeout=5.0)
         except (TimeoutError, asyncio.CancelledError):
-            log.warning("'%s' bridge transport close timed out", label)
+            log.warning("'%s' transport close timed out", label)
         except Exception:
-            log.exception("'%s' error closing bridge transport", label)
+            log.exception("'%s' error closing transport", label)
         return
 
     pid = get_subprocess_pid(client)

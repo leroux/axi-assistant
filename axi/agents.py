@@ -32,6 +32,7 @@ from claude_agent_sdk.types import (
 )
 from discord import TextChannel
 
+from agenthub.procmux_wire import ProcmuxProcessConnection
 from agenthub.tasks import BackgroundTaskSet
 from axi import channels as _channels_mod
 from axi import config
@@ -108,6 +109,8 @@ _wake_lock = asyncio.Lock()
 
 # Bridge connection — initialized in on_ready(), used by wake_agent/sleep_agent
 bridge_conn: BridgeConnection | None = None
+# Adapted connection for claudewire (wraps bridge_conn)
+wire_conn: ProcmuxProcessConnection | None = None
 
 # Shutdown coordinator — initialized via init_shutdown_coordinator() from on_ready
 shutdown_coordinator: ShutdownCoordinator | None = None
@@ -882,10 +885,10 @@ def _reset_session_activity(session: AgentSession) -> None:
 
 async def _create_transport(session: AgentSession, reconnecting: bool = False):
     """Create a transport for Claude Code agent (bridge or direct)."""
-    if bridge_conn and bridge_conn.is_alive:
+    if wire_conn and wire_conn.is_alive:
         transport = BridgeTransport(
             session.name,
-            bridge_conn,
+            wire_conn,
             reconnecting=reconnecting,
             stderr_callback=make_stderr_callback(session),
             stdio_logger=get_stdio_logger(session.name, config.LOG_DIR),
@@ -2207,14 +2210,16 @@ async def _process_inter_agent_prompt(
 
 async def connect_bridge() -> None:
     """Connect to the agent bridge and schedule reconnections for running agents."""
-    global bridge_conn
+    global bridge_conn, wire_conn
 
     try:
         bridge_conn = await ensure_bridge(config.BRIDGE_SOCKET_PATH, timeout=10.0)
+        wire_conn = ProcmuxProcessConnection(bridge_conn)
         log.info("Bridge connection established")
     except Exception:
         log.exception("Failed to connect to bridge \u2014 agents will use direct subprocess mode")
         bridge_conn = None
+        wire_conn = None
         return
 
     try:
@@ -2746,4 +2751,5 @@ __all__ = [
     "stream_with_retry",
     "wake_agent",
     "wake_or_queue",
+    "wire_conn",
 ]
