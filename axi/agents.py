@@ -572,7 +572,7 @@ async def _handle_exit_plan_mode(
 # TodoWrite display
 # ---------------------------------------------------------------------------
 
-_TODO_STATUS = {"completed": "\u2705", "in_progress": "\U0001f504", "pending": "\u2b1c"}
+_TODO_STATUS = {"completed": "\u2705", "in_progress": "\U0001f504", "pending": "\u23f3"}
 
 
 def format_todo_list(todos: list[dict[str, Any]]) -> str:
@@ -586,10 +586,36 @@ def format_todo_list(todos: list[dict[str, Any]]) -> str:
     return "\n".join(lines) or "*Empty todo list*"
 
 
+def _todo_path(agent_name: str) -> str:
+    """Path to the persisted todo state file for an agent."""
+    return os.path.join(config.LOG_DIR, f"{agent_name}.todo.json")
+
+
+def _save_todo_items(agent_name: str, todos: list[dict[str, Any]]) -> None:
+    """Persist todo items to disk."""
+    try:
+        with open(_todo_path(agent_name), "w") as f:
+            json.dump(todos, f)
+    except OSError:
+        log.warning("Failed to save todo state for '%s'", agent_name, exc_info=True)
+
+
+def load_todo_items(agent_name: str) -> list[dict[str, Any]]:
+    """Load persisted todo items from disk."""
+    try:
+        with open(_todo_path(agent_name)) as f:
+            data: list[dict[str, Any]] = json.load(f)
+        return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return []
+
+
 async def _post_todo_list(session: AgentSession, tool_input: dict[str, Any]) -> None:
     """Post or update the todo list display in Discord."""
     todos = tool_input.get("todos", [])
     session.todo_items = todos
+    _save_todo_items(session.name, todos)
     body = format_todo_list(todos)
     channel_id = session.discord_channel_id
 
@@ -1143,6 +1169,7 @@ async def reconstruct_agents_from_channels() -> int:
                 session_id=session_id,
                 discord_channel_id=ch.id,
                 mcp_servers=mcp_servers,
+                todo_items=load_todo_items(agent_name),
             )
             agents[agent_name] = session
             channel_to_agent[ch.id] = agent_name
@@ -2644,6 +2671,7 @@ __all__ = [
     "is_processing",
     # Rate limiting
     "is_rate_limited",
+    "load_todo_items",
     "make_cwd_permission_callback",
     "make_shutdown_coordinator",
     "make_stderr_callback",

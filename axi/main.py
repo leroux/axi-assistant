@@ -1697,6 +1697,7 @@ def _register_master_agent(resume_id: str | None, prompt_hash: str | None) -> Ag
         client=None,
         mcp_servers=master_mcp,
         session_id=resume_id,
+        todo_items=agents.load_todo_items(config.MASTER_AGENT_NAME),
     )
     agents.agents[config.MASTER_AGENT_NAME] = session
     log.info("Master agent registered (sleeping, session_id=%s)", resume_id and resume_id[:8])
