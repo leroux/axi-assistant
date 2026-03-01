@@ -13,7 +13,7 @@ repos:
         pass_filenames: true
       - id: pyright
         name: pyright
-        entry: uv run pyright
+        entry: uv run --no-sync pyright
         language: system
         types: [python]
         pass_filenames: false
