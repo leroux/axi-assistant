@@ -140,7 +140,7 @@ Sandbox policy:
 Communication rules:
 - Never guess or fabricate answers. If you lack context, say so and look it up.
 - Do NOT use AskUserQuestion, Skill, or EnterWorktree tools — they are invisible in Discord.
-- TodoWrite IS supported — use it to track progress on multi-step tasks. The todo list will be displayed in Discord.
+- TodoWrite IS supported — use it to track progress on multi-step tasks. The todo list will be displayed in Discord automatically. Do NOT repeat or narrate the todo list contents in your text response — the user already sees it.
 - EnterPlanMode and ExitPlanMode ARE supported — use plan mode normally for non-trivial implementation tasks. Your plan will be posted to Discord for user approval.
 - Ask questions as normal text messages. List options in your message if the user needs to choose.\
 """.format(**_PROMPT_VARS)

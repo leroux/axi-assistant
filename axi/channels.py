@@ -65,23 +65,31 @@ def normalize_channel_name(name: str) -> str:
     return name[:100]
 
 
-def format_channel_topic(cwd: str, session_id: str | None = None, prompt_hash: str | None = None) -> str:
+def format_channel_topic(
+    cwd: str,
+    session_id: str | None = None,
+    prompt_hash: str | None = None,
+    todo_msg: int | None = None,
+) -> str:
     """Format agent metadata for a Discord channel topic."""
     parts = [f"cwd: {cwd}"]
     if session_id:
         parts.append(f"session: {session_id}")
     if prompt_hash:
         parts.append(f"prompt_hash: {prompt_hash}")
+    if todo_msg is not None:
+        parts.append(f"todo_msg: {todo_msg}")
     return " | ".join(parts)
 
 
-def parse_channel_topic(topic: str | None) -> tuple[str | None, str | None, str | None]:
-    """Parse cwd, session_id, and prompt_hash from a channel topic."""
+def parse_channel_topic(topic: str | None) -> tuple[str | None, str | None, str | None, int | None]:
+    """Parse cwd, session_id, prompt_hash, and todo_msg from a channel topic."""
     if not topic:
-        return None, None, None
+        return None, None, None, None
     cwd = None
     session_id = None
     prompt_hash = None
+    todo_msg: int | None = None
     for part in topic.split("|"):
         key, _, value = part.strip().partition(": ")
         if key == "cwd":
@@ -90,7 +98,12 @@ def parse_channel_topic(topic: str | None) -> tuple[str | None, str | None, str 
             session_id = value.strip()
         elif key == "prompt_hash":
             prompt_hash = value.strip()
-    return cwd, session_id, prompt_hash
+        elif key == "todo_msg":
+            try:
+                todo_msg = int(value.strip())
+            except ValueError:
+                pass
+    return cwd, session_id, prompt_hash, todo_msg
 
 
 # ---------------------------------------------------------------------------

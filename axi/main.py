@@ -1170,7 +1170,7 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
 
     if cmd == "todo":
         if session.todo_items:
-            await agents.send_long(channel, agents.format_todo_list(session.todo_items))
+            await agents.send_long(channel, f"**Todo List**\n{agents.format_todo_list(session.todo_items)}")
         else:
             await agents.send_system(channel, f"No todo list for **{agent_name}**.")
         return True
@@ -1662,8 +1662,8 @@ async def sync_readme_channel() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _load_master_session_data() -> tuple[str | None, str | None]:
-    """Load master session_id and prompt_hash from disk. Returns (resume_id, prompt_hash)."""
+def _load_master_session_data() -> tuple[str | None, str | None, int | None]:
+    """Load master session_id, prompt_hash, and todo_message_id from disk."""
     try:
         if os.path.isfile(config.MASTER_SESSION_PATH):
             with open(config.MASTER_SESSION_PATH) as f:
@@ -1673,18 +1673,20 @@ def _load_master_session_data() -> tuple[str | None, str | None]:
                     data = json.loads(raw)
                     resume_id = data.get("session_id")
                     prompt_hash = data.get("prompt_hash")
+                    todo_msg_id = data.get("todo_message_id")
                 else:
                     resume_id = raw
                     prompt_hash = None
+                    todo_msg_id = None
                 if resume_id:
                     log.info("Loaded master session_id from %s: %s (prompt_hash=%s)", config.MASTER_SESSION_PATH, resume_id[:8], prompt_hash)
-                return resume_id, prompt_hash
+                return resume_id, prompt_hash, todo_msg_id
     except (OSError, json.JSONDecodeError):
         log.warning("Failed to read master session data", exc_info=True)
-    return None, None
+    return None, None, None
 
 
-def _register_master_agent(resume_id: str | None, prompt_hash: str | None) -> AgentSession:
+def _register_master_agent(resume_id: str | None, prompt_hash: str | None, todo_msg_id: int | None = None) -> AgentSession:
     """Create and register the master AgentSession (sleeping)."""
     master_mcp: dict[str, Any] = {"axi": tools.axi_master_mcp_server}
     if os.path.isdir(config.BOT_WORKTREES_DIR):
@@ -1698,6 +1700,7 @@ def _register_master_agent(resume_id: str | None, prompt_hash: str | None) -> Ag
         mcp_servers=master_mcp,
         session_id=resume_id,
         todo_items=agents.load_todo_items(config.MASTER_AGENT_NAME),
+        todo_message_id=todo_msg_id,
     )
     agents.agents[config.MASTER_AGENT_NAME] = session
     log.info("Master agent registered (sleeping, session_id=%s)", resume_id and resume_id[:8])
@@ -1886,8 +1889,8 @@ async def on_ready() -> None:
     agents.init(bot)
     agents.set_utils_mcp_server(tools.utils_mcp_server)
 
-    master_resume_id, master_old_prompt_hash = _load_master_session_data()
-    master_session = _register_master_agent(master_resume_id, master_old_prompt_hash)
+    master_resume_id, master_old_prompt_hash, master_todo_msg = _load_master_session_data()
+    master_session = _register_master_agent(master_resume_id, master_old_prompt_hash, master_todo_msg)
     await _setup_guild_infrastructure(master_session)
     await agents.connect_bridge()
     agents.init_shutdown_coordinator()

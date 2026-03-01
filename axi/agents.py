@@ -616,7 +616,7 @@ async def _post_todo_list(session: AgentSession, tool_input: dict[str, Any]) -> 
     todos = tool_input.get("todos", [])
     session.todo_items = todos
     _save_todo_items(session.name, todos)
-    body = format_todo_list(todos)
+    body = f"**Todo List**\n{format_todo_list(todos)}"
     channel_id = session.discord_channel_id
 
     try:
@@ -634,9 +634,14 @@ async def _post_todo_list(session: AgentSession, tool_input: dict[str, Any]) -> 
                 f"/channels/{channel_id}/messages",
                 json={"content": body},
             )
-            session.todo_message_id = resp.json().get("id")
-            if session.todo_message_id is not None:
-                session.todo_message_id = int(session.todo_message_id)
+            msg_id = resp.json().get("id")
+            if msg_id is not None:
+                session.todo_message_id = int(msg_id)
+                # Persist the new message ID
+                if session.name == config.MASTER_AGENT_NAME:
+                    _save_master_session(session)
+                else:
+                    _update_channel_topic(session)
     except Exception:
         log.exception("Failed to post todo list for agent '%s'", session.name)
 
@@ -1152,7 +1157,7 @@ async def reconstruct_agents_from_channels() -> int:
                 channel_to_agent[ch.id] = agent_name
                 continue
 
-            cwd, session_id, old_prompt_hash = _parse_channel_topic(ch.topic)
+            cwd, session_id, old_prompt_hash, todo_msg = _parse_channel_topic(ch.topic)
             if cwd is None:
                 log.debug("No cwd in topic for channel #%s, skipping", agent_name)
                 continue
@@ -1170,6 +1175,7 @@ async def reconstruct_agents_from_channels() -> int:
                 discord_channel_id=ch.id,
                 mcp_servers=mcp_servers,
                 todo_items=load_todo_items(agent_name),
+                todo_message_id=todo_msg,
             )
             agents[agent_name] = session
             channel_to_agent[ch.id] = agent_name
@@ -1192,6 +1198,46 @@ async def reconstruct_agents_from_channels() -> int:
 # ---------------------------------------------------------------------------
 
 
+def _update_channel_topic(session: AgentSession, channel: TextChannel | None = None) -> None:
+    """Update the Discord channel topic with current session metadata (spawned agents only)."""
+    assert _bot is not None
+    if session.name == config.MASTER_AGENT_NAME or not session.discord_channel_id:
+        return
+    ch = channel or _bot.get_channel(session.discord_channel_id)
+    if not ch or not isinstance(ch, TextChannel):
+        return
+    desired_topic = format_channel_topic(
+        session.cwd, session.session_id, session.system_prompt_hash, session.todo_message_id
+    )
+    if ch.topic != desired_topic:
+        log.info("Updating topic on #%s: %r -> %r", ch.name, ch.topic, desired_topic)
+
+        async def _do_update(c: Any, t: str) -> None:
+            try:
+                await c.edit(topic=t)
+            except Exception:
+                log.warning("Failed to update topic on #%s", c.name, exc_info=True)
+
+        fire_and_forget(_do_update(ch, desired_topic))
+
+
+def _save_master_session(session: AgentSession) -> None:
+    """Save master agent session metadata (session_id, prompt_hash, todo_message_id) to disk."""
+    try:
+        data: dict[str, Any] = {}
+        if session.session_id:
+            data["session_id"] = session.session_id
+        if session.system_prompt_hash:
+            data["prompt_hash"] = session.system_prompt_hash
+        if session.todo_message_id is not None:
+            data["todo_message_id"] = session.todo_message_id
+        with open(config.MASTER_SESSION_PATH, "w") as f:
+            json.dump(data, f)
+        log.info("Saved master session data to %s", config.MASTER_SESSION_PATH)
+    except OSError:
+        log.warning("Failed to save master session data", exc_info=True)
+
+
 async def _set_session_id(session: AgentSession, msg_or_sid: Any, channel: TextChannel | None = None) -> None:
     """Update session's session_id and persist it (topic or file)."""
     assert _bot is not None
@@ -1199,29 +1245,9 @@ async def _set_session_id(session: AgentSession, msg_or_sid: Any, channel: TextC
     if sid and sid != session.session_id:
         session.session_id = sid
         if session.name == config.MASTER_AGENT_NAME:
-            try:
-                data = {"session_id": sid}
-                if session.system_prompt_hash:
-                    data["prompt_hash"] = session.system_prompt_hash
-                with open(config.MASTER_SESSION_PATH, "w") as f:
-                    json.dump(data, f)
-                log.info("Saved master session data to %s", config.MASTER_SESSION_PATH)
-            except OSError:
-                log.warning("Failed to save master session data", exc_info=True)
-        elif session.discord_channel_id:
-            ch = channel or _bot.get_channel(session.discord_channel_id)
-            if ch and isinstance(ch, TextChannel):
-                desired_topic = format_channel_topic(session.cwd, sid, session.system_prompt_hash)
-                if ch.topic != desired_topic:
-                    log.info("Updating topic on #%s: %r -> %r", ch.name, ch.topic, desired_topic)
-
-                    async def _update_topic(c: Any, t: str) -> None:
-                        try:
-                            await c.edit(topic=t)
-                        except Exception:
-                            log.warning("Failed to update topic on #%s", c.name, exc_info=True)
-
-                    fire_and_forget(_update_topic(ch, desired_topic))
+            _save_master_session(session)
+        else:
+            _update_channel_topic(session, channel)
     else:
         session.session_id = sid
 
