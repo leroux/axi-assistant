@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-flowcoder-engine = { path = "/home/ubuntu/flowcoder-rewrite/packages/flowcoder-engine" }
-flowcoder-flowchart = { path = "/home/ubuntu/flowcoder-rewrite/packages/flowcoder-flowchart" }
+flowcoder-engine = { path = "/home/ubuntu/flowcoder-rewrite/packages/flowcoder-engine", editable = true }
+flowcoder-flowchart = { path = "/home/ubuntu/flowcoder-rewrite/packages/flowcoder-flowchart", editable = true }
 
 [dependency-groups]
 dev = [
