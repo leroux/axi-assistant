@@ -44,6 +44,7 @@ from axi.shutdown import kill_supervisor
 from axi.tracing import init_tracing
 
 log = logging.getLogger("axi")
+_tracer = trace.get_tracer(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +98,11 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
     # Ignore own reactions (bot pre-adding them)
     if bot.user and payload.user_id == bot.user.id:
         return
+
+    _tracer.start_span(
+        "on_raw_reaction_add",
+        attributes={"discord.emoji": str(payload.emoji), "discord.channel_id": str(payload.channel_id)},
+    ).end()
 
     # --- Plan approval via reaction ---
     if (
@@ -305,8 +311,7 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # --- Normal processing path ---
-    tracer = trace.get_tracer(__name__)
-    with tracer.start_as_current_span(
+    with _tracer.start_as_current_span(
         "on_message",
         attributes={
             "discord.message_id": msg_id,
@@ -388,6 +393,7 @@ async def _fire_schedules(
                     agents.schedule_last_fired[skey] = last_occurrence
 
                     log.info("Firing recurring event: %s", name)
+                    _tracer.start_span("schedule.fire", attributes={"schedule.name": name, "schedule.type": "recurring"}).end()
                     agent_name = entry.get("owner") or entry.get("session") or name
                     agent_cwd = entry.get("cwd", os.path.join(config.AXI_USER_DATA, "agents", agent_name))
 
@@ -409,6 +415,7 @@ async def _fire_schedules(
 
                 if fire_at <= now_utc:
                     log.info("Firing one-off event: %s", name)
+                    _tracer.start_span("schedule.fire", attributes={"schedule.name": name, "schedule.type": "one_off"}).end()
                     agent_name = entry.get("owner") or entry.get("session") or name
                     agent_cwd = entry.get("cwd", os.path.join(config.AXI_USER_DATA, "agents", agent_name))
 
@@ -1018,6 +1025,7 @@ async def kill_agent(interaction: discord.Interaction, agent_name: str | None = 
 
     await interaction.response.defer()
     session_id = session.session_id
+    _tracer.start_span("slash.kill_agent", attributes={"agent.name": agent_name}).end()
 
     agent_ch = await agents.get_agent_channel(agent_name)
     if agent_ch and agent_ch.id != interaction.channel_id:
@@ -1056,6 +1064,7 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
         return
 
     await interaction.response.defer()
+    _tracer.start_span("slash.stop_agent", attributes={"agent.name": agent_name}).end()
 
     try:
         await _interrupt_agent(session)
@@ -1201,6 +1210,7 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
     cmd_args = parts[1].strip() if len(parts) > 1 else None
     assert isinstance(message.channel, TextChannel)
     channel = message.channel
+    _tracer.start_span("text_command", attributes={"command": cmd, "agent.name": agent_name}).end()
 
     if cmd == "debug":
         if cmd_args is not None:
@@ -1562,6 +1572,8 @@ async def flowchart_list_cmd(interaction: discord.Interaction) -> None:
 @app_commands.describe(force="Skip waiting for busy agents and restart immediately")
 async def restart_cmd(interaction: discord.Interaction, force: bool = False) -> None:
 
+    _tracer.start_span("slash.restart", attributes={"restart.force": force}).end()
+
     if agents.shutdown_coordinator is None:
         await interaction.response.send_message("Bot is not fully initialized yet.", ephemeral=True)
         return
@@ -1639,6 +1651,7 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
         return
 
     agent_name = channel.name
+    _tracer.start_span("on_guild_channel_create", attributes={"agent.name": agent_name, "discord.channel_id": str(channel.id)}).end()
     cwd = os.path.join(config.AXI_USER_DATA, "agents", agent_name)
     os.makedirs(cwd, exist_ok=True)
 
@@ -1986,36 +1999,43 @@ async def on_ready() -> None:
 
     agents.init(bot)
     init_tracing("axi-bot")
+
+    # Re-initialize _tracer now that the provider is set up
+    global _tracer
+    _tracer = trace.get_tracer(__name__)
+
     agents.set_utils_mcp_server(tools.utils_mcp_server)
 
-    master_resume_id, master_old_prompt_hash, master_todo_msg = _load_master_session_data()
-    master_session = _register_master_agent(master_resume_id, master_old_prompt_hash, master_todo_msg)
-    await _setup_guild_infrastructure(master_session)
+    with _tracer.start_as_current_span("on_ready.startup") as startup_span:
+        master_resume_id, master_old_prompt_hash, master_todo_msg = _load_master_session_data()
+        master_session = _register_master_agent(master_resume_id, master_old_prompt_hash, master_todo_msg)
+        await _setup_guild_infrastructure(master_session)
 
-    _startup_t0 = time.monotonic()
-    master_ch = await agents.get_master_channel()
-    if master_ch:
-        await master_ch.send("*System:* Axi starting up...")
+        _startup_t0 = time.monotonic()
+        master_ch = await agents.get_master_channel()
+        if master_ch:
+            await master_ch.send("*System:* Axi starting up...")
 
-    await agents.connect_procmux()
-    agents.init_shutdown_coordinator()
+        await agents.connect_procmux()
+        agents.init_shutdown_coordinator()
 
-    await bot.tree.sync()
-    log.info("Slash commands synced")
+        await bot.tree.sync()
+        log.info("Slash commands synced")
 
-    check_schedules.start()
-    log.info("Schedule checker started")
+        check_schedules.start()
+        log.info("Schedule checker started")
 
-    rollback_info = _consume_json_marker(config.ROLLBACK_MARKER_PATH, "Rollback")
-    crash_info = _consume_json_marker(config.CRASH_ANALYSIS_MARKER_PATH, "Crash analysis")
+        rollback_info = _consume_json_marker(config.ROLLBACK_MARKER_PATH, "Rollback")
+        crash_info = _consume_json_marker(config.CRASH_ANALYSIS_MARKER_PATH, "Crash analysis")
 
-    global _startup_complete
-    _startup_complete = True
+        global _startup_complete
+        _startup_complete = True
 
-    _startup_elapsed = time.monotonic() - _startup_t0
-    master_ch = await agents.get_master_channel()
-    if master_ch:
-        await _send_startup_notification(master_ch, rollback_info, crash_info, _startup_elapsed)
+        _startup_elapsed = time.monotonic() - _startup_t0
+        startup_span.set_attribute("startup.elapsed_s", _startup_elapsed)
+        master_ch = await agents.get_master_channel()
+        if master_ch:
+            await _send_startup_notification(master_ch, rollback_info, crash_info, _startup_elapsed)
 
     if not config.ENABLE_CRASH_HANDLER:
         if rollback_info or crash_info:

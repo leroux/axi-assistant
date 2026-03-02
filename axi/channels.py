@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import discord
 from discord import CategoryChannel, TextChannel
+from opentelemetry import trace
 
 from axi import config
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from discord.ext.commands import Bot
 
 log = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level state (populated via init and ensure_guild_infrastructure)
@@ -163,6 +165,7 @@ async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel,
     """Ensure the guild has Active and Killed categories. Called once during on_ready()."""
     global target_guild, active_category, killed_category
     assert _bot is not None
+    _tracer.start_span("ensure_guild_infrastructure", attributes={"discord.guild_id": str(config.DISCORD_GUILD_ID)}).end()
 
     guild = _bot.get_guild(config.DISCORD_GUILD_ID)
     if guild is None:
@@ -219,6 +222,7 @@ async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel,
 async def ensure_agent_channel(agent_name: str) -> TextChannel:
     """Find or create a text channel for an agent. Moves from Killed to Active if needed."""
     assert _channel_to_agent is not None
+    _tracer.start_span("ensure_agent_channel", attributes={"agent.name": agent_name}).end()
     normalized = normalize_channel_name(agent_name)
 
     if active_category:
@@ -260,6 +264,7 @@ async def move_channel_to_killed(agent_name: str) -> None:
     """Move an agent's channel from Active to Killed category."""
     if agent_name == config.MASTER_AGENT_NAME:
         return
+    _tracer.start_span("move_channel_to_killed", attributes={"agent.name": agent_name}).end()
 
     normalized = normalize_channel_name(agent_name)
     if active_category:

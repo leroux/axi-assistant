@@ -24,7 +24,10 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, runtime_checkable
 
+from opentelemetry import trace
+
 log = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 RESTART_EXIT_CODE = 42
 STATUS_INTERVAL = 30  # seconds between "still waiting" messages
@@ -247,6 +250,7 @@ class ShutdownCoordinator:
             log.info("Graceful shutdown already in progress (ignoring duplicate from %s)", source)
             return
         self._requested = True
+        _tracer.start_span("shutdown.graceful", attributes={"shutdown.source": source}).end()
         log.info("Graceful shutdown initiated from %s", source)
 
         # In bridge mode, agents keep running — no need to wait or sleep
@@ -302,5 +306,6 @@ class ShutdownCoordinator:
         if self._requested:
             log.info("Shutdown already in progress — escalating to force (from %s)", source)
         self._requested = True
+        _tracer.start_span("shutdown.force", attributes={"shutdown.source": source}).end()
         log.info("Force shutdown initiated from %s", source)
         await self._execute_exit(skip_agent=None)

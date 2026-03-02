@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from claudewire.types import ProcessConnection, ProcessEventQueue
 
 log = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 
 class BridgeTransport:
@@ -55,11 +56,13 @@ class BridgeTransport:
 
     async def connect(self) -> None:
         """Register with the process connection for this agent's output."""
+        _tracer.start_span("claudewire.connect", attributes={"agent.name": self._name}).end()
         self._queue = self._conn.register(self._name)
         self._ready = True
 
     async def spawn(self, cli_args: list[str], env: dict[str, str], cwd: str) -> CommandResult:
         """Tell the process connection to spawn a new CLI process."""
+        _tracer.start_span("claudewire.spawn", attributes={"agent.name": self._name, "agent.cwd": cwd}).end()
         result = await self._conn.spawn(self._name, cli_args=cli_args, env=env, cwd=cwd)
         if not result.ok:
             raise RuntimeError(f"Spawn failed for '{self._name}': {result}")
@@ -74,9 +77,8 @@ class BridgeTransport:
 
     async def write(self, data: str) -> None:
         """Write data to the CLI's stdin."""
-        tracer = trace.get_tracer(__name__)
-        with tracer.start_as_current_span(
-            "bridge.write",
+        with _tracer.start_as_current_span(
+            "claudewire.write",
             attributes={"agent.name": self._name, "data.bytes": len(data)},
         ):
             if not self._conn.is_alive:
@@ -131,6 +133,10 @@ class BridgeTransport:
                     self._stderr_callback(msg.text)
             elif isinstance(msg, ExitEvent):
                 log.debug("[read][%s] exit code=%s", self._name, msg.code)
+                _tracer.start_span(
+                    "claudewire.cli_exit",
+                    attributes={"agent.name": self._name, "exit.code": msg.code or -1},
+                ).end()
                 if self._stdio_logger:
                     self._stdio_logger.debug("--- EXIT   code=%s", msg.code)
                 self._cli_exited = True
@@ -139,6 +145,7 @@ class BridgeTransport:
 
     async def close(self) -> None:
         """Kill the CLI process and unregister."""
+        _tracer.start_span("claudewire.close", attributes={"agent.name": self._name}).end()
         if self._ready and not self._cli_exited:
             try:
                 await self._conn.kill(self._name)

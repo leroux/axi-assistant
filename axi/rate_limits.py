@@ -14,6 +14,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from opentelemetry import trace
+
 from axi import config
 from axi.axi_types import RateLimitQuota, SessionUsage
 
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk import ResultMessage
 
 log = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -207,6 +210,7 @@ async def handle_rate_limit(
     global rate_limited_until
 
     wait_seconds = parse_rate_limit_seconds(error_text)
+    _tracer.start_span("rate_limit.hit", attributes={"rate_limit.wait_seconds": wait_seconds}).end()
     new_limit = datetime.now(UTC) + timedelta(seconds=wait_seconds)
     already_limited = is_rate_limited()
 

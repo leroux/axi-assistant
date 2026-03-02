@@ -94,6 +94,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("axi")
 
+_tracer = trace.get_tracer(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -389,7 +390,13 @@ from discordquery import split_message
 
 async def send_long(channel: TextChannel, text: str) -> None:
     """Send a potentially long message, splitting as needed."""
+    span = _tracer.start_span(
+        "discord.send_long",
+        attributes={"discord.channel": getattr(channel, "name", "?"), "message.length": len(text)},
+    )
     chunks = split_message(text.strip())
+    span.set_attribute("message.chunks", len(chunks))
+    span.end()
     for i, chunk in enumerate(chunks):
         if chunk:
             if log.isEnabledFor(logging.INFO):
@@ -1083,13 +1090,17 @@ async def sleep_agent(session: AgentSession, *, force: bool = False) -> None:
     if session.client is None:
         return
 
-    log.info("Sleeping agent '%s'", session.name)
-    if session.agent_log:
-        session.agent_log.info("SESSION_SLEEP")
-    session.bridge_busy = False
-    await _disconnect_client(session.client, session.name)
-    session.client = None
-    log.info("Agent '%s' is now sleeping", session.name)
+    with _tracer.start_as_current_span(
+        "sleep_agent",
+        attributes={"agent.name": session.name, "agent.force": force},
+    ):
+        log.info("Sleeping agent '%s'", session.name)
+        if session.agent_log:
+            session.agent_log.info("SESSION_SLEEP")
+        session.bridge_busy = False
+        await _disconnect_client(session.client, session.name)
+        session.client = None
+        log.info("Agent '%s' is now sleeping", session.name)
 
 
 def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> ClaudeAgentOptions:
@@ -1143,13 +1154,13 @@ async def wake_agent(session: AgentSession) -> None:
         resume_id = session.session_id
         options = _make_agent_options(session, resume_id)
 
-        tracer = trace.get_tracer(__name__)
-        with tracer.start_as_current_span(
+        with _tracer.start_as_current_span(
             "wake_agent",
             attributes={
                 "agent.name": session.name,
                 "agent.type": session.agent_type or "",
                 "agent.resumed": bool(resume_id),
+                "agent.cwd": session.cwd or "",
             },
         ):
             log.debug("Waking '%s' (resume=%s, type=%s)", session.name, resume_id, session.agent_type)
@@ -1243,15 +1254,16 @@ async def wake_or_queue(
 
 async def end_session(name: str) -> None:
     """End a named Claude session and remove it from the registry."""
-    session = agents.get(name)
-    if session is None:
-        return
-    if session.client is not None:
-        await _disconnect_client(session.client, name)
-        session.client = None
-    session.close_log()
-    agents.pop(name, None)
-    log.info("Session '%s' ended", name)
+    with _tracer.start_as_current_span("end_session", attributes={"agent.name": name}):
+        session = agents.get(name)
+        if session is None:
+            return
+        if session.client is not None:
+            await _disconnect_client(session.client, name)
+            session.client = None
+        session.close_log()
+        agents.pop(name, None)
+        log.info("Session '%s' ended", name)
 
 
 async def _rebuild_session(name: str, *, cwd: str | None = None, session_id: str | None = None) -> AgentSession:
@@ -1984,8 +1996,7 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         caller = "".join(f.name or "?" for f in traceback.extract_stack(limit=4)[:-1])
         log.info("STREAM_START[%s] caller=%s", stream_id, caller)
 
-    tracer = trace.get_tracer(__name__)
-    span = tracer.start_span("stream_to_discord", attributes={"agent.name": session.name})
+    span = _tracer.start_span("stream_to_discord", attributes={"agent.name": session.name, "discord.channel": str(channel.id)})
     t0 = time.monotonic()
     t_first_event: float | None = None
 
@@ -2086,10 +2097,13 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
 
 async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool:
     """Stream response with retry on transient API errors. Returns True on success."""
+    span = _tracer.start_span("stream_with_retry", attributes={"agent.name": session.name})
     log.info("RETRY_ENTER[%s] starting initial stream", session.name)
     error = await stream_response_to_channel(session, channel)
     if error is None:
         log.info("RETRY_EXIT[%s] first attempt succeeded", session.name)
+        span.set_attribute("retry.attempts", 1)
+        span.end()
         return True
 
     log.warning("RETRY_TRIGGERED[%s] error=%s \u2014 will retry", session.name, error)
@@ -2120,6 +2134,8 @@ async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool
 
         error = await stream_response_to_channel(session, channel)
         if error is None:
+            span.set_attribute("retry.attempts", attempt)
+            span.end()
             return True
 
     log.error(
@@ -2128,6 +2144,9 @@ async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool
         config.API_ERROR_MAX_RETRIES,
     )
     await channel.send(f"\u274c API error persisted after {config.API_ERROR_MAX_RETRIES} retries. Try again later.")
+    span.set_attribute("retry.exhausted", True)
+    span.set_status(trace.StatusCode.ERROR, "retries exhausted")
+    span.end()
     return False
 
 
@@ -2196,8 +2215,15 @@ async def process_message(session: AgentSession, content: MessageContent, channe
     get_stdio_logger(session.name, config.LOG_DIR).debug(
         ">>> STDIN  %s", json.dumps({"type": "user", "content": content if isinstance(content, str) else "[blocks]"})
     )
-    tracer = trace.get_tracer(__name__)
-    with tracer.start_as_current_span("process_message", attributes={"agent.name": session.name}):
+    with _tracer.start_as_current_span(
+        "process_message",
+        attributes={
+            "agent.name": session.name,
+            "agent.type": session.agent_type or "claude_code",
+            "message.length": len(content) if isinstance(content, str) else -1,
+            "discord.channel": getattr(channel, "name", "?"),
+        },
+    ):
         try:
             async with asyncio.timeout(config.QUERY_TIMEOUT):
                 await session.client.query(as_stream(content))
@@ -2218,6 +2244,7 @@ async def reclaim_agent_name(name: str) -> None:
     """If an agent with *name* already exists, kill it silently to free the name."""
     if name not in agents:
         return
+    _tracer.start_span("reclaim_agent_name", attributes={"agent.name": name}).end()
     log.info("Reclaiming agent name '%s' \u2014 terminating existing session", name)
     session = agents[name]
     await sleep_agent(session, force=True)
@@ -2238,6 +2265,16 @@ async def spawn_agent(
     packs: list[str] | None = None,
 ) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
+    span = _tracer.start_span(
+        "spawn_agent",
+        attributes={
+            "agent.name": name,
+            "agent.type": agent_type,
+            "agent.cwd": cwd,
+            "agent.resumed": bool(resume),
+            "prompt.length": len(initial_prompt),
+        },
+    )
     os.makedirs(cwd, exist_ok=True)
 
     normalized = normalize_channel_name(name)
@@ -2290,9 +2327,11 @@ async def spawn_agent(
 
     if not initial_prompt:
         await send_system(channel, f"**{agent_label.title()}** agent **{name}** is ready (sleeping).")
+        span.end()
         return
 
     fire_and_forget(run_initial_prompt(session, initial_prompt, channel))
+    span.end()
 
 
 async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
@@ -2320,6 +2359,13 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
 
 async def run_initial_prompt(session: AgentSession, prompt: MessageContent, channel: TextChannel) -> None:
     """Run the initial prompt for a spawned agent."""
+    span = _tracer.start_span(
+        "run_initial_prompt",
+        attributes={
+            "agent.name": session.name,
+            "prompt.length": len(prompt) if isinstance(prompt, str) else -1,
+        },
+    )
     try:
         async with session.query_lock:
             if not is_awake(session):
@@ -2374,12 +2420,18 @@ async def run_initial_prompt(session: AgentSession, prompt: MessageContent, chan
         await sleep_agent(session)
     except Exception:
         log.exception("Error sleeping agent '%s' after initial prompt", session.name)
+    finally:
+        span.end()
 
 
 async def process_message_queue(session: AgentSession) -> None:
     """Process any queued messages for an agent after the current query finishes."""
     if session.message_queue:
         log.info("QUEUE[%s] processing %d queued messages", session.name, len(session.message_queue))
+        _tracer.start_span(
+            "process_message_queue",
+            attributes={"agent.name": session.name, "queue.size": len(session.message_queue)},
+        ).end()  # mark event; individual messages are traced via process_message
     while session.message_queue:
         if shutdown_coordinator and shutdown_coordinator.requested:
             log.info("Shutdown requested \u2014 not processing further queued messages for '%s'", session.name)
@@ -2453,6 +2505,14 @@ async def deliver_inter_agent_message(
     content: str,
 ) -> str:
     """Deliver a message from one agent to another."""
+    _tracer.start_span(
+        "deliver_inter_agent_message",
+        attributes={
+            "agent.sender": sender_name,
+            "agent.target": target_session.name,
+            "message.length": len(content),
+        },
+    ).end()
     channel = await get_agent_channel(target_session.name)
     if channel is None:
         return f"No Discord channel found for agent '{target_session.name}'"
@@ -2565,26 +2625,33 @@ async def _process_inter_agent_prompt(
 async def connect_procmux() -> None:
     """Connect to the agent bridge and schedule reconnections for running agents."""
     global procmux_conn, wire_conn
+    span = _tracer.start_span("connect_procmux")
 
     try:
         procmux_conn = await ensure_bridge(config.BRIDGE_SOCKET_PATH, timeout=10.0)
         wire_conn = ProcmuxProcessConnection(procmux_conn)
         log.info("Bridge connection established")
+        span.set_attribute("procmux.connected", True)
     except Exception:
         log.exception("Failed to connect to bridge \u2014 agents will use direct subprocess mode")
         procmux_conn = None
         wire_conn = None
+        span.set_attribute("procmux.connected", False)
+        span.end()
         return
 
     try:
         result = await procmux_conn.send_command("list")
         bridge_agents = result.agents or {}
         log.info("Bridge reports %d agent(s): %s", len(bridge_agents), list(bridge_agents.keys()))
+        span.set_attribute("procmux.agents_found", len(bridge_agents))
     except Exception:
         log.exception("Failed to list bridge agents")
+        span.end()
         return
 
     if not bridge_agents:
+        span.end()
         return
 
     for agent_name, info in bridge_agents.items():
@@ -2609,9 +2676,15 @@ async def connect_procmux() -> None:
         session.reconnecting = True
         fire_and_forget(_reconnect_and_drain(session, info))
 
+    span.end()
+
 
 async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any]) -> None:
     """Reconnect a single agent to the bridge and drain any buffered output."""
+    span = _tracer.start_span(
+        "reconnect_and_drain",
+        attributes={"agent.name": session.name, "procmux.buffered_msgs": bridge_info.get("buffered_msgs", 0)},
+    )
     try:
         async with session.query_lock:
             if procmux_conn is None or not procmux_conn.is_alive:
@@ -2695,7 +2768,10 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
 
     except Exception:
         log.exception("Failed to reconnect agent '%s'", session.name)
+        span.set_status(trace.StatusCode.ERROR, "reconnect failed")
         session.reconnecting = False
+    finally:
+        span.end()
 
     await process_message_queue(session)
 

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 import arrow
 from claude_agent_sdk import create_sdk_mcp_server, tool
+from opentelemetry import trace
 
 from axi import agents, channels, config
 from axi.schedule_tools import make_schedule_mcp_server
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from axi.axi_types import McpArgs, McpResult
 
 log = logging.getLogger("axi")
+_tracer = trace.get_tracer(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +83,7 @@ log = logging.getLogger("axi")
 )
 async def axi_spawn_agent(args: McpArgs) -> McpResult:
     agent_name = args.get("name", "").strip()
+    _tracer.start_span("tool.axi_spawn_agent", attributes={"agent.name": agent_name}).end()
     default_cwd = os.path.join(config.AXI_USER_DATA, "agents", agent_name) if agent_name else config.AXI_USER_DATA
     agent_cwd = os.path.realpath(os.path.expanduser(args.get("cwd", default_cwd)))
     agent_prompt = args.get("prompt", "")
@@ -227,6 +230,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
 )
 async def axi_kill_agent(args: McpArgs) -> McpResult:
     agent_name = args.get("name", "").strip()
+    _tracer.start_span("tool.axi_kill_agent", attributes={"agent.name": agent_name}).end()
 
     if not agent_name:
         return {
@@ -279,6 +283,7 @@ async def axi_kill_agent(args: McpArgs) -> McpResult:
     {"type": "object", "properties": {}, "required": []},
 )
 async def axi_restart(args: McpArgs) -> McpResult:
+    _tracer.start_span("tool.axi_restart").end()
     log.info("Restart requested via MCP tool")
     if agents.shutdown_coordinator is None:
         return {"content": [{"type": "text", "text": "Bot is not fully initialized yet."}]}
@@ -315,6 +320,7 @@ async def axi_restart(args: McpArgs) -> McpResult:
 )
 async def axi_send_message(args: McpArgs) -> McpResult:
     target_name = args.get("agent_name", "").strip()
+    _tracer.start_span("tool.axi_send_message", attributes={"target.agent": target_name}).end()
     content = args.get("content", "").strip()
 
     if not target_name:
@@ -421,6 +427,7 @@ async def get_date_and_time(args: McpArgs) -> McpResult:
 )
 async def discord_send_file(args: McpArgs) -> McpResult:
     file_path = args["file_path"]
+    _tracer.start_span("tool.discord_send_file", attributes={"file.path": file_path}).end()
     content = args.get("content", "")
     channel_id = args.get("channel_id")
     if not channel_id:
@@ -466,6 +473,7 @@ async def discord_send_file(args: McpArgs) -> McpResult:
 )
 async def discord_list_channels(args: McpArgs) -> McpResult:
     guild_id = args["guild_id"]
+    _tracer.start_span("tool.discord_list_channels", attributes={"discord.guild_id": guild_id}).end()
     try:
         text_channels = await config.discord_client.list_channels(guild_id)
         return {"content": [{"type": "text", "text": json.dumps(text_channels, indent=2)}]}
@@ -488,6 +496,7 @@ async def discord_list_channels(args: McpArgs) -> McpResult:
 async def discord_read_messages(args: McpArgs) -> McpResult:
     channel_id = args["channel_id"]
     limit = min(args.get("limit", 20), 100)
+    _tracer.start_span("tool.discord_read_messages", attributes={"discord.channel_id": channel_id, "limit": limit}).end()
     try:
         messages = await config.discord_client.get_messages(channel_id, limit=limit)
         # Messages come newest-first; reverse for chronological order
@@ -518,6 +527,7 @@ async def discord_read_messages(args: McpArgs) -> McpResult:
 async def discord_send_message(args: McpArgs) -> McpResult:
     channel_id = args["channel_id"]
     content = args["content"]
+    _tracer.start_span("tool.discord_send_message", attributes={"discord.channel_id": channel_id}).end()
     # Prevent agents from sending to their own channel (responses are streamed automatically)
     agent_name = agents.channel_to_agent.get(int(channel_id))
     if agent_name:
