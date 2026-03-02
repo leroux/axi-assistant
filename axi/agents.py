@@ -1556,6 +1556,7 @@ class _StreamCtx:
         "live_edit",
         "msg_total",
         "text_buffer",
+        "thinking_message",
         "tool_input_json",
         "typing_stopped",
     )
@@ -1570,6 +1571,7 @@ class _StreamCtx:
         self.tool_input_json: str = ""  # Accumulates full tool input JSON for current tool_use block
         self.in_flowchart: bool = False  # True during flowchart execution (protects session_id)
         self.live_edit: _LiveEditState | None = live_edit  # Set when STREAMING_DISCORD is enabled
+        self.thinking_message: discord.Message | None = None  # Temporary "thinking..." indicator
 
 
 async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChannel, reason: str = "?") -> None:
@@ -1723,6 +1725,26 @@ async def _live_edit_finalize(ctx: _StreamCtx, session: AgentSession) -> None:
     le.finalized = False
 
 
+async def _show_thinking(ctx: _StreamCtx, channel: TextChannel) -> None:
+    """Send a temporary 'thinking...' indicator message."""
+    if ctx.thinking_message is None:
+        try:
+            ctx.thinking_message = await channel.send("*thinking...*")
+        except Exception:
+            log.debug("Failed to send thinking indicator", exc_info=True)
+
+
+async def _hide_thinking(ctx: _StreamCtx) -> None:
+    """Delete the temporary thinking indicator message."""
+    msg = ctx.thinking_message
+    if msg is not None:
+        ctx.thinking_message = None
+        try:
+            await msg.delete()
+        except Exception:
+            log.debug("Failed to delete thinking indicator", exc_info=True)
+
+
 def _stop_typing(ctx: _StreamCtx, typing_ctx: Any) -> None:
     """Cancel the typing indicator."""
     if not ctx.typing_stopped and typing_ctx and typing_ctx.task:
@@ -1755,6 +1777,16 @@ async def _handle_stream_event(
         await _set_session_id(session, msg.session_id, channel=channel)
 
     _update_activity(session, event)
+
+    # Thinking indicator — show/hide based on phase transitions
+    if event_type == "content_block_start":
+        block = event.get("content_block", {})
+        block_type = block.get("type", "")
+        if block_type == "thinking":
+            await _show_thinking(ctx, channel)
+        elif ctx.thinking_message is not None:
+            # New non-thinking block started — hide the indicator
+            await _hide_thinking(ctx)
 
     # Track tool input JSON for TodoWrite display
     if event_type == "content_block_start":
@@ -1813,7 +1845,7 @@ async def _handle_stream_event(
         if stop_reason == "end_turn":
             await _flush_text(ctx, session, channel, "end_turn")
             ctx.text_buffer = ""
-            _stop_typing(ctx, typing_ctx)
+            await _hide_thinking(ctx)
 
 
 def _log_stream_event(session: AgentSession, event_type: str, event: dict[str, Any]) -> None:
@@ -1849,6 +1881,7 @@ async def _handle_assistant_message(
             if hasattr(block, "text"):
                 error_text += " " + cast("str", getattr(block, "text", ""))
         log.warning("Agent '%s' hit %s error: %s", session.name, msg.error, error_text[:200])
+        await _hide_thinking(ctx)
         _stop_typing(ctx, typing_ctx)
         await _handle_rate_limit(error_text, session, channel)
         ctx.text_buffer = ""
@@ -1859,6 +1892,7 @@ async def _handle_assistant_message(
             if hasattr(block, "text"):
                 error_text += " " + cast("str", getattr(block, "text", ""))
         log.warning("Agent '%s' hit API error (%s): %s", session.name, msg.error, error_text[:200])
+        await _hide_thinking(ctx)
         _stop_typing(ctx, typing_ctx)
         await _flush_text(ctx, session, channel, "assistant_error")
         ctx.text_buffer = ""
@@ -1873,7 +1907,7 @@ async def _handle_assistant_message(
                     ctx.text_buffer += cast("str", getattr(block, "text", ""))
         await _flush_text(ctx, session, channel, "assistant_msg")
         ctx.text_buffer = ""
-        _stop_typing(ctx, typing_ctx)
+        await _hide_thinking(ctx)
 
     if session.agent_log:
         for block in msg.content or []:
@@ -1892,6 +1926,7 @@ async def _handle_result_message(
     ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: ResultMessage, typing_ctx: Any
 ) -> None:
     """Handle a ResultMessage during response streaming."""
+    await _hide_thinking(ctx)
     _stop_typing(ctx, typing_ctx)
     if not ctx.hit_rate_limit:
         await _flush_text(ctx, session, channel, "result_msg")
