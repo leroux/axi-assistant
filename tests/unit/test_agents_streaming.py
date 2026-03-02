@@ -1,8 +1,20 @@
-"""Unit tests for agents.streaming — activity tracking and tool preview."""
+"""Unit tests for agents.streaming — activity tracking, tool preview, and live-edit streaming."""
 
 from __future__ import annotations
 
-from axi.agents import _StreamCtx, _update_activity, extract_tool_preview
+import time
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from axi.agents import (
+    _live_edit_finalize,
+    _live_edit_tick,
+    _LiveEditState,
+    _StreamCtx,
+    _update_activity,
+    extract_tool_preview,
+)
 from axi.axi_types import AgentSession
 
 
@@ -155,3 +167,202 @@ class TestExtractToolPreviewExtended:
     def test_completely_broken_json(self) -> None:
         result = extract_tool_preview("Bash", "not json at all")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Live-edit streaming tests
+# ---------------------------------------------------------------------------
+
+
+class TestLiveEditState:
+    """Tests for _LiveEditState initialization and state management."""
+
+    def test_initial_state(self) -> None:
+        le = _LiveEditState(channel_id=12345)
+        assert le.channel_id == 12345
+        assert le.message_id is None
+        assert le.content == ""
+        assert le.last_edit_time == 0.0
+        assert le.finalized is False
+        assert le.edit_pending is False
+
+    def test_stream_ctx_with_live_edit(self) -> None:
+        le = _LiveEditState(channel_id=12345)
+        ctx = _StreamCtx(live_edit=le)
+        assert ctx.live_edit is le
+
+    def test_stream_ctx_without_live_edit(self) -> None:
+        ctx = _StreamCtx()
+        assert ctx.live_edit is None
+
+
+class TestLiveEditTick:
+    """Tests for _live_edit_tick — the per-token streaming logic."""
+
+    def _make_ctx(self, channel_id: int = 12345) -> _StreamCtx:
+        le = _LiveEditState(channel_id=channel_id)
+        return _StreamCtx(live_edit=le)
+
+    def _make_session(self) -> AgentSession:
+        return AgentSession(name="test")
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_posts_message(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        ctx.text_buffer = "Hello"
+
+        mock_resp = {"id": "msg_001"}
+        with patch("axi.config.discord_client") as mock_client:
+            mock_client.send_message = AsyncMock(return_value=mock_resp)
+            await _live_edit_tick(ctx, session)
+
+        assert ctx.live_edit is not None
+        assert ctx.live_edit.message_id == "msg_001"
+        mock_client.send_message.assert_called_once_with(12345, "Hello\u2588")
+
+    @pytest.mark.asyncio
+    async def test_throttled_edit_respects_interval(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        assert ctx.live_edit is not None
+        ctx.live_edit.message_id = "msg_001"
+        ctx.live_edit.last_edit_time = time.monotonic()  # Just edited
+        ctx.text_buffer = "Hello world"
+
+        with patch("axi.config.discord_client") as mock_client:
+            mock_client.edit_message = AsyncMock(return_value={})
+            await _live_edit_tick(ctx, session)
+
+        # Should NOT have edited — not enough time has passed
+        mock_client.edit_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_edit_after_interval(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        assert ctx.live_edit is not None
+        ctx.live_edit.message_id = "msg_001"
+        ctx.live_edit.last_edit_time = time.monotonic() - 2.0  # 2s ago
+        ctx.text_buffer = "Hello world updated"
+
+        with patch("axi.config.discord_client") as mock_client:
+            mock_client.edit_message = AsyncMock(return_value={})
+            await _live_edit_tick(ctx, session)
+
+        mock_client.edit_message.assert_called_once_with(12345, "msg_001", "Hello world updated\u2588")
+
+    @pytest.mark.asyncio
+    async def test_split_on_long_content(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        assert ctx.live_edit is not None
+        ctx.live_edit.message_id = "msg_001"
+        ctx.live_edit.last_edit_time = 0.0
+        # Build content that exceeds 1900 chars
+        ctx.text_buffer = "A" * 1950
+
+        with patch("axi.config.discord_client") as mock_client:
+            mock_client.edit_message = AsyncMock(return_value={})
+            mock_client.send_message = AsyncMock(return_value={"id": "msg_002"})
+            await _live_edit_tick(ctx, session)
+
+        # Should have edited first message (finalized, no cursor)
+        mock_client.edit_message.assert_called_once()
+        first_edit_content = mock_client.edit_message.call_args[0][2]
+        assert len(first_edit_content) <= 1900
+        assert "\u2588" not in first_edit_content
+
+        # Should have posted a new message with remainder + cursor
+        mock_client.send_message.assert_called_once()
+        new_msg_content = mock_client.send_message.call_args[0][1]
+        assert new_msg_content.endswith("\u2588")
+        assert ctx.live_edit.message_id == "msg_002"
+
+    @pytest.mark.asyncio
+    async def test_empty_buffer_noop(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        ctx.text_buffer = ""
+
+        with patch("axi.config.discord_client") as mock_client:
+            await _live_edit_tick(ctx, session)
+
+        mock_client.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_buffer_noop(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        ctx.text_buffer = "   \n  "
+
+        with patch("axi.config.discord_client") as mock_client:
+            await _live_edit_tick(ctx, session)
+
+        mock_client.send_message.assert_not_called()
+
+
+class TestLiveEditFinalize:
+    """Tests for _live_edit_finalize — final edit to remove cursor."""
+
+    def _make_ctx(self, channel_id: int = 12345) -> _StreamCtx:
+        le = _LiveEditState(channel_id=channel_id)
+        return _StreamCtx(live_edit=le)
+
+    def _make_session(self) -> AgentSession:
+        return AgentSession(name="test")
+
+    @pytest.mark.asyncio
+    async def test_finalize_removes_cursor(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        assert ctx.live_edit is not None
+        ctx.live_edit.message_id = "msg_001"
+        ctx.text_buffer = "Final content here"
+
+        with patch("axi.config.discord_client") as mock_client:
+            mock_client.edit_message = AsyncMock(return_value={})
+            await _live_edit_finalize(ctx, session)
+
+        mock_client.edit_message.assert_called_once_with(12345, "msg_001", "Final content here")
+
+    @pytest.mark.asyncio
+    async def test_finalize_resets_state(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        assert ctx.live_edit is not None
+        ctx.live_edit.message_id = "msg_001"
+        ctx.text_buffer = "Done"
+
+        with patch("axi.config.discord_client") as mock_client:
+            mock_client.edit_message = AsyncMock(return_value={})
+            await _live_edit_finalize(ctx, session)
+
+        assert ctx.live_edit.message_id is None
+        assert ctx.live_edit.content == ""
+
+    @pytest.mark.asyncio
+    async def test_finalize_no_message_sends_normally(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        ctx.text_buffer = "Never posted content"
+
+        with patch("axi.config.discord_client") as mock_client:
+            mock_client.send_message = AsyncMock(return_value={"id": "msg_001"})
+            await _live_edit_finalize(ctx, session)
+
+        mock_client.send_message.assert_called_once_with(12345, "Never posted content")
+
+    @pytest.mark.asyncio
+    async def test_finalize_empty_buffer_noop(self) -> None:
+        ctx = self._make_ctx()
+        session = self._make_session()
+        assert ctx.live_edit is not None
+        ctx.live_edit.message_id = "msg_001"
+        ctx.text_buffer = ""
+
+        with patch("axi.config.discord_client") as mock_client:
+            await _live_edit_finalize(ctx, session)
+
+        mock_client.edit_message.assert_not_called()
+        mock_client.send_message.assert_not_called()

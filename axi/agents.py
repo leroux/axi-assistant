@@ -1512,6 +1512,27 @@ def extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+class _LiveEditState:
+    """Tracks the Discord message currently being live-edited during streaming."""
+
+    __slots__ = (
+        "channel_id",
+        "content",
+        "edit_pending",
+        "finalized",
+        "last_edit_time",
+        "message_id",
+    )
+
+    def __init__(self, channel_id: int) -> None:
+        self.channel_id: int = channel_id
+        self.message_id: str | None = None  # Set after first message is posted
+        self.content: str = ""  # Full content of the current message
+        self.last_edit_time: float = 0.0  # monotonic timestamp of last edit
+        self.finalized: bool = False  # True once this message is complete
+        self.edit_pending: bool = False  # True if content changed since last edit
+
+
 class _StreamCtx:
     """Mutable state for a single stream_response_to_channel invocation."""
 
@@ -1520,13 +1541,14 @@ class _StreamCtx:
         "hit_rate_limit",
         "hit_transient_error",
         "in_flowchart",
+        "live_edit",
         "msg_total",
         "text_buffer",
         "tool_input_json",
         "typing_stopped",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, live_edit: _LiveEditState | None = None) -> None:
         self.text_buffer: str = ""
         self.hit_rate_limit: bool = False
         self.hit_transient_error: str | None = None
@@ -1535,10 +1557,16 @@ class _StreamCtx:
         self.msg_total: int = 0
         self.tool_input_json: str = ""  # Accumulates full tool input JSON for current tool_use block
         self.in_flowchart: bool = False  # True during flowchart execution (protects session_id)
+        self.live_edit: _LiveEditState | None = live_edit  # Set when STREAMING_DISCORD is enabled
 
 
 async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChannel, reason: str = "?") -> None:
-    """Flush accumulated text buffer to Discord."""
+    """Flush accumulated text buffer to Discord.
+
+    When live-edit streaming is active, this finalizes the current streaming
+    message (ensuring content is up to date) and resets the live-edit state
+    so the next text block starts a new message.
+    """
     text = ctx.text_buffer
     if not text.strip():
         return
@@ -1551,7 +1579,136 @@ async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChann
         len(text.strip()),
         text.strip()[:120],
     )
-    await send_long(channel, text.lstrip())
+
+    le = ctx.live_edit
+    if le is not None:
+        # Streaming mode: finalize the current live-edit message(s)
+        await _live_edit_finalize(ctx, session)
+    else:
+        await send_long(channel, text.lstrip())
+
+
+# ---------------------------------------------------------------------------
+# Live-edit streaming helpers (STREAMING_DISCORD)
+# ---------------------------------------------------------------------------
+
+_STREAMING_CURSOR = "\u2588"  # Block cursor to indicate "still typing"
+_STREAMING_MSG_LIMIT = 1900  # Leave room for cursor and splitting overhead
+
+
+async def _live_edit_post(le: _LiveEditState, content: str, session: AgentSession) -> None:
+    """Post a new message via REST and record its ID in the live-edit state."""
+    try:
+        resp = await config.discord_client.send_message(le.channel_id, content)
+        le.message_id = resp["id"]
+        le.content = content
+        le.last_edit_time = time.monotonic()
+        le.edit_pending = False
+        log.debug("LIVE_EDIT_POST[%s] msg_id=%s len=%d", session.name, le.message_id, len(content))
+    except Exception:
+        log.exception("LIVE_EDIT_POST[%s] failed to post initial message", session.name)
+        raise
+
+
+async def _live_edit_update(le: _LiveEditState, content: str, session: AgentSession) -> None:
+    """Edit the current live-edit message with new content."""
+    if le.message_id is None:
+        return
+    try:
+        await config.discord_client.edit_message(le.channel_id, le.message_id, content)
+        le.content = content
+        le.last_edit_time = time.monotonic()
+        le.edit_pending = False
+        log.debug("LIVE_EDIT_UPDATE[%s] msg_id=%s len=%d", session.name, le.message_id, len(content))
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            retry_after = exc.response.json().get("retry_after", 2.0)
+            log.warning("LIVE_EDIT_UPDATE[%s] rate limited, backing off %.1fs", session.name, retry_after)
+            le.last_edit_time = time.monotonic() + retry_after
+            le.edit_pending = True
+        else:
+            log.warning("LIVE_EDIT_UPDATE[%s] edit failed: %s", session.name, exc)
+    except Exception:
+        log.warning("LIVE_EDIT_UPDATE[%s] edit failed", session.name, exc_info=True)
+
+
+async def _live_edit_tick(ctx: _StreamCtx, session: AgentSession) -> None:
+    """Called on each text_delta. Posts or edits the message if enough time has passed.
+
+    Flow:
+    1. If no message exists yet, post the first chunk immediately.
+    2. If content exceeds the limit, finalize current message and start a new one.
+    3. If enough time has passed since last edit, edit with current content + cursor.
+    """
+    le = ctx.live_edit
+    if le is None or le.finalized:
+        return
+
+    text = ctx.text_buffer.lstrip()
+    if not text:
+        return
+
+    now = time.monotonic()
+
+    # First message: post immediately
+    if le.message_id is None:
+        await _live_edit_post(le, text + _STREAMING_CURSOR, session)
+        return
+
+    # Content exceeds limit: finalize current message at a good split point, start new
+    if len(text) > _STREAMING_MSG_LIMIT:
+        split_at = text.rfind("\n", 0, _STREAMING_MSG_LIMIT)
+        if split_at == -1:
+            split_at = _STREAMING_MSG_LIMIT
+        # Finalize the current message with content up to split point (no cursor)
+        final_content = text[:split_at]
+        await _live_edit_update(le, final_content, session)
+        # Reset buffer to remainder and start a new message
+        ctx.text_buffer = text[split_at:].lstrip("\n")
+        le.message_id = None
+        le.content = ""
+        le.edit_pending = False
+        # Post the remainder as a new message if there's content
+        remainder = ctx.text_buffer.lstrip()
+        if remainder:
+            await _live_edit_post(le, remainder + _STREAMING_CURSOR, session)
+        return
+
+    # Throttled edit: only update if enough time has passed
+    if now - le.last_edit_time >= config.STREAMING_EDIT_INTERVAL:
+        await _live_edit_update(le, text + _STREAMING_CURSOR, session)
+
+
+async def _live_edit_finalize(ctx: _StreamCtx, session: AgentSession) -> None:
+    """Finalize the current live-edit message: remove cursor, post any remaining content."""
+    le = ctx.live_edit
+    if le is None:
+        return
+
+    text = ctx.text_buffer.lstrip()
+
+    if le.message_id is not None and text:
+        # Final edit: remove the cursor character
+        # If text is too long, we need to split
+        chunks = split_message(text)
+        if len(chunks) == 1:
+            await _live_edit_update(le, chunks[0], session)
+        else:
+            # First chunk goes into the existing message
+            await _live_edit_update(le, chunks[0], session)
+            # Remaining chunks are new messages
+            for chunk in chunks[1:]:
+                await config.discord_client.send_message(le.channel_id, chunk)
+    elif le.message_id is None and text:
+        # Never posted — just send normally
+        for chunk in split_message(text):
+            await config.discord_client.send_message(le.channel_id, chunk)
+
+    # Reset for next text block
+    le.message_id = None
+    le.content = ""
+    le.edit_pending = False
+    le.finalized = False
 
 
 def _stop_typing(ctx: _StreamCtx, typing_ctx: Any) -> None:
@@ -1637,6 +1794,8 @@ async def _handle_stream_event(
         delta = event.get("delta", {})
         if delta.get("type") == "text_delta":
             ctx.text_buffer += delta.get("text", "")
+            if ctx.live_edit is not None:
+                await _live_edit_tick(ctx, session)
     elif event_type == "message_delta":
         stop_reason = event.get("delta", {}).get("stop_reason")
         if stop_reason == "end_turn":
@@ -1830,7 +1989,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
     t0 = time.monotonic()
     t_first_event: float | None = None
 
-    ctx = _StreamCtx()
+    live_edit = _LiveEditState(channel.id) if config.STREAMING_DISCORD else None
+    ctx = _StreamCtx(live_edit=live_edit)
 
     async with channel.typing() as typing_ctx:
         async for msg in _receive_response_safe(session):
@@ -1863,8 +2023,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
             elif session.agent_log:
                 session.agent_log.debug("OTHER_MSG: %s", type(msg).__name__)
 
-            # Mid-turn flush
-            if not ctx.hit_rate_limit and len(ctx.text_buffer) >= 1800:
+            # Mid-turn flush (skipped in streaming mode — live-edit handles splitting)
+            if not ctx.hit_rate_limit and ctx.live_edit is None and len(ctx.text_buffer) >= 1800:
                 split_at = ctx.text_buffer.rfind("\n", 0, 1800)
                 if split_at == -1:
                     split_at = 1800
@@ -1877,6 +2037,9 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
     await _drain_stderr_to_channel(session, channel)
 
     if ctx.hit_rate_limit:
+        # Finalize any in-flight streaming message (remove cursor)
+        if ctx.live_edit is not None and ctx.live_edit.message_id is not None:
+            await _live_edit_finalize(ctx, session)
         log.info("STREAM_END[%s] result=rate_limit msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
         span.set_attributes({"stream.msg_total": ctx.msg_total, "stream.flush_count": ctx.flush_count})
         span.end()

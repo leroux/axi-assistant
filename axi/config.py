@@ -40,6 +40,8 @@ __all__ = [
     "SCHEDULES_PATH",
     "SCHEDULE_TIMEZONE",
     "SHOW_AWAITING_INPUT",
+    "STREAMING_DISCORD",
+    "STREAMING_EDIT_INTERVAL",
     "USAGE_HISTORY_PATH",
     "VALID_MODELS",
     "discord_client",
@@ -97,6 +99,11 @@ log.addHandler(_file_handler)
 # ---------------------------------------------------------------------------
 
 FLOWCODER_ENABLED = os.environ.get("FLOWCODER_ENABLED", "1").lower() in ("1", "true", "yes")
+STREAMING_DISCORD = os.environ.get("STREAMING_DISCORD", "").lower() in ("1", "true", "yes")
+
+# Streaming edit interval in seconds — how often to edit the Discord message with new content.
+# Must stay well under Discord's per-channel rate limit (~5 req/5s).
+STREAMING_EDIT_INTERVAL = float(os.environ.get("STREAMING_EDIT_INTERVAL", "1.5"))
 
 # ---------------------------------------------------------------------------
 # Discord token resolution
