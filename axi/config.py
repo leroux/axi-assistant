@@ -58,8 +58,28 @@ import threading
 import time
 from datetime import timedelta
 from logging.handlers import RotatingFileHandler
-from typing import Any
+from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
+
+
+class _ColorFormatter(logging.Formatter):
+    """Formatter that adds ANSI color codes to log lines based on level."""
+
+    LEVEL_COLORS: ClassVar[dict[int, str]] = {
+        logging.DEBUG: "\033[2m",       # dim
+        logging.INFO: "\033[32m",       # green
+        logging.WARNING: "\033[33m",    # yellow
+        logging.ERROR: "\033[31m",      # red
+        logging.CRITICAL: "\033[1;31m",  # bold red
+    }
+    RESET: ClassVar[str] = "\033[0m"
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        color = self.LEVEL_COLORS.get(record.levelno)
+        if color:
+            return f"{color}{msg}{self.RESET}"
+        return msg
 
 from dotenv import load_dotenv
 
@@ -75,7 +95,7 @@ log.setLevel(logging.DEBUG)
 # Console handler: configurable via LOG_LEVEL env var (default INFO)
 _console_handler = logging.StreamHandler()
 _console_handler.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
-_console_fmt = logging.Formatter("%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s")
+_console_fmt = _ColorFormatter("%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s")
 _console_fmt.converter = time.gmtime
 _console_handler.setFormatter(_console_fmt)
 log.addHandler(_console_handler)

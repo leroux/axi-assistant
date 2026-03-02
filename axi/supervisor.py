@@ -11,6 +11,7 @@ Signal semantics:
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
 from typing import IO
+
+_ANSI_RE = re.compile(rb"\033\[[0-9;]*m")
 
 LOG_LEVEL = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
@@ -151,7 +154,7 @@ def run_bot() -> int:
         for line in iter(pipe.readline, b""):
             sys.stdout.buffer.write(line)
             sys.stdout.buffer.flush()
-            log_file.write(line)
+            log_file.write(_ANSI_RE.sub(b"", line))
             log_file.flush()
 
     with open(log_path, "ab") as lf:
