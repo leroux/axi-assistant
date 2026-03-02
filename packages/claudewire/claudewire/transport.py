@@ -10,6 +10,7 @@ satisfies the ProcessConnection protocol defined in claudewire.types.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -131,6 +132,9 @@ class BridgeTransport:
             raise ConnectionError("Process connection is dead")
         while True:
             msg = await self._queue.get()
+            # stop() was called — discard any buffered messages and return
+            if self._cli_exited:
+                return
             if msg is None:
                 raise ConnectionError("Process connection lost during read")
             if isinstance(msg, StdoutEvent):
@@ -156,6 +160,35 @@ class BridgeTransport:
                 self._cli_exited = True
                 self._exit_code = msg.code
                 return
+
+    async def stop(self) -> None:
+        """Immediately terminate the read stream and kill the CLI process.
+
+        Unlike close(), which blocks until the process dies, stop() returns
+        instantly.  It injects an ExitEvent into the local queue so that
+        read_messages() terminates on the next iteration (discarding any
+        buffered messages).  The actual process kill runs in the background.
+
+        Safe to call from any coroutine — including one that is concurrently
+        iterating read_messages().
+        """
+        if self._cli_exited:
+            return
+        self._cli_exited = True
+        log.debug("[stop][%s] injecting ExitEvent and scheduling background kill", self._name)
+        _tracer.start_span("claudewire.stop", attributes={"agent.name": self._name}).end()
+        # Inject ExitEvent to unblock read_messages() immediately
+        if self._queue:
+            await self._queue.put(ExitEvent(name=self._name, code=None))
+        # Kill the process in the background (don't wait)
+        asyncio.create_task(self._background_kill())
+
+    async def _background_kill(self) -> None:
+        """Kill the process via the connection. Runs as a fire-and-forget task."""
+        try:
+            await self._conn.kill(self._name)
+        except Exception:
+            log.debug("[stop][%s] background kill failed (process may already be dead)", self._name)
 
     async def close(self) -> None:
         """Kill the CLI process and unregister."""

@@ -199,19 +199,27 @@ async def main() -> None:
         "--output-format", "stream-json",
     ] + (args.passthrough or [])
 
-    # Signal handling
+    # Start the inner Claude process (before signal setup so handler can reference it)
+    process = ClaudeProcess()
+    await process.start(claude_cmd, _clean_env(), "")
+
+    # Signal handling — kill inner Claude immediately for fast shutdown
     shutdown_event = asyncio.Event()
 
     def handle_signal(signum: int, frame: object) -> None:
         protocol.log(f"Received signal {signum}, shutting down...")
         shutdown_event.set()
+        # Kill the inner Claude process immediately so the engine exits fast.
+        # Without this, the engine waits for the current turn to finish (~seconds)
+        # before checking shutdown_event, delaying the kill by up to 5s.
+        if process.is_running and process._proc is not None:
+            try:
+                process._proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
-
-    # Start the inner Claude process
-    process = ClaudeProcess()
-    await process.start(claude_cmd, _clean_env(), "")
     protocol.log("Inner claude process started")
 
     # Set up stdin reader and message router

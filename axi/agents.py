@@ -2075,24 +2075,27 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
 async def interrupt_session(session: AgentSession) -> None:
     """Kill the CLI process for an agent session.
 
-    For bridge-managed agents (flowcoder): sends a bridge "kill" command which
-    does SIGTERM followed by SIGKILL after 5 seconds.  The process exit
-    propagates as an ExitEvent through the transport, causing the streaming
-    loop to terminate naturally.
+    For bridge-managed agents (flowcoder): calls transport.stop() which
+    immediately terminates the streaming loop by injecting an ExitEvent,
+    then kills the process in the background.  Returns instantly.
 
     For direct-subprocess agents (claude_code): uses the SDK interrupt with
     a short timeout.
-
-    Bridge "interrupt" (SIGINT) is NOT used because the flowcoder-engine
-    catches SIGINT and survives it.
     """
+    # Flowcoder agents: use transport.stop() for instant termination
+    if session.transport is not None:
+        await session.transport.stop()
+        return
+
+    # Fallback: try procmux kill directly (e.g. transport lost but procmux alive)
     if procmux_conn and procmux_conn.is_alive:
         result = await procmux_conn.send_command("kill", name=session.name)
         if not result.ok:
             log.warning("Bridge kill for '%s' failed: %s", session.name, result.error)
-        return
+        else:
+            return
 
-    # Fallback for non-bridge agents: SDK interrupt
+    # Non-bridge agents (claude_code): SDK interrupt
     if session.client is not None:
         try:
             async with asyncio.timeout(5):
@@ -2689,6 +2692,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
 
             transport = await create_transport(session, reconnecting=True)
             assert transport is not None
+            session.transport = transport
 
             sub_result = await transport.subscribe()
             replayed = sub_result.replayed or 0

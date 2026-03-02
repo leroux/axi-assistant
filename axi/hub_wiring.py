@@ -166,6 +166,7 @@ async def _create_client(session: AgentSession, options: Any) -> Any:
         )
         await transport.spawn(cli_args, env, session.cwd)
         await transport.subscribe()
+        session.transport = transport
         client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
         await client.__aenter__()
         return client

@@ -80,6 +80,7 @@ async def sleep_agent(
         if session.agent_log:
             session.agent_log.info("SESSION_SLEEP")
         session.bridge_busy = False
+        session.transport = None
         await hub.disconnect_client(session.client, session.name)
         session.client = None
         hub.scheduler.release_slot(session.name)

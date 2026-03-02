@@ -90,6 +90,7 @@ class DiscordAgentState:
     # Plan approval gate
     plan_approval_future: asyncio.Future[PlanApprovalResult] | None = None
     plan_approval_message_id: int | None = None
+    plan_mode: bool = False
     # Question gate
     question_future: asyncio.Future[str] | None = None
     question_data: dict[str, Any] | None = None
@@ -97,6 +98,8 @@ class DiscordAgentState:
     # Todo display
     todo_message_id: int | None = None
     todo_items: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
+    agent_log: logging.Logger | None = None
+    last_failed_resume_id: str | None = None
 
 
 def discord_state(session: AgentSession) -> DiscordAgentState:

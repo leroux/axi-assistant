@@ -37,6 +37,13 @@ from procmux import (
     ensure_running as ensure_bridge,
 )
 
+
+# Override conftest's autouse warmup — bridge tests don't need Discord.
+@pytest.fixture(autouse=True)
+def _ensure_warm():
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -867,6 +874,149 @@ class TestBridgeTransportLifecycle:
             transport = BridgeTransport("ei", _adapt(conn))
             await transport.connect()
             await transport.end_input()  # should not raise
+        finally:
+            await _cleanup(server, srv, conn, sock)
+
+
+# ---------------------------------------------------------------------------
+# BridgeTransport.stop(): immediate stream termination
+# ---------------------------------------------------------------------------
+
+
+class TestBridgeTransportStop:
+    """Tests for BridgeTransport.stop() — instant kill that discards buffered messages."""
+
+    @pytest.mark.asyncio
+    async def test_stop_terminates_read_messages_immediately(self):
+        """stop() causes read_messages() to return within milliseconds,
+        discarding any buffered messages still in the queue."""
+        sock = _tmp_sock()
+        server, srv = await _start_server(sock)
+        conn = await _connect(sock)
+        try:
+            # Spawn a SIGTERM-surviving process (like flowcoder engine)
+            await asyncio.wait_for(
+                conn.send_command(
+                    "spawn",
+                    name="st",
+                    cli_args=[
+                        PYTHON, "-u", "-c",
+                        "import signal, json, time\n"
+                        "signal.signal(signal.SIGTERM, lambda *a: None)\n"
+                        "i = 0\n"
+                        "while True:\n"
+                        "    print(json.dumps({'type':'msg','n':i}), flush=True)\n"
+                        "    i += 1\n"
+                        "    time.sleep(0.02)\n",
+                    ],
+                    env=dict(os.environ),
+                    cwd="/tmp",
+                ),
+                timeout=3,
+            )
+
+            transport = BridgeTransport("st", _adapt(conn))
+            await transport.connect()
+            await asyncio.wait_for(transport.subscribe(), timeout=3)
+
+            # Read a few messages to confirm stream is active
+            count = 0
+            async for _data in transport.read_messages():
+                count += 1
+                if count >= 5:
+                    # Now call stop() from a concurrent task
+                    await transport.stop()
+                    # read_messages() should return on the next iteration
+                    # (we're inside the generator, the _cli_exited flag is set,
+                    # so the next queue.get() will trigger return)
+                    break
+
+            assert transport.cli_exited is True
+            assert count == 5  # Should have read exactly 5, not hundreds
+        finally:
+            await _cleanup(server, srv, conn, sock)
+
+    @pytest.mark.asyncio
+    async def test_stop_from_concurrent_task(self):
+        """stop() called from a separate task terminates read_messages() promptly."""
+        sock = _tmp_sock()
+        server, srv = await _start_server(sock)
+        conn = await _connect(sock)
+        try:
+            await asyncio.wait_for(
+                conn.send_command(
+                    "spawn",
+                    name="sc",
+                    cli_args=[
+                        PYTHON, "-u", "-c",
+                        "import signal, json, time\n"
+                        "signal.signal(signal.SIGTERM, lambda *a: None)\n"
+                        "i = 0\n"
+                        "while True:\n"
+                        "    print(json.dumps({'type':'msg','n':i}), flush=True)\n"
+                        "    i += 1\n"
+                        "    time.sleep(0.02)\n",
+                    ],
+                    env=dict(os.environ),
+                    cwd="/tmp",
+                ),
+                timeout=3,
+            )
+
+            transport = BridgeTransport("sc", _adapt(conn))
+            await transport.connect()
+            await asyncio.wait_for(transport.subscribe(), timeout=3)
+
+            msgs_received = 0
+
+            async def read_all():
+                nonlocal msgs_received
+                async for _data in transport.read_messages():
+                    msgs_received += 1
+
+            async def stop_after_delay():
+                await asyncio.sleep(0.2)  # Let some messages flow
+                await transport.stop()
+
+            # Run reader and stopper concurrently
+            reader_task = asyncio.create_task(read_all())
+            stopper_task = asyncio.create_task(stop_after_delay())
+
+            # Both should complete quickly (not 5+ seconds)
+            await asyncio.wait_for(
+                asyncio.gather(reader_task, stopper_task),
+                timeout=3.0,
+            )
+
+            assert transport.cli_exited is True
+            # Should have received some messages but far fewer than 5 seconds worth (~250)
+            assert msgs_received < 50, f"Expected <50 msgs but got {msgs_received}"
+        finally:
+            await _cleanup(server, srv, conn, sock)
+
+    @pytest.mark.asyncio
+    async def test_stop_is_idempotent(self):
+        """Calling stop() multiple times is safe."""
+        sock = _tmp_sock()
+        server, srv = await _start_server(sock)
+        conn = await _connect(sock)
+        try:
+            await asyncio.wait_for(
+                conn.send_command(
+                    "spawn", name="si",
+                    cli_args=_slow_cli_script(100, 0.1),
+                    env=dict(os.environ), cwd="/tmp",
+                ),
+                timeout=3,
+            )
+
+            transport = BridgeTransport("si", _adapt(conn))
+            await transport.connect()
+            await asyncio.wait_for(transport.subscribe(), timeout=3)
+
+            await transport.stop()
+            await transport.stop()  # second call should be no-op
+            assert transport.cli_exited is True
         finally:
             await _cleanup(server, srv, conn, sock)
 

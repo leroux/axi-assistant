@@ -56,6 +56,7 @@ class AgentSession:
     plan_mode: bool = False
     agent_log: logging.Logger | None = None
     last_failed_resume_id: str | None = None  # Session ID that failed resume (prevents stale-ID cycle)
+    transport: Any = None  # BridgeTransport for flowcoder agents (set by create_client)
     frontend_state: Any = None  # Opaque — frontend casts to its own type
 
 
