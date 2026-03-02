@@ -25,6 +25,7 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 from opentelemetry import trace
 
 from axi import agents, channels, config
+from axi.log_context import set_agent_context, set_trigger
 from axi.schedule_tools import make_schedule_mcp_server
 
 if TYPE_CHECKING:
@@ -83,6 +84,8 @@ _tracer = trace.get_tracer(__name__)
 )
 async def axi_spawn_agent(args: McpArgs) -> McpResult:
     agent_name = args.get("name", "").strip()
+    set_agent_context(agent_name or "unknown")
+    set_trigger("mcp_tool", detail="axi_spawn_agent")
     _tracer.start_span("tool.axi_spawn_agent", attributes={"agent.name": agent_name}).end()
     default_cwd = os.path.join(config.AXI_USER_DATA, "agents", agent_name) if agent_name else config.AXI_USER_DATA
     agent_cwd = os.path.realpath(os.path.expanduser(args.get("cwd", default_cwd)))
@@ -230,6 +233,8 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
 )
 async def axi_kill_agent(args: McpArgs) -> McpResult:
     agent_name = args.get("name", "").strip()
+    set_agent_context(agent_name or "unknown")
+    set_trigger("mcp_tool", detail="axi_kill_agent")
     _tracer.start_span("tool.axi_kill_agent", attributes={"agent.name": agent_name}).end()
 
     if not agent_name:
@@ -283,6 +288,8 @@ async def axi_kill_agent(args: McpArgs) -> McpResult:
     {"type": "object", "properties": {}, "required": []},
 )
 async def axi_restart(args: McpArgs) -> McpResult:
+    set_agent_context(config.MASTER_AGENT_NAME)
+    set_trigger("mcp_tool", detail="axi_restart")
     _tracer.start_span("tool.axi_restart").end()
     log.info("Restart requested via MCP tool")
     if agents.shutdown_coordinator is None:
@@ -320,6 +327,8 @@ async def axi_restart(args: McpArgs) -> McpResult:
 )
 async def axi_send_message(args: McpArgs) -> McpResult:
     target_name = args.get("agent_name", "").strip()
+    set_agent_context(target_name or "unknown")
+    set_trigger("mcp_tool", detail="axi_send_message")
     _tracer.start_span("tool.axi_send_message", attributes={"target.agent": target_name}).end()
     content = args.get("content", "").strip()
 

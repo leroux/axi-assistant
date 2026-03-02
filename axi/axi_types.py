@@ -111,6 +111,8 @@ class AgentSession:
 
     def __post_init__(self) -> None:
         """Set up per-agent logger writing to <assistant_dir>/logs/<name>.log."""
+        from axi.log_context import StructuredContextFilter
+
         os.makedirs(config.LOG_DIR, exist_ok=True)
         logger = logging.getLogger(f"agent.{self.name}")
         logger.setLevel(logging.DEBUG)
@@ -122,7 +124,8 @@ class AgentSession:
                 backupCount=2,
             )
             fh.setLevel(logging.DEBUG)
-            _agent_fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s")
+            fh.addFilter(StructuredContextFilter())
+            _agent_fmt = logging.Formatter("%(asctime)s %(levelname)-8s [%(ctx_prefix)s] %(message)s")
             _agent_fmt.converter = time.gmtime
             fh.setFormatter(_agent_fmt)
             logger.addHandler(fh)

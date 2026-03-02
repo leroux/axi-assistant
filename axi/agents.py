@@ -57,6 +57,7 @@ from axi.channels import (
 from axi.channels import (
     parse_channel_topic as _parse_channel_topic,
 )
+from axi.log_context import set_agent_context, set_trigger
 from axi.prompts import (
     compute_prompt_hash,
     make_spawned_agent_system_prompt,
@@ -1109,6 +1110,7 @@ async def wake_agent(session: AgentSession) -> None:
 
         await scheduler.request_slot(session.name)
 
+        set_agent_context(session.name, channel_id=session.discord_channel_id)
         log.info("Waking agent '%s' (session_id=%s)", session.name, session.session_id)
 
         resume_id = session.session_id
@@ -1222,6 +1224,7 @@ async def wake_or_queue(
 
 async def end_session(name: str) -> None:
     """End a named Claude session and remove it from the registry."""
+    set_agent_context(name)
     with _tracer.start_as_current_span("end_session", attributes={"agent.name": name}):
         session = agents.get(name)
         if session is None:
@@ -2241,6 +2244,8 @@ async def process_message(session: AgentSession, content: MessageContent, channe
     if session.client is None:
         raise RuntimeError(f"Agent '{session.name}' not awake")
 
+    set_agent_context(session.name, channel_id=channel.id)
+
     _reset_session_activity(session)
     session.bridge_busy = False
     drain_stderr(session)
@@ -2313,6 +2318,9 @@ async def spawn_agent(
         },
     ):
         os.makedirs(cwd, exist_ok=True)
+
+        set_agent_context(name)
+        set_trigger("spawn", detail=f"type={agent_type}")
 
         normalized = normalize_channel_name(name)
         _channels_mod.bot_creating_channels.add(normalized)
@@ -2394,6 +2402,8 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
 
 async def run_initial_prompt(session: AgentSession, prompt: MessageContent, channel: TextChannel) -> None:
     """Run the initial prompt for a spawned agent."""
+    set_agent_context(session.name, channel_id=channel.id)
+    set_trigger("initial_prompt")
     with _tracer.start_as_current_span(
         "run_initial_prompt",
         attributes={
@@ -2546,6 +2556,8 @@ async def deliver_inter_agent_message(
     content: str,
 ) -> str:
     """Deliver a message from one agent to another."""
+    set_agent_context(target_session.name, channel_id=target_session.discord_channel_id)
+    set_trigger("inter_agent", detail=f"from={sender_name}")
     _tracer.start_span(
         "deliver_inter_agent_message",
         attributes={

@@ -90,13 +90,21 @@ load_dotenv()
 # Logging setup
 # ---------------------------------------------------------------------------
 
+from axi.log_context import StructuredContextFilter
+
 log = logging.getLogger("axi")
 log.setLevel(logging.DEBUG)
+
+# Structured context filter — injects ctx_prefix, ctx_agent, etc. into all records.
+# Installed on handlers (not the logger) so it applies to child logger records too
+# (e.g. axi.channels, axi.shutdown) that propagate to these handlers.
+_ctx_filter = StructuredContextFilter()
 
 # Console handler: configurable via LOG_LEVEL env var (default INFO)
 _console_handler = logging.StreamHandler()
 _console_handler.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
-_console_fmt = _ColorFormatter("%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s")
+_console_handler.addFilter(_ctx_filter)
+_console_fmt = _ColorFormatter("%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] [%(ctx_prefix)s] %(message)s")
 _console_fmt.converter = time.gmtime
 _console_handler.setFormatter(_console_fmt)
 log.addHandler(_console_handler)
@@ -110,7 +118,8 @@ _file_handler = RotatingFileHandler(
     backupCount=3,
 )
 _file_handler.setLevel(logging.DEBUG)
-_file_fmt = logging.Formatter("%(asctime)s %(levelname)-8s [%(funcName)s:%(lineno)d] %(message)s")
+_file_handler.addFilter(_ctx_filter)
+_file_fmt = logging.Formatter("%(asctime)s %(levelname)-8s [%(funcName)s:%(lineno)d] [%(ctx_prefix)s] %(message)s")
 _file_fmt.converter = time.gmtime
 _file_handler.setFormatter(_file_fmt)
 log.addHandler(_file_handler)

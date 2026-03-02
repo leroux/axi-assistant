@@ -27,6 +27,7 @@ from opentelemetry import trace
 
 from axi import agents, channels, config, scheduler, tools
 from axi.axi_types import ActivityState, AgentSession, tool_display
+from axi.log_context import set_agent_context, set_trigger
 from axi.prompts import (
     MASTER_SYSTEM_PROMPT,
     compute_prompt_hash,
@@ -197,9 +198,17 @@ async def on_message(message: discord.Message) -> None:
 
     # --- Get content and look up agent ---
     content = await agents.extract_message_content(message)
+
+    agent_name = agents.channel_to_agent.get(channel.id)
+
+    # Set structured log context for this message
+    set_agent_context(agent_name or "unknown", channel_id=channel.id)
+    set_trigger("user_message", message_id=message.id)
+
     log.info(
-        "Message from %s in #%s: %s",
-        message.author,
+        "Message from %s (%s) in #%s: %s",
+        message.author.name,
+        message.author.id,
         channel.name,
         agents.content_summary(content),
     )
@@ -208,7 +217,6 @@ async def on_message(message: discord.Message) -> None:
         await agents.send_system(channel, "Bot is restarting — not accepting new messages.")
         return
 
-    agent_name = agents.channel_to_agent.get(channel.id)
     if agent_name is None:
         return
 
@@ -398,6 +406,8 @@ async def _fire_schedules(
                 if last_occurrence > agents.schedule_last_fired[skey]:
                     agents.schedule_last_fired[skey] = last_occurrence
 
+                    set_agent_context(entry.get("owner") or entry.get("session") or name)
+                    set_trigger("schedule", name=name)
                     log.info("Firing recurring event: %s", name)
                     _tracer.start_span("schedule.fire", attributes={"schedule.name": name, "schedule.type": "recurring"}).end()
                     agent_name = entry.get("owner") or entry.get("session") or name
@@ -420,6 +430,8 @@ async def _fire_schedules(
                 fire_at = datetime.fromisoformat(entry["at"])
 
                 if fire_at <= now_utc:
+                    set_agent_context(entry.get("owner") or entry.get("session") or name)
+                    set_trigger("schedule_one_off", name=name)
                     log.info("Firing one-off event: %s", name)
                     _tracer.start_span("schedule.fire", attributes={"schedule.name": name, "schedule.type": "one_off"}).end()
                     agent_name = entry.get("owner") or entry.get("session") or name
@@ -2124,6 +2136,8 @@ async def _spawn_crash_handler(crash_data: dict[str, Any], is_rollback: bool) ->
 @bot.event
 async def on_ready() -> None:
     global _on_ready_fired
+    set_agent_context("system")
+    set_trigger("startup")
     log.info("Bot ready as %s", bot.user)
 
     asyncio.get_event_loop().set_exception_handler(_handle_task_exception)
