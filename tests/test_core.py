@@ -239,7 +239,7 @@ def test_debug_mode_visibility(discord: Discord, master_channel: str):
 
 
 def test_startup_notification(discord: Discord, master_channel: str, instance_env: dict):
-    """Test 8: Restarting instance produces 'Axi restarted' notification."""
+    """Test 8: Restarting instance produces 'Axi ready' notification."""
     # Record current latest message
     latest = discord.latest_message_id(master_channel)
 
@@ -251,12 +251,12 @@ def test_startup_notification(discord: Discord, master_channel: str, instance_en
         timeout=30,
     )
 
-    # Wait for the restart notification
+    # Wait for the ready notification
     text = discord.poll_history(
-        master_channel, after=latest, check="restart", timeout=30.0
+        master_channel, after=latest, check="ready", timeout=30.0
     )
-    assert "restart" in text.lower(), (
-        f"Expected restart notification, got: {text[:200]}"
+    assert "ready" in text.lower(), (
+        f"Expected ready notification, got: {text[:200]}"
     )
 
     # Re-warmup after restart

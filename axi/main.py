@@ -64,6 +64,7 @@ async def global_auth_check(interaction: discord.Interaction[Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 _on_ready_fired = False
+_startup_complete = False
 _bot_start_time: datetime | None = None
 _seen_message_ids: OrderedDict[int, None] = OrderedDict()  # dedup guard for Discord duplicate delivery
 _DEDUP_CAPACITY = 500
@@ -142,6 +143,9 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
 @bot.event
 async def on_message(message: discord.Message) -> None:
     """Handle incoming Discord messages."""
+    if not _startup_complete:
+        return
+
     # Dedup: Discord may deliver the same message twice on gateway reconnects
     if message.id in _seen_message_ids:
         log.warning("DEDUP[%s] duplicate on_message delivery — skipping", message.id)
@@ -1874,8 +1878,7 @@ async def _send_startup_notification(
         if config.ENABLE_CRASH_HANDLER:
             crash_msg += "\nSpawning crash analysis agent..."
         await master_ch.send(crash_msg)
-    else:
-        await master_ch.send("*System:* Axi restarted.")
+    await master_ch.send("*System:* Axi ready.")
     log.info("Sent restart notification to master channel")
 
 
@@ -1973,6 +1976,11 @@ async def on_ready() -> None:
     master_resume_id, master_old_prompt_hash, master_todo_msg = _load_master_session_data()
     master_session = _register_master_agent(master_resume_id, master_old_prompt_hash, master_todo_msg)
     await _setup_guild_infrastructure(master_session)
+
+    master_ch = await agents.get_master_channel()
+    if master_ch:
+        await master_ch.send("*System:* Axi starting up...")
+
     await agents.connect_bridge()
     agents.init_shutdown_coordinator()
 
@@ -1984,6 +1992,9 @@ async def on_ready() -> None:
 
     rollback_info = _consume_json_marker(config.ROLLBACK_MARKER_PATH, "Rollback")
     crash_info = _consume_json_marker(config.CRASH_ANALYSIS_MARKER_PATH, "Crash analysis")
+
+    global _startup_complete
+    _startup_complete = True
 
     master_ch = await agents.get_master_channel()
     if master_ch:
