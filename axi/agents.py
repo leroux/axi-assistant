@@ -1167,6 +1167,7 @@ async def end_session(name: str) -> None:
     if session.client is not None:
         await _disconnect_client(session.client, name)
         session.client = None
+        scheduler.release_slot(name)
     _close_agent_log(session)
     agents.pop(name, None)
     log.info("Session '%s' ended", name)

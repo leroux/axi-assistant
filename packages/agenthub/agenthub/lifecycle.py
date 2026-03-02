@@ -130,6 +130,8 @@ async def wake_agent(hub: AgentHub, session: AgentSession) -> None:
                     session.agent_log.info(
                         "SESSION_WAKE (resumed=%s)", bool(resume_id)
                     )
+                # Successful resume — clear any previous failure marker
+                session.last_failed_resume_id = None
             except Exception:
                 if resume_id:
                     log.warning(
@@ -145,6 +147,9 @@ async def wake_agent(hub: AgentHub, session: AgentSession) -> None:
                         raise
                     session.client = client
                     session.session_id = None
+                    # Remember the failed session_id so we don't save the same
+                    # stale ID when the fresh session returns it in result messages.
+                    session.last_failed_resume_id = resume_id
                     log.warning(
                         "Agent '%s' woke with fresh session (previous context lost)",
                         session.name,
