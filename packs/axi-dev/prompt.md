@@ -58,7 +58,7 @@ Exceptions: pure research agents, design-only agents, agents working on external
 1. **Edit files** in cwd (all edits naturally go to the right place)
 2. **Reserve a test slot**: `uv run python axi_test.py up <name> --wait` — only when ready to test
 3. **Restart**: `uv run python axi_test.py restart <name>`
-4. **Test via Discord MCP**: Use `discord_send_message` to the test guild, then `discord_read_messages` or `wait_for_message.py` to check the response
+4. **Test via Discord MCP**: Use `discord_send_message` to the test guild, then `discord_read_messages` or `python -m discordquery wait` to check the response
 5. **Iterate**: Repeat 1-4 until it works
 6. **Tear down**: `uv run python axi_test.py down <name>` — always release the slot when done testing
 7. **Commit**: `git add -A && git commit -m "description"`
@@ -67,11 +67,11 @@ Exceptions: pure research agents, design-only agents, agents working on external
 
 ### Fast Message Polling
 
-For scripted test interactions, use `wait_for_message.py`:
+For scripted test interactions, use `python -m discordquery wait`:
 
 ```bash
 # Send a message, then wait for the bot's response
-python wait_for_message.py <channel_id> --after <message_id> --timeout 60
+python -m discordquery wait <channel_id> --after <message_id> --timeout 60
 ```
 
 This polls every 2 seconds and returns as soon as a non-system message appears. Output is JSONL with a trailing cursor line.

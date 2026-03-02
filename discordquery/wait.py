@@ -1,56 +1,51 @@
-#!/usr/bin/env python3
 """Wait for new messages in a Discord channel.
 
 Polls the Discord API and returns as soon as new messages appear.
-Designed for fast cross-bot communication (e.g., Prime <-> Nova).
+Designed for fast cross-bot communication and integration testing.
 
 Outputs matching messages as JSONL, followed by a cursor line.
 Use the cursor as --after on the next call to avoid missing messages.
 
 Usage:
-    wait_for_message.py <channel_id> [options]
+    python -m discordquery wait <channel_id> [options]
 
 Examples:
     # Wait for any new message after a specific message ID
-    wait_for_message.py 123456789 --after 987654321
+    python -m discordquery wait 123456789 --after 987654321
 
-    # Chain calls with cursor (never miss messages):
-    #   msg=$(python wait_for_message.py 123 --after 456)
+    # Chain calls with cursor:
+    #   msg=$(python -m discordquery wait 123 --after 456)
     #   cursor=$(echo "$msg" | tail -1 | jq -r .cursor)
-    #   python wait_for_message.py 123 --after $cursor
+    #   python -m discordquery wait 123 --after $cursor
 
     # Wait for next message (auto-detects latest as baseline)
-    wait_for_message.py 123456789
+    python -m discordquery wait 123456789
 """
+
+from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from typing import Any
 
-import httpx
-from dotenv import load_dotenv
-
-from axi.discord_rest import api_get, get_token, make_client
-
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+from discordquery.client import DiscordClient
 
 DEFAULT_TIMEOUT = 120
-POLL_INTERVAL = 2.0  # seconds between polls
+POLL_INTERVAL = 2.0
 
 
-def get_latest_message_id(client: httpx.Client, channel_id: str) -> str | None:
+def get_latest_message_id(client: DiscordClient, channel_id: str) -> str | None:
     """Get the ID of the most recent message in a channel."""
-    messages = api_get(client, f"/channels/{channel_id}/messages", {"limit": 1})
+    messages = client.get_messages(channel_id, limit=1)
     if messages:
         return messages[0]["id"]
     return None
 
 
-def format_message(msg: dict[str, Any]) -> str:
-    """Format a message for output."""
+def format_wait_message(msg: dict[str, Any]) -> str:
+    """Format a message for wait output."""
     ts = msg.get("timestamp", "")
     author = msg.get("author", {})
     return json.dumps(
@@ -65,13 +60,13 @@ def format_message(msg: dict[str, Any]) -> str:
 
 
 def is_system_message(msg: dict[str, Any]) -> bool:
-    """Check if a message is a bot system message."""
+    """Check if a message is a bot system message (prefixed with *System:*)."""
     content = msg.get("content", "")
     return content.startswith("*System:*")
 
 
 def wait_for_messages(
-    client: httpx.Client,
+    client: DiscordClient,
     channel_id: str,
     after_id: str,
     timeout: float,
@@ -89,11 +84,7 @@ def wait_for_messages(
     cursor = after_id
 
     while time.monotonic() < deadline:
-        messages = api_get(
-            client,
-            f"/channels/{channel_id}/messages",
-            {"after": after_id, "limit": 100},
-        )
+        messages = client.get_messages(channel_id, limit=100, after=after_id)
 
         if messages:
             # Track the highest ID seen (Discord returns newest-first)
@@ -115,8 +106,7 @@ def wait_for_messages(
             if matching:
                 return matching, cursor
 
-            # Messages exist but all filtered — advance baseline so we
-            # don't re-fetch the same filtered messages every poll
+            # Messages exist but all filtered — advance baseline
             after_id = cursor
 
         remaining = deadline - time.monotonic()
@@ -127,50 +117,43 @@ def wait_for_messages(
     return [], cursor
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the wait CLI."""
     parser = argparse.ArgumentParser(
         description="Wait for new messages in a Discord channel.",
     )
     parser.add_argument("channel_id", help="Discord channel ID to watch.")
+    parser.add_argument("--after", help="Wait for messages after this message ID.")
     parser.add_argument(
-        "--after",
-        help="Wait for messages after this message ID. If omitted, uses the latest message.",
+        "--timeout", type=float, default=DEFAULT_TIMEOUT, help=f"Max seconds to wait (default {DEFAULT_TIMEOUT})."
     )
     parser.add_argument(
-        "--timeout",
-        type=float,
-        default=DEFAULT_TIMEOUT,
-        help=f"Max seconds to wait (default {DEFAULT_TIMEOUT}).",
+        "--ignore-author-id", action="append", default=[], help="Ignore messages from this author ID (repeatable)."
     )
     parser.add_argument(
-        "--ignore-author-id",
-        action="append",
-        default=[],
-        help="Ignore messages from this author ID (can be repeated).",
+        "--include-system", action="store_true", help="Include system messages (default: skip *System:* messages)."
     )
     parser.add_argument(
-        "--include-system",
-        action="store_true",
-        help="Include system messages (default: skip *System:* messages).",
+        "--poll-interval", type=float, default=POLL_INTERVAL, help=f"Seconds between polls (default {POLL_INTERVAL})."
     )
-    parser.add_argument(
-        "--poll-interval",
-        type=float,
-        default=POLL_INTERVAL,
-        help=f"Seconds between polls (default {POLL_INTERVAL}).",
-    )
-    parser.add_argument(
-        "--no-cursor",
-        action="store_true",
-        help="Don't emit cursor line at end of output.",
-    )
+    parser.add_argument("--no-cursor", action="store_true", help="Don't emit cursor line at end of output.")
+    return parser
 
-    args = parser.parse_args()
-    token = get_token()
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    import os
+
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        print("Error: DISCORD_TOKEN environment variable not set.", file=sys.stderr)
+        sys.exit(1)
+
     ignore_ids = set(args.ignore_author_id)
 
-    with make_client(token, timeout=10.0) as client:
-        # Determine baseline message ID
+    with DiscordClient(token, timeout=10.0) as client:
         after_id = args.after
         if not after_id:
             after_id = get_latest_message_id(client, args.channel_id)
@@ -190,7 +173,7 @@ def main():
 
         if messages:
             for msg in messages:
-                print(format_message(msg))
+                print(format_wait_message(msg))
             if not args.no_cursor:
                 print(json.dumps({"cursor": cursor}))
         else:

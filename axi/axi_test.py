@@ -29,10 +29,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
 
-import httpx
 from dotenv import dotenv_values
 
-from axi.discord_rest import API_BASE, api_get
+from discordquery import DiscordClient
 
 TESTS_DIR = "/home/ubuntu/axi-tests"
 CONFIG_PATH = os.path.expanduser("~/.config/axi/test-config.json")
@@ -253,7 +252,9 @@ def _health_check(slots: dict[str, Any], config: dict[str, Any]) -> None:
         print(f"Cleaned up orphaned reservation: '{name}' (worktree removed)")
 
 
-def _find_free_guild(slots: dict[str, Any], config: dict[str, Any], instance_name: str, explicit_guild: str | None) -> str | None:
+def _find_free_guild(
+    slots: dict[str, Any], config: dict[str, Any], instance_name: str, explicit_guild: str | None
+) -> str | None:
     """Find a free guild whose bot token is not in use. Caller must hold slot lock."""
     used_tokens: set[str] = set()
     for name, slot in slots.items():
@@ -355,7 +356,12 @@ def _try_reserve(config: dict[str, Any], name: str, instance_path: str, explicit
 
 
 def _wait_and_reserve(
-    config: dict[str, Any], name: str, instance_path: str, explicit_guild: str | None, timeout: int, poll_interval: int = 10
+    config: dict[str, Any],
+    name: str,
+    instance_path: str,
+    explicit_guild: str | None,
+    timeout: int,
+    poll_interval: int = 10,
 ) -> str:
     """Poll until a slot is available and reserve it atomically."""
     deadline = time.monotonic() + timeout
@@ -722,64 +728,6 @@ def cmd_list(args: argparse.Namespace) -> None:
 # --- Discord API helpers ---
 
 
-
-def api_post(client: httpx.Client, path: str, json_data: dict[str, Any]) -> Any:
-    """POST with rate-limit retry."""
-    for attempt in range(3):
-        resp = client.post(path, json=json_data)
-        if resp.status_code in (200, 201):
-            return resp.json()
-        if resp.status_code == 429:
-            retry_after = float(resp.json().get("retry_after", 1.0))
-            time.sleep(retry_after)
-            continue
-        if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2**attempt)
-            continue
-        print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
-        sys.exit(1)
-    print("Error: Exhausted retries.", file=sys.stderr)
-    sys.exit(1)
-
-
-def api_patch(client: httpx.Client, path: str, json_data: dict[str, Any]) -> Any:
-    """PATCH with rate-limit retry."""
-    for attempt in range(3):
-        resp = client.patch(path, json=json_data)
-        if resp.status_code in (200, 204):
-            return resp.json() if resp.status_code == 200 else None
-        if resp.status_code == 429:
-            retry_after = float(resp.json().get("retry_after", 1.0))
-            time.sleep(retry_after)
-            continue
-        if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2**attempt)
-            continue
-        print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
-        sys.exit(1)
-    print("Error: Exhausted retries.", file=sys.stderr)
-    sys.exit(1)
-
-
-def api_delete(client: httpx.Client, path: str):
-    """DELETE with rate-limit retry."""
-    for attempt in range(3):
-        resp = client.delete(path)
-        if resp.status_code in (200, 204):
-            return
-        if resp.status_code == 429:
-            retry_after = float(resp.json().get("retry_after", 1.0))
-            time.sleep(retry_after)
-            continue
-        if resp.status_code >= 500 and attempt < 2:
-            time.sleep(2**attempt)
-            continue
-        print(f"Error: Discord API {resp.status_code}: {resp.text}", file=sys.stderr)
-        sys.exit(1)
-    print("Error: Exhausted retries.", file=sys.stderr)
-    sys.exit(1)
-
-
 def _get_prime_env(main_repo: str) -> dict[str, str | None]:
     """Read Prime bot's .env for Discord token and guild ID."""
     env_path = os.path.join(main_repo, ".env")
@@ -792,10 +740,10 @@ def _normalize_channel_name(name: str) -> str:
     return re.sub(r"[^a-z0-9\-_]", "", name)
 
 
-def _find_channel_by_name(client: httpx.Client, guild_id: str, name: str) -> dict[str, Any] | None:
+def _find_channel_by_name(client: DiscordClient, guild_id: str, name: str) -> dict[str, Any] | None:
     """Find a text channel by name in the Active category."""
     normalized = _normalize_channel_name(name)
-    channels = api_get(client, f"/guilds/{guild_id}/channels")
+    channels: list[dict[str, Any]] = client.get(f"/guilds/{guild_id}/channels")
     # Find Active category ID
     active_cat_id = None
     for ch in channels:
@@ -812,18 +760,18 @@ def _find_channel_by_name(client: httpx.Client, guild_id: str, name: str) -> dic
     return None
 
 
-def _find_killed_category(client: httpx.Client, guild_id: str) -> str | None:
+def _find_killed_category(client: DiscordClient, guild_id: str) -> str | None:
     """Find the Killed category ID in a guild."""
-    channels = api_get(client, f"/guilds/{guild_id}/channels")
+    channels: list[dict[str, Any]] = client.get(f"/guilds/{guild_id}/channels")
     for ch in channels:
         if ch.get("type") == 4 and ch.get("name", "").lower() == "killed":
             return ch["id"]
     return None
 
 
-def find_master_channel(client: httpx.Client, guild_id: str) -> str:
+def find_master_channel(client: DiscordClient, guild_id: str) -> str:
     """Find the axi-master channel (or first text channel in Active category)."""
-    channels = api_get(client, f"/guilds/{guild_id}/channels")
+    channels: list[dict[str, Any]] = client.get(f"/guilds/{guild_id}/channels")
 
     # Look for channel named "axi-master"
     for ch in channels:
@@ -895,15 +843,11 @@ def cmd_msg(args: argparse.Namespace) -> None:
 
     sender_token = get_sender_token()
 
-    with httpx.Client(
-        base_url=API_BASE,
-        headers={"Authorization": f"Bot {sender_token}"},
-        timeout=httpx.Timeout(10.0),
-    ) as client:
+    with DiscordClient(sender_token, timeout=10.0) as client:
         channel_id = find_master_channel(client, guild_id)
 
         # Send message
-        sent = api_post(client, f"/channels/{channel_id}/messages", {"content": message})
+        sent = client.post(f"/channels/{channel_id}/messages", json={"content": message})
         sent_id = sent["id"]
         print(f"Sent: {message}")
         print(f"Waiting for response (timeout: {timeout}s)...\n")
@@ -914,11 +858,7 @@ def cmd_msg(args: argparse.Namespace) -> None:
         collected: list[dict[str, Any]] = []
 
         while time.monotonic() < deadline:
-            messages = api_get(
-                client,
-                f"/channels/{channel_id}/messages",
-                {"after": after_id, "limit": 100},
-            )
+            messages = client.get_messages(channel_id, limit=100, after=after_id)
 
             if messages:
                 # Update cursor to highest ID (newest first from API)
@@ -1203,19 +1143,15 @@ def cmd_clean(args: argparse.Namespace) -> None:
         token = prime_env.get("DISCORD_TOKEN")
         guild_id = prime_env.get("DISCORD_GUILD_ID")
         if token and guild_id:
-            with httpx.Client(
-                base_url=API_BASE,
-                headers={"Authorization": f"Bot {token}"},
-                timeout=httpx.Timeout(10.0),
-            ) as client:
+            with DiscordClient(token, timeout=10.0) as client:
                 ch = _find_channel_by_name(client, guild_id, name)
                 if ch:
                     killed_cat = _find_killed_category(client, guild_id)
                     if killed_cat:
-                        api_patch(client, f"/channels/{ch['id']}", {"parent_id": killed_cat})
+                        client.request("PATCH", f"/channels/{ch['id']}", json={"parent_id": killed_cat})
                         print(f"Moved channel #{ch['name']} to Killed")
                     else:
-                        api_delete(client, f"/channels/{ch['id']}")
+                        client.request("DELETE", f"/channels/{ch['id']}")
                         print(f"Deleted channel #{ch['name']}")
                 else:
                     print(f"No Discord channel found for '{name}'")

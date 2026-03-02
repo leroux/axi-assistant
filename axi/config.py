@@ -42,14 +42,13 @@ __all__ = [
     "SHOW_AWAITING_INPUT",
     "USAGE_HISTORY_PATH",
     "VALID_MODELS",
-    "discord_request",
+    "discord_client",
     "get_model",
     "intents",
     "log",
     "set_model",
 ]
 
-import asyncio
 import json
 import logging
 import os
@@ -60,7 +59,6 @@ from logging.handlers import RotatingFileHandler
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -272,25 +270,6 @@ KILLED_CATEGORY_NAME = "Killed"
 # Discord REST API client
 # ---------------------------------------------------------------------------
 
-_discord_api = httpx.AsyncClient(
-    base_url="https://discord.com/api/v10",
-    headers={"Authorization": f"Bot {DISCORD_TOKEN}"},
-    timeout=15.0,
-)
+from discordquery import AsyncDiscordClient
 
-
-async def discord_request(method: str, path: str, **kwargs: Any) -> httpx.Response:
-    """Make a Discord API request with rate-limit retry."""
-    resp: httpx.Response | None = None
-    for _attempt in range(3):
-        resp = await _discord_api.request(method, path, **kwargs)
-        if resp.status_code == 429:
-            retry_after = resp.json().get("retry_after", 1.0)
-            log.warning("Discord API rate limited on %s %s, retrying after %.1fs", method, path, retry_after)
-            await asyncio.sleep(retry_after)
-            continue
-        resp.raise_for_status()
-        return resp
-    assert resp is not None
-    resp.raise_for_status()
-    return resp
+discord_client = AsyncDiscordClient(DISCORD_TOKEN)

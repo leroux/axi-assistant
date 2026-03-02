@@ -114,6 +114,7 @@ def find_session_by_question_message(message_id: int) -> AgentSession | None:
             return session
     return None
 
+
 # Bridge connection — initialized in on_ready(), used by wake_agent/sleep_agent
 bridge_conn: BridgeConnection | None = None
 # Adapted connection for claudewire (wraps bridge_conn)
@@ -204,7 +205,8 @@ def drain_sdk_buffer(session: AgentSession) -> int:
         return 0
 
     client = session.client
-    assert client._query is not None  # narrowing: getattr check above guarantees this  # pyright: ignore[reportPrivateUsage]
+    # narrowing: getattr check above guarantees this
+    assert client._query is not None  # pyright: ignore[reportPrivateUsage]
     receive_stream = client._query._message_receive  # pyright: ignore[reportPrivateUsage]
     drained: list[dict[str, Any]] = []
     while True:
@@ -344,17 +346,12 @@ async def _get_or_create_exceptions_channel() -> str | None:
         return _exceptions_channel_id
     try:
         guild_id = str(config.DISCORD_GUILD_ID)
-        resp = await config.discord_request("GET", f"/guilds/{guild_id}/channels")
-        for ch in resp.json():
-            if ch.get("name") == "exceptions" and ch.get("type") == 0:
-                _exceptions_channel_id = ch["id"]
-                return _exceptions_channel_id
-        resp = await config.discord_request(
-            "POST",
-            f"/guilds/{guild_id}/channels",
-            json={"name": "exceptions", "type": 0},
-        )
-        _exceptions_channel_id = resp.json()["id"]
+        ch = await config.discord_client.find_channel(guild_id, "exceptions")
+        if ch:
+            _exceptions_channel_id = ch["id"]
+            return _exceptions_channel_id
+        created = await config.discord_client.create_channel(guild_id, "exceptions")
+        _exceptions_channel_id = created["id"]
         log.info("Created #exceptions channel (id=%s)", _exceptions_channel_id)
         return _exceptions_channel_id
     except Exception:
@@ -370,11 +367,7 @@ async def send_to_exceptions(message: str) -> bool:
         ch_id = await _get_or_create_exceptions_channel()
         if ch_id is None:
             return False
-        await config.discord_request(
-            "POST",
-            f"/channels/{ch_id}/messages",
-            json={"content": message[:2000]},
-        )
+        await config.discord_client.send_message(ch_id, message[:2000])
         return True
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
@@ -392,21 +385,7 @@ async def send_to_exceptions(message: str) -> bool:
 # Message splitting / sending
 # ---------------------------------------------------------------------------
 
-
-def split_message(text: str, limit: int = 2000) -> list[str]:
-    """Split text into chunks that fit within Discord's message limit."""
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    while len(text) > limit:
-        split_at = text.rfind("\n", 0, limit)
-        if split_at == -1:
-            split_at = limit
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    if text:
-        chunks.append(text)
-    return chunks
+from discordquery import split_message
 
 
 async def send_long(channel: TextChannel, text: str) -> None:
@@ -457,10 +436,7 @@ def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None 
     worktrees = os.path.realpath(config.BOT_WORKTREES_DIR)
     bot_dir = os.path.realpath(config.BOT_DIR)
 
-    is_code_agent = (
-        allowed in (bot_dir, worktrees)
-        or allowed.startswith((bot_dir + os.sep, worktrees + os.sep))
-    )
+    is_code_agent = allowed in (bot_dir, worktrees) or allowed.startswith((bot_dir + os.sep, worktrees + os.sep))
     bases = [allowed, user_data]
     if is_code_agent:
         bases.append(worktrees)
@@ -547,8 +523,8 @@ async def _handle_exit_plan_mode(
 
     channel_id = session.discord_channel_id
 
-    async def _send_plan_msg(content: str) -> httpx.Response:
-        return await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
+    async def _send_plan_msg(content: str) -> None:
+        await config.discord_client.send_message(channel_id, content)
 
     plan_content = (tool_input.get("plan") or "").strip() or None
 
@@ -571,35 +547,28 @@ async def _handle_exit_plan_mode(
             plan_bytes = plan_content.encode("utf-8")
             heuristic_note = (
                 "\n*(Plan recovered from disk via heuristic — Claude Code bug omitted it from tool input)*"
-                if used_heuristic else ""
+                if used_heuristic
+                else ""
             )
-            await config.discord_request(
-                "POST", f"/channels/{channel_id}/messages",
-                data={"content": header + heuristic_note},
-                files={"files[0]": ("plan.txt", plan_bytes)},
-            )
+            await config.discord_client.send_file(channel_id, "plan.txt", plan_bytes, content=header + heuristic_note)
         else:
             await _send_plan_msg(
                 f"{header}\n\n*(Plan file not found \u2014 the agent should have described the plan in its messages above.)*"
             )
 
-        resp = await _send_plan_msg(
-            f"React with \u2705 to approve or \u274c to reject, or type feedback to revise the plan. {_user_mentions()}"
+        resp = await config.discord_client.send_message(
+            channel_id,
+            f"React with \u2705 to approve or \u274c to reject, or type feedback to revise the plan. {_user_mentions()}",
         )
-        approval_msg_id = resp.json()["id"]
+        approval_msg_id = resp["id"]
 
         # Pre-react with approval/rejection emojis so the user can click them
         for emoji in ("\u2705", "\u274c"):
-            encoded = emoji.encode("utf-8").decode("utf-8")
-            await config.discord_request(
-                "PUT", f"/channels/{channel_id}/messages/{approval_msg_id}/reactions/{encoded}/@me",
-            )
+            await config.discord_client.add_reaction(channel_id, approval_msg_id, emoji)
         session.plan_approval_message_id = int(approval_msg_id)
     except Exception:
         log.exception("_handle_exit_plan_mode: failed to post plan to Discord \u2014 denying")
-        return PermissionResultDeny(
-            message="Could not post plan to Discord for approval. Try again."
-        )
+        return PermissionResultDeny(message="Could not post plan to Discord for approval. Try again.")
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -616,9 +585,7 @@ async def _handle_exit_plan_mode(
     # Remove the unchosen reaction so the result is visually clear
     remove_emoji = "\u274c" if result.get("approved") else "\u2705"
     try:
-        await config.discord_request(
-            "DELETE", f"/channels/{channel_id}/messages/{approval_msg_id}/reactions/{remove_emoji}/@me",
-        )
+        await config.discord_client.remove_reaction(channel_id, approval_msg_id, remove_emoji)
     except Exception:
         log.debug("Failed to remove reaction from plan approval message", exc_info=True)
 
@@ -644,7 +611,17 @@ async def _handle_exit_plan_mode(
 # ---------------------------------------------------------------------------
 
 # Keycap emoji for options 1-9
-_NUMBER_EMOJI = ["1\ufe0f\u20e3", "2\ufe0f\u20e3", "3\ufe0f\u20e3", "4\ufe0f\u20e3", "5\ufe0f\u20e3", "6\ufe0f\u20e3", "7\ufe0f\u20e3", "8\ufe0f\u20e3", "9\ufe0f\u20e3"]
+_NUMBER_EMOJI = [
+    "1\ufe0f\u20e3",
+    "2\ufe0f\u20e3",
+    "3\ufe0f\u20e3",
+    "4\ufe0f\u20e3",
+    "5\ufe0f\u20e3",
+    "6\ufe0f\u20e3",
+    "7\ufe0f\u20e3",
+    "8\ufe0f\u20e3",
+    "9\ufe0f\u20e3",
+]
 _CUSTOM_EMOJI = "\U0001f4dd"  # 📝 for "Other"
 
 
@@ -739,7 +716,7 @@ async def _handle_ask_user_question(
 
     try:
         header = f"\u2753 **{session.name}** is asking you a question {_user_mentions()}"
-        await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": header})
+        await config.discord_client.send_message(channel_id, header)
     except Exception:
         log.exception("_handle_ask_user_question: failed to post header — denying")
         return PermissionResultDeny(message="Could not post question to Discord.")
@@ -748,8 +725,8 @@ async def _handle_ask_user_question(
         # Post the question and get message ID
         try:
             formatted = _format_question_for_discord(q, i, len(questions))
-            resp = await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": formatted})
-            msg_id = int(resp.json()["id"])
+            msg = await config.discord_client.send_message(channel_id, formatted)
+            msg_id = int(msg["id"])
         except Exception:
             log.exception("_handle_ask_user_question: failed to post question %d — denying", i)
             return PermissionResultDeny(message="Could not post question to Discord.")
@@ -758,8 +735,7 @@ async def _handle_ask_user_question(
         options = q.get("options", [])
         for j in range(min(len(options), len(_NUMBER_EMOJI))):
             try:
-                encoded = _NUMBER_EMOJI[j].encode("utf-8").decode("utf-8")
-                await config.discord_request("PUT", f"/channels/{channel_id}/messages/{msg_id}/reactions/{encoded}/@me")
+                await config.discord_client.add_reaction(channel_id, msg_id, _NUMBER_EMOJI[j])
             except Exception:
                 log.debug("Failed to add reaction %d to question message", j + 1)
 
@@ -842,23 +818,17 @@ async def _post_todo_list(session: AgentSession, tool_input: dict[str, Any]) -> 
     _save_todo_items(session.name, todos)
     body = f"**Todo List**\n{format_todo_list(todos)}"
     channel_id = session.discord_channel_id
+    if channel_id is None:
+        return
 
     try:
         if session.todo_message_id is not None:
             # Edit existing message
-            await config.discord_request(
-                "PATCH",
-                f"/channels/{channel_id}/messages/{session.todo_message_id}",
-                json={"content": body},
-            )
+            await config.discord_client.edit_message(channel_id, session.todo_message_id, body)
         else:
             # Create new message
-            resp = await config.discord_request(
-                "POST",
-                f"/channels/{channel_id}/messages",
-                json={"content": body},
-            )
-            msg_id = resp.json().get("id")
+            msg = await config.discord_client.send_message(channel_id, body)
+            msg_id = msg.get("id")
             if msg_id is not None:
                 session.todo_message_id = int(msg_id)
                 # Persist the new message ID
@@ -894,9 +864,7 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel: Te
                     log.warning("Failed to notify channel %s about rate limit", ch.id)
 
     def _schedule_expiry(delay: float) -> None:
-        fire_and_forget(
-            notify_rate_limit_expired(delay, get_master_channel, send_system)
-        )
+        fire_and_forget(notify_rate_limit_expired(delay, get_master_channel, send_system))
 
     await _rl_handle_rate_limit(error_text, _broadcast, _schedule_expiry)
 
@@ -1071,7 +1039,9 @@ async def _ensure_awake_slot(requesting_agent: str) -> bool:
         )
         evicted = await _evict_idle_agent(exclude=requesting_agent)
         if not evicted:
-            log.warning("Cannot free awake slot for '%s' \u2014 all %d slots busy", requesting_agent, config.MAX_AWAKE_AGENTS)
+            log.warning(
+                "Cannot free awake slot for '%s' \u2014 all %d slots busy", requesting_agent, config.MAX_AWAKE_AGENTS
+            )
             return False
         awake = count_awake_agents()
     return True
@@ -1196,7 +1166,9 @@ async def wake_agent(session: AgentSession) -> None:
                 prompt_changed = True
                 log.info(
                     "System prompt changed for '%s' (old=%s, new=%s)",
-                    session.name, session.system_prompt_hash, current_hash,
+                    session.name,
+                    session.system_prompt_hash,
+                    current_hash,
                 )
             session.system_prompt_hash = current_hash
 
@@ -1270,9 +1242,7 @@ async def end_session(name: str) -> None:
     log.info("Session '%s' ended", name)
 
 
-async def _rebuild_session(
-    name: str, *, cwd: str | None = None, session_id: str | None = None
-) -> AgentSession:
+async def _rebuild_session(name: str, *, cwd: str | None = None, session_id: str | None = None) -> AgentSession:
     """End an existing session and create a fresh sleeping AgentSession.
 
     Preserves system prompt, channel mapping, and MCP servers from the old session.
@@ -1282,7 +1252,9 @@ async def _rebuild_session(
     old_channel_id = session.discord_channel_id if session else None
     old_mcp = getattr(session, "mcp_servers", None)
     resolved_cwd = cwd or old_cwd
-    prompt = session.system_prompt if session and session.system_prompt else make_spawned_agent_system_prompt(resolved_cwd)
+    prompt = (
+        session.system_prompt if session and session.system_prompt else make_spawned_agent_system_prompt(resolved_cwd)
+    )
     prompt_hash = session.system_prompt_hash if session and session.system_prompt_hash else compute_prompt_hash(prompt)
     await end_session(name)
     new_session = AgentSession(
@@ -1381,7 +1353,10 @@ def _update_channel_topic(session: AgentSession, channel: TextChannel | None = N
     if not ch or not isinstance(ch, TextChannel):
         return
     desired_topic = format_channel_topic(
-        session.cwd, session.session_id, session.system_prompt_hash, session.todo_message_id,
+        session.cwd,
+        session.session_id,
+        session.system_prompt_hash,
+        session.todo_message_id,
         agent_type=session.agent_type,
     )
     if ch.topic != desired_topic:
@@ -1441,7 +1416,9 @@ async def _post_model_warning(session: AgentSession) -> None:
     channel = _bot.get_channel(session.discord_channel_id)
     if channel and isinstance(channel, TextChannel):
         try:
-            await channel.send(f"\u26a0\ufe0f Running on **{model}** \u2014 switch to opus with `/model opus` for best results.")
+            await channel.send(
+                f"\u26a0\ufe0f Running on **{model}** \u2014 switch to opus with `/model opus` for best results."
+            )
         except Exception:
             log.warning("Failed to post model warning for '%s'", session.name, exc_info=True)
 
@@ -1487,7 +1464,9 @@ async def _receive_response_safe(session: AgentSession):
 _KNOWN_ENGINE_TYPES = {"assistant", "stream_event", "result", "system"}
 
 
-def _parse_flowcoder_message(data: dict[str, Any]) -> AssistantMessage | StreamEvent | ResultMessage | SystemMessage | None:
+def _parse_flowcoder_message(
+    data: dict[str, Any],
+) -> AssistantMessage | StreamEvent | ResultMessage | SystemMessage | None:
     """Parse a flowcoder engine JSON message into an SDK typed object.
 
     Returns None for message types not handled by SDK (e.g. rate_limit_event).
@@ -1546,7 +1525,15 @@ def extract_tool_preview(tool_name: str, raw_json: str) -> str | None:
 class _StreamCtx:
     """Mutable state for a single stream_response_to_channel invocation."""
 
-    __slots__ = ("flush_count", "hit_rate_limit", "hit_transient_error", "msg_total", "text_buffer", "tool_input_json", "typing_stopped")
+    __slots__ = (
+        "flush_count",
+        "hit_rate_limit",
+        "hit_transient_error",
+        "msg_total",
+        "text_buffer",
+        "tool_input_json",
+        "typing_stopped",
+    )
 
     def __init__(self) -> None:
         self.text_buffer: str = ""
@@ -1564,7 +1551,14 @@ async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChann
     if not text.strip():
         return
     ctx.flush_count += 1
-    log.info("FLUSH[%s] #%d reason=%s len=%d text=%r", session.name, ctx.flush_count, reason, len(text.strip()), text.strip()[:120])
+    log.info(
+        "FLUSH[%s] #%d reason=%s len=%d text=%r",
+        session.name,
+        ctx.flush_count,
+        reason,
+        len(text.strip()),
+        text.strip()[:120],
+    )
     await send_long(channel, text.lstrip())
 
 
@@ -1745,7 +1739,10 @@ async def _handle_result_message(
         if session.agent_log:
             session.agent_log.info(
                 "FLOWCHART_RESULT: cost=$%s turns=%d duration=%dms error=%s",
-                msg.total_cost_usd, msg.num_turns, msg.duration_ms, msg.is_error,
+                msg.total_cost_usd,
+                msg.num_turns,
+                msg.duration_ms,
+                msg.is_error,
             )
         return
 
@@ -1807,7 +1804,9 @@ async def _handle_system_message(
         data = msg.data.get("data", {})
         log.info(
             "Flowchart started for '%s': command=%s blocks=%s",
-            session.name, data.get("command"), data.get("block_count"),
+            session.name,
+            data.get("command"),
+            data.get("block_count"),
         )
 
     elif msg.subtype == "flowchart_complete":
@@ -1841,7 +1840,11 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
             ctx.msg_total += 1
             if session.agent_log:
                 session.agent_log.debug(
-                    "MSG_SEQ[%s][%d] type=%s buf_len=%d", stream_id, ctx.msg_total, type(msg).__name__, len(ctx.text_buffer)
+                    "MSG_SEQ[%s][%d] type=%s buf_len=%d",
+                    stream_id,
+                    ctx.msg_total,
+                    type(msg).__name__,
+                    len(ctx.text_buffer),
                 )
 
             await _drain_stderr_to_channel(session, channel)
@@ -1925,7 +1928,9 @@ async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool
 
         try:
             assert session.client is not None
-            get_stdio_logger(session.name, config.LOG_DIR).debug(">>> STDIN  %s", json.dumps({"type": "retry", "content": "Continue from where you left off."}))
+            get_stdio_logger(session.name, config.LOG_DIR).debug(
+                ">>> STDIN  %s", json.dumps({"type": "retry", "content": "Continue from where you left off."})
+            )
             await session.client.query(as_stream("Continue from where you left off."))
         except Exception:
             log.exception("Agent '%s' retry query failed", session.name)
@@ -1976,7 +1981,9 @@ async def handle_query_timeout(session: AgentSession, channel: TextChannel) -> N
     new_session = await _rebuild_session(session.name, session_id=old_session_id)
 
     if old_session_id:
-        await send_system(channel, f"Agent **{new_session.name}** timed out and was recovered (sleeping). Context preserved.")
+        await send_system(
+            channel, f"Agent **{new_session.name}** timed out and was recovered (sleeping). Context preserved."
+        )
     else:
         await send_system(channel, f"Agent **{new_session.name}** timed out and was reset (sleeping). Context lost.")
 
@@ -2074,7 +2081,9 @@ async def spawn_agent(
 
     agent_label = "flowcoder" if agent_type == "flowcoder" else "claude code"
     if resume:
-        await send_system(channel, f"Resuming **{agent_label}** agent **{name}** (session `{resume[:8]}\u2026`) in `{cwd}`...")
+        await send_system(
+            channel, f"Resuming **{agent_label}** agent **{name}** (session `{resume[:8]}\u2026`) in `{cwd}`..."
+        )
     else:
         await send_system(channel, f"Spawning **{agent_label}** agent **{name}** in `{cwd}`...")
 
@@ -2190,7 +2199,9 @@ async def run_initial_prompt(session: AgentSession, prompt: MessageContent, chan
 
     except Exception:
         log.exception("Error running initial prompt for agent '%s'", session.name)
-        await send_system(channel, f"Agent **{session.name}** encountered an error during initial task. {_user_mentions()}")
+        await send_system(
+            channel, f"Agent **{session.name}** encountered an error during initial task. {_user_mentions()}"
+        )
 
     await process_message_queue(session)
 
@@ -2611,10 +2622,12 @@ async def _auto_approve_control(proc: Any, raw: dict[str, Any]) -> None:
     """Auto-approve a control_request from the flowcoder engine."""
     request = raw.get("request", raw)
     request_id = request.get("request_id", "")
-    await proc.send({
-        "type": "control_response",
-        "response": {"request_id": request_id, "allowed": True},
-    })
+    await proc.send(
+        {
+            "type": "control_response",
+            "response": {"request_id": request_id, "allowed": True},
+        }
+    )
 
 
 async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChannel) -> None:
@@ -2729,10 +2742,12 @@ async def _run_and_stream_flowcoder(
     # The engine is a persistent proxy — send the flowchart command as a
     # user message with a slash command so the engine intercepts it.
     slash_content = f"/{command}" + (f" {args}" if args else "")
-    await proc.send({
-        "type": "user",
-        "message": {"content": slash_content},
-    })
+    await proc.send(
+        {
+            "type": "user",
+            "message": {"content": slash_content},
+        }
+    )
     log.info("Sent flowchart command to engine: %s", slash_content)
 
     try:

@@ -184,7 +184,9 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
             try:
                 channel = await agents.get_agent_channel(agent_name)
                 if channel:
-                    await agents.send_system(channel, f"Failed to spawn agent **{agent_name}**. Check logs for details.")
+                    await agents.send_system(
+                        channel, f"Failed to spawn agent **{agent_name}**. Check logs for details."
+                    )
             except Exception:
                 pass
 
@@ -440,17 +442,7 @@ async def discord_send_file(args: McpArgs) -> McpResult:
     try:
         with open(file_path, "rb") as f:
             file_data = f.read()
-        data: dict[str, str] = {}
-        if content:
-            data["content"] = content
-        files = {"files[0]": (filename, file_data)}
-        resp = await config.discord_request(
-            "POST",
-            f"/channels/{channel_id}/messages",
-            data=data,
-            files=files,
-        )
-        msg = resp.json()
+        msg = await config.discord_client.send_file(channel_id, filename, file_data, content=content or None)
         return {"content": [{"type": "text", "text": f"File '{filename}' sent (msg id: {msg['id']})"}]}
     except Exception as e:
         return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
@@ -475,20 +467,7 @@ async def discord_send_file(args: McpArgs) -> McpResult:
 async def discord_list_channels(args: McpArgs) -> McpResult:
     guild_id = args["guild_id"]
     try:
-        resp = await config.discord_request("GET", f"/guilds/{guild_id}/channels")
-        channels: list[dict[str, Any]] = resp.json()
-        # Filter to text channels (type 0) and format
-        # Build category map
-        categories: dict[str, str] = {c["id"]: c["name"] for c in channels if c["type"] == 4}
-        text_channels: list[dict[str, Any]] = [
-            {
-                "id": ch["id"],
-                "name": ch["name"],
-                "category": categories.get(str(ch.get("parent_id", ""))),
-            }
-            for ch in channels
-            if ch["type"] == 0  # GUILD_TEXT
-        ]
+        text_channels = await config.discord_client.list_channels(guild_id)
         return {"content": [{"type": "text", "text": json.dumps(text_channels, indent=2)}]}
     except Exception as e:
         return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
@@ -510,8 +489,7 @@ async def discord_read_messages(args: McpArgs) -> McpResult:
     channel_id = args["channel_id"]
     limit = min(args.get("limit", 20), 100)
     try:
-        resp = await config.discord_request("GET", f"/channels/{channel_id}/messages", params={"limit": limit})
-        messages = resp.json()
+        messages = await config.discord_client.get_messages(channel_id, limit=limit)
         # Messages come newest-first; reverse for chronological order
         messages.reverse()
         formatted: list[str] = []
@@ -556,8 +534,7 @@ async def discord_send_message(args: McpArgs) -> McpResult:
             "is_error": True,
         }
     try:
-        resp = await config.discord_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
-        msg = resp.json()
+        msg = await config.discord_client.send_message(channel_id, content)
         return {"content": [{"type": "text", "text": f"Message sent (id: {msg['id']})"}]}
     except Exception as e:
         return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
