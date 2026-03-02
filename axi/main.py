@@ -556,16 +556,8 @@ async def before_check_schedules() -> None:
 
 
 async def _interrupt_agent(session: AgentSession) -> None:
-    """Send interrupt signal to an agent via procmux and/or SDK client."""
-    if agents.procmux_conn and agents.procmux_conn.is_alive:
-        result = await agents.procmux_conn.send_command("interrupt", name=session.name)
-        if not result.ok:
-            log.warning("Bridge SIGINT for '%s' failed: %s", session.name, result.error)
-    try:
-        if session.client is not None:
-            await session.client.interrupt()
-    except Exception:
-        pass
+    """Send interrupt signal to an agent via SDK and/or procmux bridge."""
+    await agents.interrupt_session(session)
 
 
 # ---------------------------------------------------------------------------
@@ -1303,6 +1295,48 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
                 await agents.process_message(session, slash_content, channel)
 
         agents.fire_and_forget(_run_flowchart())
+        return True
+
+    if cmd == "stop":
+        if session.client is None or not session.query_lock.locked():
+            await agents.send_system(channel, f"Agent **{agent_name}** is not busy.")
+            return True
+
+        try:
+            await _interrupt_agent(session)
+
+            plan_was_active = session.plan_mode
+            if plan_was_active:
+                session.plan_mode = False
+                try:
+                    await session.client.set_permission_mode("default")
+                except Exception:
+                    log.exception("Failed to reset permission mode for '%s' during //stop", agent_name)
+
+            if session.plan_approval_future and not session.plan_approval_future.done():
+                session.plan_approval_future.set_result({"approved": False, "message": "Interrupted by //stop."})
+            session.plan_approval_message_id = None
+
+            if session.question_future and not session.question_future.done():
+                session.question_future.set_result("")
+                session.question_data = None
+                session.question_message_id = None
+
+            cleared = 0
+            while session.message_queue:
+                _, ch_q, dropped_msg = session.message_queue.popleft()
+                await agents.remove_reaction(dropped_msg, "📨")
+                cleared += 1
+
+            parts = [f"Interrupt signal sent to **{agent_name}**."]
+            if cleared:
+                parts.append(f"Cleared {cleared} queued message{'s' if cleared != 1 else ''}.")
+            if plan_was_active:
+                parts.append("Plan mode deactivated.")
+            await agents.send_system(channel, " ".join(parts))
+        except Exception as e:
+            log.exception("Failed to interrupt agent '%s'", agent_name)
+            await agents.send_system(channel, f"Failed to interrupt **{agent_name}**: {e}")
         return True
 
     return False

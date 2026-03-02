@@ -1520,6 +1520,7 @@ class _StreamCtx:
 
     __slots__ = (
         "flush_count",
+        "got_result",
         "hit_rate_limit",
         "hit_transient_error",
         "in_flowchart",
@@ -1533,6 +1534,7 @@ class _StreamCtx:
 
     def __init__(self, live_edit: _LiveEditState | None = None) -> None:
         self.text_buffer: str = ""
+        self.got_result: bool = False  # True once a ResultMessage is received
         self.hit_rate_limit: bool = False
         self.hit_transient_error: str | None = None
         self.typing_stopped: bool = False
@@ -1896,6 +1898,7 @@ async def _handle_result_message(
     ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: ResultMessage, typing_ctx: Any
 ) -> None:
     """Handle a ResultMessage during response streaming."""
+    ctx.got_result = True
     await _hide_thinking(ctx)
     _stop_typing(ctx, typing_ctx)
     if not ctx.hit_rate_limit:
@@ -2076,6 +2079,19 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         span.end()
         return ctx.hit_transient_error
 
+    if not ctx.got_result:
+        # Stream ended without a ResultMessage — the CLI process was killed
+        # (e.g. by /stop) or crashed.  Sleep the agent so the next message
+        # triggers a fresh wake with a new CLI process.
+        if ctx.live_edit is not None and ctx.live_edit.message_id is not None:
+            await _live_edit_finalize(ctx, session)
+        await _flush_text(ctx, session, channel, "post_kill")
+        log.info("STREAM_END[%s] result=killed msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
+        span.set_attributes({"stream.msg_total": ctx.msg_total, "stream.flush_count": ctx.flush_count})
+        span.end()
+        await sleep_agent(session, force=True)
+        return None
+
     # Append response timing to the last chunk
     if session.activity.query_started and (ctx.flush_count > 0 or ctx.text_buffer.strip()):
         elapsed = (datetime.now(UTC) - session.activity.query_started).total_seconds()
@@ -2097,6 +2113,40 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
     otel_context.detach(ctx_token)
     span.end()
     return None
+
+
+# ---------------------------------------------------------------------------
+# Interrupt
+# ---------------------------------------------------------------------------
+
+
+async def interrupt_session(session: AgentSession) -> None:
+    """Kill the CLI process for an agent session.
+
+    For bridge-managed agents (flowcoder): sends a bridge "kill" command which
+    does SIGTERM followed by SIGKILL after 5 seconds.  The process exit
+    propagates as an ExitEvent through the transport, causing the streaming
+    loop to terminate naturally.
+
+    For direct-subprocess agents (claude_code): uses the SDK interrupt with
+    a short timeout.
+
+    Bridge "interrupt" (SIGINT) is NOT used because the flowcoder-engine
+    catches SIGINT and survives it.
+    """
+    if procmux_conn and procmux_conn.is_alive:
+        result = await procmux_conn.send_command("kill", name=session.name)
+        if not result.ok:
+            log.warning("Bridge kill for '%s' failed: %s", session.name, result.error)
+        return
+
+    # Fallback for non-bridge agents: SDK interrupt
+    if session.client is not None:
+        try:
+            async with asyncio.timeout(5):
+                await session.client.interrupt()
+        except (TimeoutError, Exception):
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -2157,32 +2207,13 @@ async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool
 
 
 async def handle_query_timeout(session: AgentSession, channel: TextChannel) -> None:
-    """Handle a query timeout. Try interrupt first, then kill and resume."""
-    log.warning("Query timeout for agent '%s', attempting interrupt", session.name)
+    """Handle a query timeout by killing the CLI and rebuilding the session."""
+    log.warning("Query timeout for agent '%s', killing session", session.name)
 
     try:
-        if procmux_conn and procmux_conn.is_alive:
-            result = await procmux_conn.send_command("interrupt", name=session.name)
-            if not result.ok:
-                log.warning("Bridge SIGINT for '%s' failed: %s", session.name, result.error)
-        try:
-            if session.client is not None:
-                await session.client.interrupt()
-        except Exception:
-            pass
-        async with asyncio.timeout(config.INTERRUPT_TIMEOUT):
-            async for msg in _receive_response_safe(session):
-                if isinstance(msg, ResultMessage):
-                    await _set_session_id(session, msg, channel=channel)
-                    break
-        session.last_activity = datetime.now(UTC)
-        await send_system(
-            channel,
-            f"Agent **{session.name}** timed out and was interrupted. Context preserved.",
-        )
-        return
+        await interrupt_session(session)
     except Exception:
-        log.warning("Interrupt failed for agent '%s', killing and resuming session", session.name)
+        log.exception("interrupt_session failed for '%s'", session.name)
 
     old_session_id = session.session_id
     new_session = await _rebuild_session(session.name, session_id=old_session_id)
@@ -2543,13 +2574,7 @@ async def deliver_inter_agent_message(
             target_session.name,
         )
         try:
-            if procmux_conn and procmux_conn.is_alive:
-                await procmux_conn.send_command("interrupt", name=target_session.name)
-            if target_session.client:
-                try:
-                    await target_session.client.interrupt()
-                except Exception:
-                    pass
+            await interrupt_session(target_session)
         except Exception:
             log.exception(
                 "Failed to interrupt '%s' for inter-agent message (message still queued)",
@@ -2817,6 +2842,7 @@ __all__ = [
     "handle_query_timeout",
     "init",
     "init_shutdown_coordinator",
+    "interrupt_session",
     "is_awake",
     "is_processing",
     "is_rate_limited",
