@@ -13,6 +13,7 @@ __all__ = [
     "ALLOWED_USER_IDS",
     "API_ERROR_BASE_DELAY",
     "API_ERROR_MAX_RETRIES",
+    "AXI_CATEGORY_NAME",
     "AXI_USER_DATA",
     "BOT_DIR",
     "BOT_WORKTREES_DIR",
@@ -291,6 +292,7 @@ API_ERROR_MAX_RETRIES = 3
 API_ERROR_BASE_DELAY = 5  # seconds, doubles each retry
 
 ACTIVE_CATEGORY_NAME = "Active"
+AXI_CATEGORY_NAME = "Axi"
 KILLED_CATEGORY_NAME = "Killed"
 
 # ---------------------------------------------------------------------------

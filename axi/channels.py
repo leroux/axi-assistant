@@ -31,6 +31,7 @@ _tracer = trace.get_tracer(__name__)
 
 _bot: Bot | None = None
 target_guild: discord.Guild | None = None
+axi_category: CategoryChannel | None = None
 active_category: CategoryChannel | None = None
 killed_category: CategoryChannel | None = None
 bot_creating_channels: set[str] = set()
@@ -161,9 +162,9 @@ def _build_category_overwrites(
     return overwrites
 
 
-async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel, CategoryChannel]:
-    """Ensure the guild has Active and Killed categories. Called once during on_ready()."""
-    global target_guild, active_category, killed_category
+async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel, CategoryChannel, CategoryChannel]:
+    """Ensure the guild has Axi, Active, and Killed categories. Called once during on_ready()."""
+    global target_guild, axi_category, active_category, killed_category
     assert _bot is not None
     _tracer.start_span("ensure_guild_infrastructure", attributes={"discord.guild_id": str(config.DISCORD_GUILD_ID)}).end()
 
@@ -174,10 +175,13 @@ async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel,
 
     overwrites = _build_category_overwrites(guild)
 
+    axi_cat = None
     active_cat = None
     killed_cat = None
     for cat in guild.categories:
-        if cat.name == config.ACTIVE_CATEGORY_NAME:
+        if cat.name == config.AXI_CATEGORY_NAME:
+            axi_cat = cat
+        elif cat.name == config.ACTIVE_CATEGORY_NAME:
             active_cat = cat
         elif cat.name == config.KILLED_CATEGORY_NAME:
             killed_cat = cat
@@ -191,6 +195,7 @@ async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel,
         return a == b
 
     for name, cat in [
+        (config.AXI_CATEGORY_NAME, axi_cat),
         (config.ACTIVE_CATEGORY_NAME, active_cat),
         (config.KILLED_CATEGORY_NAME, killed_cat),
     ]:
@@ -202,16 +207,20 @@ async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel,
             log.info("Synced permissions on '%s' category", name)
         else:
             log.info("Permissions already current on '%s' category", name)
-        if name == config.ACTIVE_CATEGORY_NAME:
+        if name == config.AXI_CATEGORY_NAME:
+            axi_cat = cat
+        elif name == config.ACTIVE_CATEGORY_NAME:
             active_cat = cat
         else:
             killed_cat = cat
+    axi_category = axi_cat
     active_category = active_cat
     killed_category = killed_cat
 
+    assert axi_cat is not None
     assert active_cat is not None
     assert killed_cat is not None
-    return guild, active_cat, killed_cat
+    return guild, axi_cat, active_cat, killed_cat
 
 
 # ---------------------------------------------------------------------------

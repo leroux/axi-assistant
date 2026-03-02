@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
@@ -1633,27 +1634,13 @@ async def restart_including_bridge_cmd(interaction: discord.Interaction, force: 
 
 
 # ---------------------------------------------------------------------------
-# Channel creation listener
+# Channel creation / deletion listeners
 # ---------------------------------------------------------------------------
 
 
-@bot.event
-async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
-    """Auto-register agent when a user manually creates a channel in the Active category."""
-    if not isinstance(channel, discord.TextChannel):
-        return
-    if not channels.active_category or channel.category_id != channels.active_category.id:
-        return
-    if channel.name in channels.bot_creating_channels:
-        return
-    if channel.name == agents.normalize_channel_name(config.MASTER_AGENT_NAME):
-        return
-
+def _register_agent_from_channel(channel: TextChannel, cwd: str) -> None:
+    """Register a sleeping agent session for a manually-created channel."""
     agent_name = channel.name
-    _tracer.start_span("on_guild_channel_create", attributes={"agent.name": agent_name, "discord.channel_id": str(channel.id)}).end()
-    cwd = os.path.join(config.AXI_USER_DATA, "agents", agent_name)
-    os.makedirs(cwd, exist_ok=True)
-
     prompt = make_spawned_agent_system_prompt(cwd)
     mcp_servers: dict[str, Any] = {"utils": tools.utils_mcp_server}
     mcp_servers["schedule"] = make_schedule_mcp_server(agent_name, config.SCHEDULES_PATH, cwd)
@@ -1670,18 +1657,136 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
     agents.agents[agent_name] = session
     agents.channel_to_agent[channel.id] = agent_name
 
-    desired_topic = agents.format_channel_topic(cwd, prompt_hash=session.system_prompt_hash)
-    try:
-        await channel.edit(topic=desired_topic)
-    except discord.HTTPException as e:
-        log.warning("Failed to set topic on #%s: %s", agent_name, e)
 
+async def _set_channel_topic(channel: TextChannel, cwd: str, prompt_hash: str | None) -> None:
+    """Set channel topic (fire-and-forget safe)."""
+    desired_topic = agents.format_channel_topic(cwd, prompt_hash=prompt_hash)
+    if channel.topic != desired_topic:
+        try:
+            await channel.edit(topic=desired_topic)
+        except discord.HTTPException as e:
+            log.warning("Failed to set topic on #%s: %s", channel.name, e)
+
+
+async def _handle_active_channel_create(channel: TextChannel) -> None:
+    """Handle a channel created in the Active category — general-purpose agent."""
+    agent_name = channel.name
+    cwd = os.path.join(config.AXI_USER_DATA, "agents", agent_name)
+    os.makedirs(cwd, exist_ok=True)
+
+    _register_agent_from_channel(channel, cwd)
+    session = agents.agents[agent_name]
+
+    agents.fire_and_forget(_set_channel_topic(channel, cwd, session.system_prompt_hash))
     await agents.send_system(
         channel,
         f"Agent **{agent_name}** registered (sleeping). Send a message to wake it.\n"
         f"Working directory: `{cwd}`",
     )
-    log.info("Auto-registered agent '%s' from manually created channel", agent_name)
+    log.info("Auto-registered agent '%s' from manually created Active channel", agent_name)
+
+
+def _create_worktree(name: str) -> str | None:
+    """Create a git worktree for an axi-dev agent. Returns worktree path or None on failure."""
+    worktree_path = os.path.join(config.BOT_WORKTREES_DIR, name)
+
+    if os.path.isdir(worktree_path):
+        # Check if it's already a valid git worktree
+        git_marker = os.path.join(worktree_path, ".git")
+        if os.path.exists(git_marker):
+            log.info("Reusing existing worktree for '%s' at %s", name, worktree_path)
+            return worktree_path
+        # Directory exists but isn't a worktree — conflict
+        log.warning("Directory exists at %s but is not a git worktree", worktree_path)
+        return None
+
+    branch = f"feature/{name}"
+    result = subprocess.run(
+        ["git", "-C", config.BOT_DIR, "worktree", "add", worktree_path, "-b", branch],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        # Branch might already exist, try without -b
+        result = subprocess.run(
+            ["git", "-C", config.BOT_DIR, "worktree", "add", worktree_path, branch],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            log.warning("Failed to create worktree for '%s': %s", name, result.stderr.strip())
+            return None
+        log.info("Created worktree for '%s' at %s (existing branch)", name, worktree_path)
+    else:
+        log.info("Created worktree for '%s' at %s", name, worktree_path)
+
+    return worktree_path
+
+
+async def _handle_axi_channel_create(channel: TextChannel) -> None:
+    """Handle a channel created in the Axi category — codebase dev agent with worktree."""
+    agent_name = channel.name
+    worktree_path = _create_worktree(agent_name)
+
+    if worktree_path is None:
+        await agents.send_system(
+            channel,
+            f"Failed to create worktree for **{agent_name}**. "
+            f"A non-worktree directory may already exist at `{config.BOT_WORKTREES_DIR}/{agent_name}`, "
+            f"or git worktree creation failed. Check logs.",
+        )
+        return
+
+    _register_agent_from_channel(channel, worktree_path)
+    session = agents.agents[agent_name]
+
+    agents.fire_and_forget(_set_channel_topic(channel, worktree_path, session.system_prompt_hash))
+    await agents.send_system(
+        channel,
+        f"Agent **{agent_name}** registered (sleeping) with worktree.\n"
+        f"Working directory: `{worktree_path}`",
+    )
+    log.info("Auto-registered axi-dev agent '%s' from manually created Axi channel", agent_name)
+
+
+@bot.event
+async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
+    """Auto-register agent when a user manually creates a channel in Axi or Active category."""
+    if not isinstance(channel, discord.TextChannel):
+        return
+    if channel.name in channels.bot_creating_channels:
+        return
+    if channel.name == agents.normalize_channel_name(config.MASTER_AGENT_NAME):
+        return
+
+    if channels.axi_category and channel.category_id == channels.axi_category.id:
+        await _handle_axi_channel_create(channel)
+    elif channels.active_category and channel.category_id == channels.active_category.id:
+        await _handle_active_channel_create(channel)
+
+
+@bot.event
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
+    """Clean up agent state when a channel is deleted."""
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    agent_name = agents.channel_to_agent.pop(channel.id, None)
+    if agent_name is None:
+        return
+
+    session = agents.agents.pop(agent_name, None)
+    if session is None:
+        log.info("Channel #%s deleted — removed stale mapping for '%s'", channel.name, agent_name)
+        return
+
+    if agents.is_awake(session):
+        try:
+            await agents.sleep_agent(session, force=True)
+        except Exception:
+            log.exception("Error sleeping agent '%s' during channel deletion", agent_name)
+
+    log.info("Channel #%s deleted — agent '%s' cleaned up (cwd=%s)", channel.name, agent_name, session.cwd)
 
 
 # ---------------------------------------------------------------------------
