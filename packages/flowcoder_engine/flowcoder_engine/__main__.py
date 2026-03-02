@@ -261,10 +261,17 @@ async def main() -> None:
 
 
 def _clean_env() -> dict[str, str]:
-    """Return a copy of os.environ with claude session vars removed."""
+    """Return a copy of os.environ for the inner Claude CLI.
+
+    Strips CLAUDECODE to prevent nested-session rejection, but preserves
+    (or sets) CLAUDE_AGENT_SDK_VERSION and CLAUDE_CODE_ENTRYPOINT so the
+    inner CLI uses the SDK control protocol for tool permissions and MCP.
+    Without these, the CLI auto-denies MCP tool permissions in pipe mode.
+    """
     env = dict(os.environ)
-    for var in ("CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_ENTRYPOINT"):
-        env.pop(var, None)
+    env.pop("CLAUDECODE", None)
+    env.setdefault("CLAUDE_CODE_ENTRYPOINT", "sdk-py")
+    env.setdefault("CLAUDE_AGENT_SDK_VERSION", "flowcoder-engine")
     return env
 
 

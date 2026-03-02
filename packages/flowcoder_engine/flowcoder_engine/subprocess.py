@@ -51,6 +51,7 @@ class ClaudeProcess:
             stderr=DEVNULL,
             env=env,
             cwd=cwd or None,
+            limit=10 * 1024 * 1024,  # 10 MB — Claude stream-json lines can be large
         )
 
     async def write(self, msg: dict[str, Any]) -> None:

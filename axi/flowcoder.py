@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import ClaudeAgentOptions
@@ -55,114 +54,39 @@ def build_engine_cmd(
 
 
 def build_engine_env() -> dict[str, str]:
-    """Build clean env (strip CLAUDECODE/SDK vars)."""
-    return {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_ENTRYPOINT")
-    }
+    """Build env for the flowcoder-engine process.
+
+    Only strips CLAUDECODE (nested-session guard).  The SDK vars are kept
+    so the engine can propagate them to the inner Claude CLI, which needs
+    them to use the SDK control protocol for tool permissions and MCP.
+    """
+    env = dict(os.environ)
+    env.pop("CLAUDECODE", None)
+    return env
 
 
 def build_engine_cli_args(options: ClaudeAgentOptions) -> list[str]:
     """Build full flowcoder-engine CLI args from agent options.
 
     Produces the command that BridgeTransport.spawn() passes to procmux.
-    The engine parses --search-path and --max-blocks; everything else is
+    The engine parses --search-path and --max-blocks; everything after is
     forwarded as passthrough args to inner Claude via parse_known_args.
 
-    Mirrors the essential flags from SubprocessCLITransport._build_command().
+    Delegates to claudewire's build_cli_spawn_args() (which calls the SDK's
+    SubprocessCLITransport._build_command()) so claude flags stay in sync
+    with the SDK automatically — no manual mirroring.
     """
-    cmd: list[str] = [get_engine_binary()]
+    from claudewire.cli import build_cli_spawn_args
 
-    # Engine-specific flags
+    # Engine-specific prefix
+    cmd: list[str] = [get_engine_binary()]
     for sp in get_search_paths():
         cmd += ["--search-path", sp]
 
-    # -- Claude passthrough flags (engine forwards to inner Claude) --
-
-    cmd += ["--output-format", "stream-json", "--verbose"]
-
-    # System prompt
-    if options.system_prompt is None:
-        cmd += ["--system-prompt", ""]
-    elif isinstance(options.system_prompt, str):
-        cmd += ["--system-prompt", options.system_prompt]
-    else:
-        if options.system_prompt.get("type") == "preset" and "append" in options.system_prompt:
-            cmd += ["--append-system-prompt", options.system_prompt["append"]]
-
-    if options.model:
-        cmd += ["--model", options.model]
-
-    if options.fallback_model:
-        cmd += ["--fallback-model", options.fallback_model]
-
-    if options.permission_mode:
-        cmd += ["--permission-mode", options.permission_mode]
-
-    if options.resume:
-        cmd += ["--resume", options.resume]
-
-    if options.disallowed_tools:
-        cmd += ["--disallowedTools", ",".join(options.disallowed_tools)]
-
-    # MCP servers
-    if options.mcp_servers and isinstance(options.mcp_servers, dict):
-        servers_for_cli: dict[str, Any] = {}
-        for name, cfg in options.mcp_servers.items():
-            if cfg.get("type") == "sdk":
-                servers_for_cli[name] = {k: v for k, v in cfg.items() if k != "instance"}
-            else:
-                servers_for_cli[name] = cfg
-        if servers_for_cli:
-            cmd += ["--mcp-config", json.dumps({"mcpServers": servers_for_cli})]
-
-    if options.include_partial_messages:
-        cmd.append("--include-partial-messages")
-
-    # Thinking / effort
-    resolved_max_thinking = options.max_thinking_tokens
-    if options.thinking is not None:
-        t = options.thinking
-        if t["type"] == "adaptive":
-            if resolved_max_thinking is None:
-                resolved_max_thinking = 32_000
-        elif t["type"] == "enabled":
-            resolved_max_thinking = t["budget_tokens"]
-        elif t["type"] == "disabled":
-            resolved_max_thinking = 0
-    if resolved_max_thinking is not None:
-        cmd += ["--max-thinking-tokens", str(resolved_max_thinking)]
-
-    if options.effort is not None:
-        cmd += ["--effort", options.effort]
-
-    # Settings / sandbox
-    settings_obj: dict[str, Any] = {}
-    if options.settings is not None:
-        s = options.settings.strip()
-        if s.startswith("{"):
-            try:
-                settings_obj = json.loads(s)
-            except json.JSONDecodeError:
-                pass
-    if options.sandbox is not None:
-        settings_obj["sandbox"] = options.sandbox
-    if settings_obj:
-        cmd += ["--settings", json.dumps(settings_obj)]
-
-    # Setting sources
-    sources_value = ",".join(options.setting_sources) if options.setting_sources is not None else ""
-    cmd += ["--setting-sources", sources_value]
-
-    # Extra args passthrough
-    for flag, value in options.extra_args.items():
-        if value is None:
-            cmd.append(f"--{flag}")
-        else:
-            cmd += [f"--{flag}", str(value)]
-
-    # Always last
-    cmd += ["--input-format", "stream-json"]
+    # Claude flags — reuse the SDK's own command builder
+    claude_cmd, _env, _cwd = build_cli_spawn_args(options)
+    # Strip the binary path (claude_cmd[0] is the claude binary);
+    # the engine will resolve its own inner claude binary.
+    cmd += claude_cmd[1:]
 
     return cmd
