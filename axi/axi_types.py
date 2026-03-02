@@ -108,6 +108,7 @@ class AgentSession:
     todo_message_id: int | None = None  # Discord message ID for the todo list display (edited in-place on updates)
     todo_items: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())  # Last known todo list from TodoWrite
     agent_log: logging.Logger | None = None
+    last_failed_resume_id: str | None = None  # Session ID that failed resume (prevents stale-ID cycle)
 
     def __post_init__(self) -> None:
         """Set up per-agent logger writing to <assistant_dir>/logs/<name>.log."""

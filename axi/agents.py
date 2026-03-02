@@ -1027,12 +1027,21 @@ async def _create_sdk_client(session: AgentSession, options: ClaudeAgentOptions)
         cli_args = build_engine_cli_args(options)
         env = build_engine_env()
         log.info("Spawning flowcoder engine for '%s': %s", session.name, " ".join(cli_args[:6]) + "...")
-        await transport.spawn(cli_args, env, session.cwd)
-        await transport.subscribe()
+        try:
+            await transport.spawn(cli_args, env, session.cwd)
+            await transport.subscribe()
 
-        client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
-        await client.__aenter__()
-        return client
+            client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
+            await client.__aenter__()
+            return client
+        except Exception:
+            # Clean up the transport so we don't leak a registered queue
+            # or leave a spawned process running in procmux.
+            try:
+                await transport.close()
+            except Exception:
+                pass
+            raise
 
     # Claude Code agent — SDK spawns its own subprocess
     client = ClaudeSDKClient(options=options)
@@ -1132,9 +1141,14 @@ async def wake_agent(session: AgentSession) -> None:
                 log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
                 if session.agent_log:
                     session.agent_log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
+                # Successful resume — clear any previous failure marker
+                session.last_failed_resume_id = None
             except Exception:
                 if resume_id:
-                    log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
+                    log.warning(
+                        "Failed to resume agent '%s' with session_id=%s, retrying fresh",
+                        session.name, resume_id, exc_info=True,
+                    )
                     options = _make_agent_options(session, resume_id=None)
                     try:
                         client = await _create_sdk_client(session, options)
@@ -1143,6 +1157,9 @@ async def wake_agent(session: AgentSession) -> None:
                         raise
                     session.client = client
                     session.session_id = None
+                    # Remember the failed session_id so we don't save the same
+                    # stale ID when the fresh session returns it in result messages.
+                    session.last_failed_resume_id = resume_id
                     if session.name == config.MASTER_AGENT_NAME:
                         try:
                             os.remove(config.MASTER_SESSION_PATH)
@@ -1386,9 +1403,20 @@ def _save_master_session(session: AgentSession) -> None:
 
 
 async def _set_session_id(session: AgentSession, msg_or_sid: Any, channel: TextChannel | None = None) -> None:
-    """Update session's session_id and persist it (topic or file)."""
+    """Update session's session_id and persist it (topic or file).
+
+    Skips persisting if the session_id matches one that previously failed resume,
+    to prevent an infinite stale-ID cycle (Claude Code reuses session IDs per
+    project, so a fresh session returns the same ID that failed to resume).
+    """
     assert _bot is not None
     sid: str | None = msg_or_sid if isinstance(msg_or_sid, str) else getattr(msg_or_sid, "session_id", None)
+    failed_id = session.last_failed_resume_id
+    if sid and failed_id and sid == failed_id:
+        # Don't persist a session_id that previously failed resume —
+        # it would cause the same failure on next wake.
+        log.debug("Skipping session_id update for '%s': %s matches failed resume ID", session.name, sid[:8])
+        return
     if sid and sid != session.session_id:
         session.session_id = sid
         if session.name == config.MASTER_AGENT_NAME:

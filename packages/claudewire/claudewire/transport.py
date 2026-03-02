@@ -56,7 +56,14 @@ class BridgeTransport:
         self._exit_code: int | None = None
 
     async def connect(self) -> None:
-        """Register with the process connection for this agent's output."""
+        """Register with the process connection for this agent's output.
+
+        Idempotent — calling connect() multiple times (e.g. from both
+        _create_transport and ClaudeSDKClient.__aenter__) reuses the
+        existing queue instead of creating a duplicate registration.
+        """
+        if self._ready and self._queue is not None:
+            return
         _tracer.start_span("claudewire.connect", attributes={"agent.name": self._name}).end()
         self._queue = self._conn.register(self._name)
         self._ready = True
