@@ -485,38 +485,66 @@ def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None 
     return _check_permission
 
 
-_PLAN_FILE_MAX_AGE_SECS = 120  # Only consider plan files modified within the last 2 minutes
+_PLAN_FILE_MAX_AGE_SECS = 300  # Only consider plan files modified within the last 5 minutes
+
+# Common plan file names agents write to their CWD
+_CWD_PLAN_FILENAMES = ("PLAN.md", "plan.md")
 
 
-def _read_latest_plan_file() -> str | None:
-    """Read the most recently modified plan file from ~/.claude/plans/.
+def _read_latest_plan_file(cwd: str | None = None) -> str | None:
+    """Read the most recently modified plan file.
 
-    Claude Code writes plans to ~/.claude/plans/<random-name>.md.  The LLM
-    doesn't always include the plan content in the ExitPlanMode tool_input,
-    so this serves as a reliable fallback.
+    Searches two locations (returns the most recently modified match):
+    1. The agent's CWD for PLAN.md / plan.md
+    2. ~/.claude/plans/ for Claude Code's auto-generated plan files
+
+    Claude Code writes plans to ~/.claude/plans/<random-name>.md when running
+    in a terminal, but SDK agents often write PLAN.md to their CWD instead.
     """
+    now = time.time()
+    best: tuple[float, pathlib.Path] | None = None  # (mtime, path)
+
+    # Check CWD for PLAN.md / plan.md
+    if cwd:
+        cwd_path = pathlib.Path(cwd)
+        for name in _CWD_PLAN_FILENAMES:
+            p = cwd_path / name
+            try:
+                mtime = p.stat().st_mtime
+                if now - mtime <= _PLAN_FILE_MAX_AGE_SECS:
+                    if best is None or mtime > best[0]:
+                        best = (mtime, p)
+            except OSError:
+                continue
+
+    # Check ~/.claude/plans/
     plans_dir = pathlib.Path.home() / ".claude" / "plans"
-    if not plans_dir.is_dir():
+    if plans_dir.is_dir():
+        try:
+            candidates = sorted(
+                plans_dir.glob("*.md"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for path in candidates[:3]:
+                try:
+                    mtime = path.stat().st_mtime
+                    if now - mtime > _PLAN_FILE_MAX_AGE_SECS:
+                        break  # Sorted by mtime desc, no point checking older files
+                    if best is None or mtime > best[0]:
+                        best = (mtime, path)
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
+    if best is None:
         return None
     try:
-        candidates = sorted(
-            plans_dir.glob("*.md"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        content = best[1].read_text(encoding="utf-8").strip()
+        return content or None
     except OSError:
         return None
-    now = time.time()
-    for path in candidates[:1]:
-        try:
-            age = now - path.stat().st_mtime
-            if age > _PLAN_FILE_MAX_AGE_SECS:
-                return None
-            content = path.read_text(encoding="utf-8").strip()
-            return content or None
-        except OSError:
-            continue
-    return None
 
 
 async def _handle_exit_plan_mode(
@@ -536,13 +564,11 @@ async def _handle_exit_plan_mode(
 
     # Heuristic fallback: the LLM doesn't always include the plan in tool_input
     # (the "plan" key is an additionalProperty, not a defined schema field).
-    # Claude Code always writes the plan to ~/.claude/plans/<name>.md before
-    # ExitPlanMode fires, so we pick the most recently modified file as a
-    # best-effort fallback.  This is imprecise when multiple agents exit plan
-    # mode within the same 2-minute window, but in practice that's rare.
+    # Claude Code writes plans to ~/.claude/plans/<name>.md (terminal) or
+    # PLAN.md in the agent's CWD (SDK agents).  We check both locations.
     used_heuristic = False
     if not plan_content:
-        plan_content = _read_latest_plan_file()
+        plan_content = _read_latest_plan_file(cwd=session.cwd)
         if plan_content:
             used_heuristic = True
             log.info("Read plan from disk for '%s' (tool_input had no plan key)", session.name)
