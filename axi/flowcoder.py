@@ -35,7 +35,9 @@ def get_engine_binary() -> str:
 def get_search_paths(extra: list[str] | None = None) -> list[str]:
     """Return flowchart command search paths."""
     default_search = os.path.join(_FLOWCODER_HOME, "examples", "commands")
-    return [default_search] + (extra or [])
+    env_raw = os.environ.get("FLOWCODER_SEARCH_PATH", "")
+    env_paths = [p for p in env_raw.split(":") if p]
+    return [default_search] + env_paths + (extra or [])
 
 
 def build_engine_cmd(

@@ -1512,25 +1512,31 @@ async def telos_interview_cmd(interaction: discord.Interaction, agent_name: str 
 
 def _list_flowchart_commands() -> list[dict[str, Any]]:
     """Return available flowchart commands as [{name, description}, ...]."""
-    flowcoder_home = os.environ.get("FLOWCODER_HOME", os.path.expanduser("~/flowcoder-rewrite"))
-    commands_dir = os.path.join(flowcoder_home, "examples", "commands")
+    from axi.flowcoder import get_search_paths
+
+    seen: set[str] = set()
     results: list[dict[str, Any]] = []
-    if not os.path.isdir(commands_dir):
-        return results
-    for fname in sorted(os.listdir(commands_dir)):
-        if not fname.endswith(".json"):
+    for commands_dir in get_search_paths():
+        if not os.path.isdir(commands_dir):
             continue
-        try:
-            with open(os.path.join(commands_dir, fname)) as f:
-                data = json.load(f)
-            results.append(
-                {
-                    "name": data.get("name", fname.removesuffix(".json")),
-                    "description": data.get("description", ""),
-                }
-            )
-        except Exception:
-            results.append({"name": fname.removesuffix(".json"), "description": ""})
+        for fname in sorted(os.listdir(commands_dir)):
+            if not fname.endswith(".json"):
+                continue
+            name = fname.removesuffix(".json")
+            if name in seen:
+                continue
+            seen.add(name)
+            try:
+                with open(os.path.join(commands_dir, fname)) as f:
+                    data = json.load(f)
+                results.append(
+                    {
+                        "name": data.get("name", name),
+                        "description": data.get("description", ""),
+                    }
+                )
+            except Exception:
+                results.append({"name": name, "description": ""})
     return results
 
 

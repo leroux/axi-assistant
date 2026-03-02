@@ -70,12 +70,22 @@ def _extract_trace_context(msg: dict) -> otel_context.Context | None:
     return None
 
 
+_TIMESTAMP_RE = __import__("re").compile(
+    r"^\[[\d\-T:+ ]+(?:UTC)?\]\s*"
+)
+
+
 def _parse_slash_command(text: str) -> tuple[str, str] | None:
     """Parse a slash command from text like '/story "a dragon"'.
+
+    Handles optional timestamp prefix from the bot framework, e.g.
+    '[2026-03-02 20:12:50 UTC] /story "a dragon"'.
 
     Returns (command_name, args_string) or None if not a slash command.
     """
     text = text.strip()
+    # Strip optional timestamp prefix (e.g. "[2026-03-02 20:12:50 UTC] ")
+    text = _TIMESTAMP_RE.sub("", text)
     if not text.startswith("/"):
         return None
     parts = text[1:].split(None, 1)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shlex
 import time
 from asyncio.subprocess import PIPE
@@ -77,6 +78,84 @@ class ExecutionResult:
     log: list[LogEntry]
     status: str  # "completed" | "halted" | "error"
     duration_ms: int = 0
+
+
+_COMPARISON_RE = re.compile(
+    r"^\s*(.+?)\s+(==|!=|>=|<=|>|<)\s+(.+?)\s*$"
+)
+
+
+def _is_truthy(value: Any) -> bool:
+    """Test truthiness the same way Pride does."""
+    if value is None:
+        return False
+    s = str(value).lower().strip()
+    return bool(value) and s not in ("false", "0", "no", "")
+
+
+def _coerce_numeric(s: str) -> float | str:
+    """Try to interpret a string as a number; return as-is on failure."""
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return s
+
+
+def _evaluate_condition(condition: str, variables: dict[str, Any]) -> bool:
+    """Evaluate a branch condition string.
+
+    Supports:
+    - Simple variable truthiness: ``fullyImplemented``
+    - Negation: ``!hasErrors``
+    - Comparison: ``exitCode == 0``, ``count > 5``, ``status != "done"``
+
+    Template substitution (``{{var}}``, ``$N``) should be done *before*
+    calling this function so that comparison values are already resolved.
+    """
+    cond = condition.strip()
+
+    # Negation: !varname
+    if cond.startswith("!"):
+        inner = cond[1:].strip()
+        return not _is_truthy(variables.get(inner))
+
+    # Comparison operators
+    m = _COMPARISON_RE.match(cond)
+    if m:
+        lhs_raw, op, rhs_raw = m.group(1), m.group(2), m.group(3)
+
+        # Strip surrounding quotes from RHS if present
+        rhs_str = rhs_raw.strip("\"'")
+
+        # Resolve LHS from variables (could be a variable name or literal)
+        lhs_val = variables.get(lhs_raw, lhs_raw)
+
+        # Coerce both sides for numeric comparison
+        lhs_num = _coerce_numeric(str(lhs_val))
+        rhs_num = _coerce_numeric(rhs_str)
+
+        # If both are numbers, compare numerically
+        if isinstance(lhs_num, float) and isinstance(rhs_num, float):
+            match op:
+                case "==": return lhs_num == rhs_num
+                case "!=": return lhs_num != rhs_num
+                case ">":  return lhs_num > rhs_num
+                case "<":  return lhs_num < rhs_num
+                case ">=": return lhs_num >= rhs_num
+                case "<=": return lhs_num <= rhs_num
+
+        # String comparison fallback
+        lhs_s = str(lhs_val)
+        match op:
+            case "==": return lhs_s == rhs_str
+            case "!=": return lhs_s != rhs_str
+            case ">":  return lhs_s > rhs_str
+            case "<":  return lhs_s < rhs_str
+            case ">=": return lhs_s >= rhs_str
+            case "<=": return lhs_s <= rhs_str
+
+    # Simple variable lookup (original behavior)
+    return _is_truthy(variables.get(cond))
 
 
 class GraphWalker:
@@ -241,11 +320,19 @@ class GraphWalker:
             return BlockResult.ok(output=result.response_text)
 
     def _exec_branch(self, block: BranchBlock) -> BlockResult:
-        """Evaluate a branch condition against variables."""
-        value = self._variables.get(block.condition)
-        truthy = bool(value) and str(value).lower() not in ("false", "0", "no", "")
+        """Evaluate a branch condition against variables.
+
+        Supports:
+        - Simple variable truthiness: ``fullyImplemented``
+        - Negation: ``!hasErrors``
+        - Comparison operators: ``exitCode == 0``, ``i < 3``, ``status != "done"``
+        - Template refs in conditions: ``i < {{max}}``
+        """
+        # Resolve any {{var}} / $N templates in the condition text first
+        condition = evaluate_template(block.condition, self._variables)
+        truthy = _evaluate_condition(condition, self._variables)
         self._protocol.log(
-            f"Branch \"{block.name}\": {block.condition}={value!r} -> {truthy}"
+            f"Branch \"{block.name}\": {block.condition} -> {truthy}"
         )
         return BlockResult.ok(branch_taken=truthy)
 
