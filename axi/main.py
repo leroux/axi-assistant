@@ -24,7 +24,7 @@ from discord.ext import tasks
 from discord.ext.commands import Bot
 from opentelemetry import trace
 
-from axi import agents, channels, config, tools
+from axi import agents, channels, config, scheduler, tools
 from axi.axi_types import ActivityState, AgentSession, tool_display
 from axi.prompts import (
     MASTER_SYSTEM_PROMPT,
@@ -320,6 +320,7 @@ async def on_message(message: discord.Message) -> None:
             "message.length": len(content) if isinstance(content, str) else -1,
         },
     ):
+        scheduler.mark_interactive(agent_name)
         log.info("ON_MSG[%s][%s] ACQUIRING query_lock", agent_name, msg_id)
         async with session.query_lock:
             log.info("ON_MSG[%s][%s] ACQUIRED query_lock", agent_name, msg_id)
@@ -353,7 +354,11 @@ async def on_message(message: discord.Message) -> None:
                 session.activity = ActivityState(phase="idle")
 
         log.info("ON_MSG[%s][%s] query_lock RELEASED, checking queue", agent_name, msg_id)
-        await agents.process_message_queue(session)
+        if scheduler.should_yield(session.name):
+            log.info("Scheduler yield: '%s' sleeping after user message", session.name)
+            await agents.sleep_agent(session)
+        else:
+            await agents.process_message_queue(session)
         await bot.process_commands(message)
 
 
@@ -485,7 +490,7 @@ async def _check_idle_agents(now_utc: datetime, master_ch: TextChannel | None) -
 
 async def _recover_stranded_messages() -> None:
     """Wake sleeping agents that have queued messages (stranded-message safety net)."""
-    if agents.count_awake_agents() < config.MAX_AWAKE_AGENTS:
+    if scheduler.slot_count() < config.MAX_AWAKE_AGENTS:
         for _agent_name, session in list(agents.agents.items()):
             if session.client is None and session.message_queue and not session.query_lock.locked():
                 content, ch, stranded_msg = session.message_queue.popleft()
@@ -496,12 +501,11 @@ async def _recover_stranded_messages() -> None:
 
 
 async def _auto_sleep_idle_agents(now_utc: datetime) -> None:
-    """Put idle awake agents to sleep, aggressively when under concurrency pressure."""
-    awake_count = agents.count_awake_agents()
-    under_pressure = awake_count >= config.MAX_AWAKE_AGENTS
-    idle_threshold = timedelta(seconds=0) if under_pressure else timedelta(minutes=1)
-    if under_pressure:
-        log.info("Concurrency pressure: %d/%d awake agents — aggressive idle sleep", awake_count, config.MAX_AWAKE_AGENTS)
+    """Put idle awake agents to sleep after 1 minute of inactivity.
+
+    Scheduler handles eviction under pressure; this is just cleanup.
+    """
+    idle_threshold = timedelta(minutes=1)
 
     for agent_name, session in list(agents.agents.items()):
         if session.client is None:
@@ -512,12 +516,7 @@ async def _auto_sleep_idle_agents(now_utc: datetime) -> None:
             continue
         idle_duration = now_utc - session.last_activity
         if idle_duration > idle_threshold:
-            log.info(
-                "Auto-sleeping idle agent '%s' (idle %.0fs, pressure=%s)",
-                agent_name,
-                idle_duration.total_seconds(),
-                under_pressure,
-            )
+            log.info("Auto-sleeping idle agent '%s' (idle %.0fs)", agent_name, idle_duration.total_seconds())
             try:
                 await agents.sleep_agent(session)
             except Exception:
@@ -1998,6 +1997,12 @@ async def on_ready() -> None:
     _bot_start_time = datetime.now(UTC)
 
     agents.init(bot)
+    scheduler.init(
+        max_slots=config.MAX_AWAKE_AGENTS,
+        protected={config.MASTER_AGENT_NAME},
+        get_agents=lambda: agents.agents,
+        sleep_fn=lambda s: agents.sleep_agent(s),
+    )
     init_tracing("axi-bot")
 
     # Re-initialize _tracer now that the provider is set up

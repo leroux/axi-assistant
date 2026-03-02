@@ -36,7 +36,7 @@ from opentelemetry import trace
 from agenthub.procmux_wire import ProcmuxProcessConnection
 from agenthub.tasks import BackgroundTaskSet
 from axi import channels as _channels_mod
-from axi import config
+from axi import config, scheduler
 from axi.axi_types import (
     ActivityState,
     AgentSession,
@@ -1022,61 +1022,6 @@ def count_awake_agents() -> int:
     return sum(1 for s in agents.values() if s.client is not None)
 
 
-async def _evict_idle_agent(exclude: str | None = None) -> bool:
-    """Sleep the most idle non-busy awake agent to free a slot."""
-    candidates: list[tuple[float, str, AgentSession]] = []
-    for name, s in agents.items():
-        if name == exclude:
-            continue
-        if s.client is None:
-            continue
-        if s.query_lock.locked():
-            continue
-        if s.bridge_busy:
-            continue
-        idle_duration = (datetime.now(UTC) - s.last_activity).total_seconds()
-        candidates.append((idle_duration, name, s))
-
-    if not candidates:
-        return False
-
-    log.debug("Eviction candidates: %s", [(n, f"{s:.0f}s") for s, n, _ in candidates])
-    candidates.sort(reverse=True, key=lambda x: x[0])
-    idle_secs, evict_name, evict_session = candidates[0]
-    log.info("Evicting idle agent '%s' (idle %.0fs) to free concurrency slot", evict_name, idle_secs)
-    try:
-        await sleep_agent(evict_session)
-    except Exception:
-        log.exception("Error evicting agent '%s'", evict_name)
-        return False
-    return True
-
-
-async def _ensure_awake_slot(requesting_agent: str) -> bool:
-    """Ensure there is a free awake-agent slot, evicting idle agents if needed."""
-    awake = count_awake_agents()
-    while awake >= config.MAX_AWAKE_AGENTS:
-        log.debug(
-            "Awake slots full (%d/%d), attempting eviction for '%s'",
-            awake,
-            config.MAX_AWAKE_AGENTS,
-            requesting_agent,
-        )
-        evicted = await _evict_idle_agent(exclude=requesting_agent)
-        if not evicted:
-            log.warning(
-                "Cannot free awake slot for '%s' \u2014 all %d slots busy", requesting_agent, config.MAX_AWAKE_AGENTS
-            )
-            return False
-        awake = count_awake_agents()
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Sleep / wake
-# ---------------------------------------------------------------------------
-
-
 async def sleep_agent(session: AgentSession, *, force: bool = False) -> None:
     """Shut down an agent. Keep the AgentSession in the agents dict.
 
@@ -1100,6 +1045,7 @@ async def sleep_agent(session: AgentSession, *, force: bool = False) -> None:
         session.bridge_busy = False
         await _disconnect_client(session.client, session.name)
         session.client = None
+        scheduler.release_slot(session.name)
         log.info("Agent '%s' is now sleeping", session.name)
 
 
@@ -1134,21 +1080,8 @@ async def wake_agent(session: AgentSession) -> None:
         if is_awake(session):
             return
 
-        log.debug(
-            "Wake lock acquired for '%s', awake_count=%d/%d",
-            session.name,
-            count_awake_agents(),
-            config.MAX_AWAKE_AGENTS,
-        )
+        await scheduler.request_slot(session.name)
 
-        slot_available = await _ensure_awake_slot(session.name)
-        if not slot_available:
-            raise ConcurrencyLimitError(
-                f"Cannot wake agent '{session.name}': all {config.MAX_AWAKE_AGENTS} awake slots are busy. "
-                f"Message will be queued and processed when a slot opens."
-            )
-
-        log.debug("Awake slot secured for '%s'", session.name)
         log.info("Waking agent '%s' (session_id=%s)", session.name, session.session_id)
 
         resume_id = session.session_id
@@ -1171,19 +1104,27 @@ async def wake_agent(session: AgentSession) -> None:
                 if session.agent_log:
                     session.agent_log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
             except Exception:
-                log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
-                options = _make_agent_options(session, resume_id=None)
-                client = await _create_sdk_client(session, options)
-                session.client = client
-                session.session_id = None
-                if session.name == config.MASTER_AGENT_NAME:
+                if resume_id:
+                    log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
+                    options = _make_agent_options(session, resume_id=None)
                     try:
-                        os.remove(config.MASTER_SESSION_PATH)
-                    except OSError:
-                        pass
-                log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
-                if session.agent_log:
-                    session.agent_log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
+                        client = await _create_sdk_client(session, options)
+                    except Exception:
+                        scheduler.release_slot(session.name)
+                        raise
+                    session.client = client
+                    session.session_id = None
+                    if session.name == config.MASTER_AGENT_NAME:
+                        try:
+                            os.remove(config.MASTER_SESSION_PATH)
+                        except OSError:
+                            pass
+                    log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
+                    if session.agent_log:
+                        session.agent_log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
+                else:
+                    scheduler.release_slot(session.name)
+                    raise
 
         prompt_changed = False
         if resume_id and session.system_prompt is not None:
@@ -2449,7 +2390,10 @@ async def run_initial_prompt(session: AgentSession, prompt: MessageContent, chan
             channel, f"Agent **{session.name}** encountered an error during initial task. {_user_mentions()}"
         )
 
-    await process_message_queue(session)
+    if scheduler.should_yield(session.name):
+        log.info("Scheduler yield: '%s' sleeping after initial prompt (skipping queue)", session.name)
+    else:
+        await process_message_queue(session)
 
     try:
         await sleep_agent(session)
@@ -2471,6 +2415,11 @@ async def process_message_queue(session: AgentSession) -> None:
         if shutdown_coordinator and shutdown_coordinator.requested:
             log.info("Shutdown requested \u2014 not processing further queued messages for '%s'", session.name)
             break
+        # Yield slot if scheduler needs it for another agent
+        if scheduler.should_yield(session.name):
+            log.info("Scheduler yield: '%s' deferring %d queued messages", session.name, len(session.message_queue))
+            await sleep_agent(session)
+            return
         content, channel, orig_message = session.message_queue.popleft()
 
         remaining = len(session.message_queue)
@@ -2644,7 +2593,11 @@ async def _process_inter_agent_prompt(
             finally:
                 session.activity = ActivityState(phase="idle")
 
-        await process_message_queue(session)
+        if scheduler.should_yield(session.name):
+            log.info("Scheduler yield: '%s' sleeping after inter-agent message", session.name)
+            await sleep_agent(session)
+        else:
+            await process_message_queue(session)
     except Exception:
         log.exception(
             "Unhandled error in _process_inter_agent_prompt for '%s'",
