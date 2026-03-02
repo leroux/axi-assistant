@@ -1,4 +1,4 @@
-"""Agent lifecycle, streaming, rate limits, bridge, and channel management."""
+"""Agent lifecycle, streaming, rate limits, procmux, and channel management."""
 
 from __future__ import annotations
 
@@ -44,7 +44,6 @@ from axi.axi_types import (
     ContentBlock,
     MessageContent,
 )
-from axi.bridge import BridgeTransport, ensure_bridge
 from axi.channels import (
     ensure_agent_channel,
     ensure_guild_infrastructure,
@@ -83,13 +82,15 @@ from axi.rate_limits import (
 from axi.schedule_tools import make_schedule_mcp_server
 from axi.shutdown import ShutdownCoordinator, exit_for_restart, kill_supervisor
 from axi.tracing import shutdown_tracing
+from claudewire import BridgeTransport
 from claudewire.events import as_stream, update_activity
 from claudewire.session import disconnect_client, get_stdio_logger
+from procmux import ensure_running as ensure_bridge
 
 if TYPE_CHECKING:
     from discord.ext.commands import Bot
 
-    from axi.bridge import BridgeConnection
+    from procmux import ProcmuxConnection
 
 log = logging.getLogger("axi")
 
@@ -114,8 +115,8 @@ def find_session_by_question_message(message_id: int) -> AgentSession | None:
 
 
 # Bridge connection — initialized in on_ready(), used by wake_agent/sleep_agent
-bridge_conn: BridgeConnection | None = None
-# Adapted connection for claudewire (wraps bridge_conn)
+procmux_conn: ProcmuxConnection | None = None
+# Adapted connection for claudewire (wraps procmux_conn)
 wire_conn: ProcmuxProcessConnection | None = None
 
 # Shutdown coordinator — initialized via init_shutdown_coordinator() from on_ready
@@ -918,7 +919,7 @@ def init_shutdown_coordinator() -> None:
         shutdown_tracing()
         await bot_ref.close()
 
-    use_bridge = bridge_conn is not None and bridge_conn.is_alive
+    use_bridge = procmux_conn is not None and procmux_conn.is_alive
     shutdown_coordinator = make_shutdown_coordinator(
         close_bot_fn=_close_bot,
         kill_fn=exit_for_restart if use_bridge else kill_supervisor,
@@ -1972,8 +1973,8 @@ async def handle_query_timeout(session: AgentSession, channel: TextChannel) -> N
     log.warning("Query timeout for agent '%s', attempting interrupt", session.name)
 
     try:
-        if bridge_conn and bridge_conn.is_alive:
-            result = await bridge_conn.send_command("interrupt", name=session.name)
+        if procmux_conn and procmux_conn.is_alive:
+            result = await procmux_conn.send_command("interrupt", name=session.name)
             if not result.ok:
                 log.warning("Bridge SIGINT for '%s' failed: %s", session.name, result.error)
         try:
@@ -2309,8 +2310,8 @@ async def deliver_inter_agent_message(
             target_session.name,
         )
         try:
-            if bridge_conn and bridge_conn.is_alive:
-                await bridge_conn.send_command("interrupt", name=target_session.name)
+            if procmux_conn and procmux_conn.is_alive:
+                await procmux_conn.send_command("interrupt", name=target_session.name)
             if target_session.client:
                 try:
                     await target_session.client.interrupt()
@@ -2398,22 +2399,22 @@ async def _process_inter_agent_prompt(
 # ---------------------------------------------------------------------------
 
 
-async def connect_bridge() -> None:
+async def connect_procmux() -> None:
     """Connect to the agent bridge and schedule reconnections for running agents."""
-    global bridge_conn, wire_conn
+    global procmux_conn, wire_conn
 
     try:
-        bridge_conn = await ensure_bridge(config.BRIDGE_SOCKET_PATH, timeout=10.0)
-        wire_conn = ProcmuxProcessConnection(bridge_conn)
+        procmux_conn = await ensure_bridge(config.BRIDGE_SOCKET_PATH, timeout=10.0)
+        wire_conn = ProcmuxProcessConnection(procmux_conn)
         log.info("Bridge connection established")
     except Exception:
         log.exception("Failed to connect to bridge \u2014 agents will use direct subprocess mode")
-        bridge_conn = None
+        procmux_conn = None
         wire_conn = None
         return
 
     try:
-        result = await bridge_conn.send_command("list")
+        result = await procmux_conn.send_command("list")
         bridge_agents = result.agents or {}
         log.info("Bridge reports %d agent(s): %s", len(bridge_agents), list(bridge_agents.keys()))
     except Exception:
@@ -2428,7 +2429,7 @@ async def connect_bridge() -> None:
         if session is None:
             log.warning("Bridge has agent '%s' but no matching session \u2014 killing", agent_name)
             try:
-                await bridge_conn.send_command("kill", name=agent_name)
+                await procmux_conn.send_command("kill", name=agent_name)
             except Exception:
                 log.exception("Failed to kill orphan bridge agent '%s'", agent_name)
             continue
@@ -2450,7 +2451,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
     """Reconnect a single agent to the bridge and drain any buffered output."""
     try:
         async with session.query_lock:
-            if bridge_conn is None or not bridge_conn.is_alive:
+            if procmux_conn is None or not procmux_conn.is_alive:
                 log.warning("Bridge connection lost during reconnect of '%s'", session.name)
                 session.reconnecting = False
                 return
@@ -2542,27 +2543,19 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
 
 __all__ = [
     "_parse_channel_topic",
-    # Discord helpers
     "add_reaction",
-    # Module-level state
     "agents",
-    # Streaming
     "as_stream",
-    "bridge_conn",
     "channel_to_agent",
-    # Bridge
-    "connect_bridge",
+    "connect_procmux",
     "content_summary",
     "count_awake_agents",
     "deliver_inter_agent_message",
-    # SDK helpers
     "drain_sdk_buffer",
     "drain_stderr",
     "end_session",
-    # Channel/guild management (re-exported from channels module)
     "ensure_agent_channel",
     "ensure_guild_infrastructure",
-    # Message handling
     "extract_message_content",
     "extract_tool_preview",
     "format_channel_topic",
@@ -2572,13 +2565,10 @@ __all__ = [
     "get_master_channel",
     "get_master_session",
     "handle_query_timeout",
-    # Initialization
     "init",
     "init_shutdown_coordinator",
-    # Session lifecycle
     "is_awake",
     "is_processing",
-    # Rate limiting
     "is_rate_limited",
     "load_todo_items",
     "make_cwd_permission_callback",
@@ -2588,6 +2578,7 @@ __all__ = [
     "normalize_channel_name",
     "process_message",
     "process_message_queue",
+    "procmux_conn",
     "rate_limit_quotas",
     "rate_limit_remaining_seconds",
     "rate_limited_until",

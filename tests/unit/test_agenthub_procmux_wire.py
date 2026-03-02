@@ -1,7 +1,7 @@
 """Tests for agenthub.procmux_wire — _TranslatingQueue and ProcmuxProcessConnection.
 
 Tests _TranslatingQueue in isolation using real asyncio.Queue with procmux message types.
-ProcmuxProcessConnection is already integration-tested in axi/bridge/test_bridge.py
+ProcmuxProcessConnection is already integration-tested in tests/test_bridge.py
 (77 tests), so we focus on the translation layer here.
 """
 

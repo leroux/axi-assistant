@@ -549,9 +549,9 @@ async def before_check_schedules() -> None:
 
 
 async def _interrupt_agent(session: AgentSession) -> None:
-    """Send interrupt signal to an agent via bridge and/or SDK client."""
-    if agents.bridge_conn and agents.bridge_conn.is_alive:
-        result = await agents.bridge_conn.send_command("interrupt", name=session.name)
+    """Send interrupt signal to an agent via procmux and/or SDK client."""
+    if agents.procmux_conn and agents.procmux_conn.is_alive:
+        result = await agents.procmux_conn.send_command("interrupt", name=session.name)
         if not result.ok:
             log.warning("Bridge SIGINT for '%s' failed: %s", session.name, result.error)
     try:
@@ -629,20 +629,20 @@ async def ping_command(interaction: discord.Interaction) -> None:
     else:
         bot_str = "initializing"
 
-    bridge_str = None
-    if agents.bridge_conn is not None and agents.bridge_conn.is_alive:
+    procmux_str = None
+    if agents.procmux_conn is not None and agents.procmux_conn.is_alive:
         try:
-            result = await agents.bridge_conn.send_command("status")
+            result = await agents.procmux_conn.send_command("status")
             if result.ok and result.uptime_seconds is not None:
-                bridge_str = _fmt_uptime(result.uptime_seconds)
+                procmux_str = _fmt_uptime(result.uptime_seconds)
         except Exception:
-            bridge_str = "error"
+            procmux_str = "error"
 
     latency = round(bot.latency * 1000)
     parts = [f"Pong! Latency: {latency}ms", f"Bot uptime: {bot_str}"]
-    if bridge_str is not None:
-        parts.append(f"Bridge uptime: {bridge_str}")
-    elif agents.bridge_conn is None or not agents.bridge_conn.is_alive:
+    if procmux_str is not None:
+        parts.append(f"Bridge uptime: {procmux_str}")
+    elif agents.procmux_conn is None or not agents.procmux_conn.is_alive:
         parts.append("Bridge: not connected")
     await interaction.response.send_message(" | ".join(parts))
 
@@ -1997,7 +1997,7 @@ async def on_ready() -> None:
     if master_ch:
         await master_ch.send("*System:* Axi starting up...")
 
-    await agents.connect_bridge()
+    await agents.connect_procmux()
     agents.init_shutdown_coordinator()
 
     await bot.tree.sync()

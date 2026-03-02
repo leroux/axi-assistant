@@ -1,10 +1,10 @@
-"""Tests for the agent bridge (bridge/ package).
+"""Tests for procmux, claudewire, and agenthub integration.
 
-Covers the server (BridgeServer), client (BridgeConnection, BridgeTransport),
+Covers the server (ProcmuxServer), client (ProcmuxConnection, BridgeTransport),
 and lifecycle helpers.  All tests use real Unix sockets with ephemeral paths —
 no mocking of the wire protocol so we're testing actual serialization.
 
-Run with: pytest bridge/test_bridge.py -v
+Run with: pytest tests/test_bridge.py -v
 """
 
 from __future__ import annotations
@@ -18,16 +18,24 @@ import uuid
 import pytest
 
 from agenthub.procmux_wire import ProcmuxProcessConnection
-from axi.bridge import (
-    BridgeConnection,
-    BridgeServer,
-    BridgeTransport,
+from claudewire import BridgeTransport
+from claudewire.types import StdoutEvent
+from procmux import (
     ExitMsg,
     StdoutMsg,
-    connect_to_bridge,
-    ensure_bridge,
 )
-from claudewire.types import StdoutEvent
+from procmux import (
+    ProcmuxConnection as BridgeConnection,
+)
+from procmux import (
+    ProcmuxServer as BridgeServer,
+)
+from procmux import (
+    connect as connect_to_bridge,
+)
+from procmux import (
+    ensure_running as ensure_bridge,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -876,7 +884,7 @@ class TestBuildCliSpawnArgs:
         """When can_use_tool is set, --permission-prompt-tool stdio must appear."""
         from claude_agent_sdk import ClaudeAgentOptions
 
-        from axi.bridge import build_cli_spawn_args
+        from claudewire import build_cli_spawn_args
 
         async def _dummy_can_use_tool(tool_name, tool_input, ctx):
             pass
@@ -895,7 +903,7 @@ class TestBuildCliSpawnArgs:
         """When can_use_tool is None, --permission-prompt-tool must NOT appear."""
         from claude_agent_sdk import ClaudeAgentOptions
 
-        from axi.bridge import build_cli_spawn_args
+        from claudewire import build_cli_spawn_args
 
         options = ClaudeAgentOptions(
             can_use_tool=None,
@@ -909,7 +917,7 @@ class TestBuildCliSpawnArgs:
         """When permission_prompt_tool_name is already set, don't override it."""
         from claude_agent_sdk import ClaudeAgentOptions
 
-        from axi.bridge import build_cli_spawn_args
+        from claudewire import build_cli_spawn_args
 
         async def _dummy_can_use_tool(tool_name, tool_input, ctx):
             pass
@@ -928,7 +936,7 @@ class TestBuildCliSpawnArgs:
         """SDK-type MCP server is serialized into --mcp-config without the live instance."""
         from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
 
-        from axi.bridge import build_cli_spawn_args
+        from claudewire import build_cli_spawn_args
 
         async def _dummy_can_use_tool(tool_name, tool_input, ctx):
             pass
@@ -961,7 +969,7 @@ class TestBuildCliSpawnArgs:
         """Multiple SDK MCP servers all appear in --mcp-config."""
         from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
 
-        from axi.bridge import build_cli_spawn_args
+        from claudewire import build_cli_spawn_args
 
         async def _dummy_can_use_tool(tool_name, tool_input, ctx):
             pass
@@ -996,7 +1004,7 @@ class TestBuildCliSpawnArgs:
         """--mcp-config should not appear when mcp_servers is empty."""
         from claude_agent_sdk import ClaudeAgentOptions
 
-        from axi.bridge import build_cli_spawn_args
+        from claudewire import build_cli_spawn_args
 
         options = ClaudeAgentOptions(cwd="/tmp", mcp_servers={})
         cmd, env, cwd = build_cli_spawn_args(options)
@@ -1580,7 +1588,7 @@ def _mcp_cli_args() -> tuple[list[str], dict]:
     """Build real CLI spawn args with an SDK MCP server, like bot.py does."""
     from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
 
-    from axi.bridge import build_cli_spawn_args
+    from claudewire import build_cli_spawn_args
 
     async def _dummy_can_use_tool(tool_name, tool_input, ctx):
         pass

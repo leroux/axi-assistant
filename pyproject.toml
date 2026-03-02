@@ -89,7 +89,6 @@ ignore = [
 "packages/discordquery/discordquery/__main__.py" = ["T20"]  # CLI entry point
 "packages/discordquery/discordquery/query.py" = ["T20"]  # CLI tool
 "packages/discordquery/discordquery/wait.py" = ["T20"]   # CLI tool
-"axi/bridge/server.py" = ["T20"]  # CLI entrypoint
 "packages/procmux/procmux/server.py" = ["T20"]  # CLI entrypoint
 "packages/flowcoder_engine/examples/*.py" = ["T20"]  # dev scripts
 "packages/flowcoder_tui/flowcoder_tui/repl.py" = ["T20"]  # TUI prints to terminal
