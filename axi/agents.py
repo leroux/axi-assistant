@@ -417,8 +417,8 @@ async def send_long(channel: TextChannel, text: str) -> None:
                 agent_name = channel_to_agent.get(channel.id)
                 if agent_name:
                     log.warning("Channel for '%s' was deleted, recreating", agent_name)
-                    new_ch = await ensure_agent_channel(agent_name)
                     session = agents.get(agent_name)
+                    new_ch = await ensure_agent_channel(agent_name, cwd=session.cwd if session else None)
                     if session:
                         session.discord_channel_id = new_ch.id
                     await new_ch.send(chunk)
@@ -2316,7 +2316,7 @@ async def spawn_agent(
 
         normalized = normalize_channel_name(name)
         _channels_mod.bot_creating_channels.add(normalized)
-        channel = await ensure_agent_channel(name)
+        channel = await ensure_agent_channel(name, cwd=cwd)
 
         agent_label = "flowcoder" if agent_type == "flowcoder" else "claude code"
         if resume:

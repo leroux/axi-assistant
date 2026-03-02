@@ -10,6 +10,7 @@ Pure functions: normalize_channel_name, format_channel_topic, parse_channel_topi
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -115,6 +116,23 @@ def parse_channel_topic(
         elif key == "type":
             agent_type = value.strip()
     return cwd, session_id, prompt_hash, todo_msg, agent_type
+
+
+# ---------------------------------------------------------------------------
+# Category placement helper
+# ---------------------------------------------------------------------------
+
+
+def _is_axi_cwd(cwd: str | None) -> bool:
+    """Return True if cwd is within the bot directory or a worktree."""
+    if not cwd:
+        return False
+    real = os.path.realpath(cwd)
+    bot_real = os.path.realpath(config.BOT_DIR)
+    worktrees_real = os.path.realpath(config.BOT_WORKTREES_DIR)
+    return real in (bot_real, worktrees_real) or real.startswith(
+        (bot_real + os.sep, worktrees_real + os.sep)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -228,35 +246,63 @@ async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel,
 # ---------------------------------------------------------------------------
 
 
-async def ensure_agent_channel(agent_name: str) -> TextChannel:
-    """Find or create a text channel for an agent. Moves from Killed to Active if needed."""
+async def ensure_agent_channel(agent_name: str, cwd: str | None = None) -> TextChannel:
+    """Find or create a text channel for an agent.
+
+    Category placement:
+    - axi-master or agents with cwd in BOT_DIR/BOT_WORKTREES_DIR → Axi category
+    - All others → Active category
+    - Channels in Killed are moved to the appropriate target category
+    - Channels in the wrong live category are moved to the correct one
+    """
     assert _channel_to_agent is not None
     _tracer.start_span("ensure_agent_channel", attributes={"agent.name": agent_name}).end()
     normalized = normalize_channel_name(agent_name)
 
-    if active_category:
-        for ch in active_category.text_channels:
+    is_axi = agent_name == config.MASTER_AGENT_NAME or _is_axi_cwd(cwd)
+    target_category = axi_category if is_axi else active_category
+
+    # Search live categories (Axi + Active) for existing channel
+    for cat in (axi_category, active_category):
+        if cat is None:
+            continue
+        for ch in cat.text_channels:
             if ch.name == normalized:
+                # Move to correct category if it's in the wrong one
+                if target_category and ch.category_id != target_category.id:
+                    try:
+                        await ch.move(category=target_category, beginning=True, sync_permissions=True)
+                        log.info("Moved channel #%s from %s to %s", normalized, cat.name, target_category.name)
+                    except discord.HTTPException as e:
+                        log.warning("Failed to move #%s to %s: %s", normalized, target_category.name, e)
+                        await _send_to_exceptions(
+                            f"Failed to move #**{normalized}** to {target_category.name}: `{e}`"
+                        )
                 _channel_to_agent[ch.id] = agent_name
                 return ch
 
+    # Search Killed category
     if killed_category:
         for ch in killed_category.text_channels:
             if ch.name == normalized:
+                target_name = target_category.name if target_category else "?"
                 try:
-                    await ch.move(category=active_category, beginning=True, sync_permissions=True)
+                    await ch.move(category=target_category, beginning=True, sync_permissions=True)
                 except discord.HTTPException as e:
-                    log.warning("Failed to move channel #%s from Killed to Active: %s", normalized, e)
-                    await _send_to_exceptions(f"Failed to move #**{normalized}** from Killed → Active: `{e}`")
+                    log.warning("Failed to move channel #%s from Killed to %s: %s", normalized, target_name, e)
+                    await _send_to_exceptions(
+                        f"Failed to move #**{normalized}** from Killed → {target_name}: `{e}`"
+                    )
                 _channel_to_agent[ch.id] = agent_name
-                log.info("Moved channel #%s from Killed to Active", normalized)
+                log.info("Moved channel #%s from Killed to %s", normalized, target_name)
                 return ch
 
+    # Create new channel in target category
     already_guarded = normalized in bot_creating_channels
     bot_creating_channels.add(normalized)
     try:
         assert target_guild is not None
-        channel = await target_guild.create_text_channel(normalized, category=active_category)
+        channel = await target_guild.create_text_channel(normalized, category=target_category)
     except discord.HTTPException as e:
         log.warning("Failed to create channel #%s: %s", normalized, e)
         await _send_to_exceptions(f"Failed to create channel #**{normalized}**: `{e}`")
@@ -265,19 +311,22 @@ async def ensure_agent_channel(agent_name: str) -> TextChannel:
         if not already_guarded:
             bot_creating_channels.discard(normalized)
     _channel_to_agent[channel.id] = agent_name
-    log.info("Created channel #%s in Active category", normalized)
+    cat_name = target_category.name if target_category else "?"
+    log.info("Created channel #%s in %s category", normalized, cat_name)
     return channel
 
 
 async def move_channel_to_killed(agent_name: str) -> None:
-    """Move an agent's channel from Active to Killed category."""
+    """Move an agent's channel to the Killed category."""
     if agent_name == config.MASTER_AGENT_NAME:
         return
     _tracer.start_span("move_channel_to_killed", attributes={"agent.name": agent_name}).end()
 
     normalized = normalize_channel_name(agent_name)
-    if active_category:
-        for ch in active_category.text_channels:
+    for cat in (axi_category, active_category):
+        if cat is None:
+            continue
+        for ch in cat.text_channels:
             if ch.name == normalized:
                 try:
                     await ch.move(category=killed_category, end=True, sync_permissions=True)
@@ -285,7 +334,7 @@ async def move_channel_to_killed(agent_name: str) -> None:
                 except discord.HTTPException as e:
                     log.warning("Failed to move channel #%s to Killed: %s", normalized, e)
                     await _send_to_exceptions(f"Failed to move #**{normalized}** to Killed category: `{e}`")
-                break
+                return
 
 
 async def get_agent_channel(agent_name: str) -> TextChannel | None:
@@ -298,11 +347,53 @@ async def get_agent_channel(agent_name: str) -> TextChannel | None:
         if isinstance(ch, TextChannel):
             return ch
     normalized = normalize_channel_name(agent_name)
-    if active_category:
-        for ch in active_category.text_channels:
+    for cat in (axi_category, active_category):
+        if cat is None:
+            continue
+        for ch in cat.text_channels:
             if ch.name == normalized:
                 return ch
     return None
+
+
+async def deduplicate_master_channel() -> None:
+    """Delete duplicate axi-master channels and ensure the survivor is in Axi category.
+
+    Called once during startup before ensure_agent_channel() for master.
+    """
+    normalized = normalize_channel_name(config.MASTER_AGENT_NAME)
+    master_channels: list[TextChannel] = [
+        ch
+        for cat in (axi_category, active_category, killed_category)
+        if cat is not None
+        for ch in cat.text_channels
+        if ch.name == normalized
+    ]
+
+    if len(master_channels) <= 1:
+        return
+
+    # Prefer the one already in Axi category
+    keep: TextChannel | None = None
+    if axi_category:
+        for ch in master_channels:
+            if ch.category_id == axi_category.id:
+                keep = ch
+                break
+    if keep is None:
+        keep = master_channels[0]
+
+    for ch in master_channels:
+        if ch.id != keep.id:
+            try:
+                await ch.delete(reason="Duplicate axi-master channel")
+                log.info("Deleted duplicate axi-master channel (id=%d, category=%s)", ch.id, ch.category and ch.category.name)
+            except discord.HTTPException as e:
+                log.warning("Failed to delete duplicate axi-master channel: %s", e)
+                if _send_to_exceptions:
+                    await _send_to_exceptions(f"Failed to delete duplicate axi-master channel: `{e}`")
+
+    log.info("Deduplicated axi-master channels — kept id=%d", keep.id)
 
 
 async def get_master_channel() -> TextChannel | None:

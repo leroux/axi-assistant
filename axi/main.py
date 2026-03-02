@@ -1960,6 +1960,7 @@ async def _setup_guild_infrastructure(master_session: AgentSession) -> None:
     """Set up Discord guild categories and master channel."""
     try:
         await agents.ensure_guild_infrastructure()
+        await channels.deduplicate_master_channel()
         master_channel = await agents.ensure_agent_channel(config.MASTER_AGENT_NAME)
         master_session.discord_channel_id = master_channel.id
         agents.channel_to_agent[master_channel.id] = config.MASTER_AGENT_NAME
