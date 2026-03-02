@@ -31,6 +31,7 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 from discord import TextChannel
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 
 from agenthub.procmux_wire import ProcmuxProcessConnection
@@ -2001,6 +2002,7 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         log.info("STREAM_START[%s] caller=%s", stream_id, caller)
 
     span = _tracer.start_span("stream_to_discord", attributes={"agent.name": session.name, "discord.channel": str(channel.id)})
+    ctx_token = otel_context.attach(trace.set_span_in_context(span))
     t0 = time.monotonic()
     t_first_event: float | None = None
 
@@ -2057,6 +2059,7 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
             await _live_edit_finalize(ctx, session)
         log.info("STREAM_END[%s] result=rate_limit msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
         span.set_attributes({"stream.msg_total": ctx.msg_total, "stream.flush_count": ctx.flush_count})
+        otel_context.detach(ctx_token)
         span.end()
         return None
 
@@ -2069,6 +2072,7 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
             ctx.flush_count,
         )
         span.set_attributes({"stream.msg_total": ctx.msg_total, "stream.flush_count": ctx.flush_count})
+        otel_context.detach(ctx_token)
         span.end()
         return ctx.hit_transient_error
 
@@ -2090,6 +2094,7 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         "stream.flush_count": ctx.flush_count,
         "stream.time_to_first_event_ms": ttfe_ms,
     })
+    otel_context.detach(ctx_token)
     span.end()
     return None
 
@@ -2101,57 +2106,54 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
 
 async def stream_with_retry(session: AgentSession, channel: TextChannel) -> bool:
     """Stream response with retry on transient API errors. Returns True on success."""
-    span = _tracer.start_span("stream_with_retry", attributes={"agent.name": session.name})
-    log.info("RETRY_ENTER[%s] starting initial stream", session.name)
-    error = await stream_response_to_channel(session, channel)
-    if error is None:
-        log.info("RETRY_EXIT[%s] first attempt succeeded", session.name)
-        span.set_attribute("retry.attempts", 1)
-        span.end()
-        return True
-
-    log.warning("RETRY_TRIGGERED[%s] error=%s \u2014 will retry", session.name, error)
-    for attempt in range(2, config.API_ERROR_MAX_RETRIES + 1):
-        delay = config.API_ERROR_BASE_DELAY * (2 ** (attempt - 2))
-        log.warning(
-            "Agent '%s' transient error '%s', retrying in %ds (attempt %d/%d)",
-            session.name,
-            error,
-            delay,
-            attempt,
-            config.API_ERROR_MAX_RETRIES,
-        )
-        await channel.send(
-            f"\u26a0\ufe0f API error, retrying in {delay}s... (attempt {attempt}/{config.API_ERROR_MAX_RETRIES})"
-        )
-        await asyncio.sleep(delay)
-
-        try:
-            assert session.client is not None
-            get_stdio_logger(session.name, config.LOG_DIR).debug(
-                ">>> STDIN  %s", json.dumps({"type": "retry", "content": "Continue from where you left off."})
-            )
-            await session.client.query(as_stream("Continue from where you left off."))
-        except Exception:
-            log.exception("Agent '%s' retry query failed", session.name)
-            continue
-
+    with _tracer.start_as_current_span("stream_with_retry", attributes={"agent.name": session.name}) as span:
+        log.info("RETRY_ENTER[%s] starting initial stream", session.name)
         error = await stream_response_to_channel(session, channel)
         if error is None:
-            span.set_attribute("retry.attempts", attempt)
-            span.end()
+            log.info("RETRY_EXIT[%s] first attempt succeeded", session.name)
+            span.set_attribute("retry.attempts", 1)
             return True
 
-    log.error(
-        "Agent '%s' transient error persisted after %d retries",
-        session.name,
-        config.API_ERROR_MAX_RETRIES,
-    )
-    await channel.send(f"\u274c API error persisted after {config.API_ERROR_MAX_RETRIES} retries. Try again later.")
-    span.set_attribute("retry.exhausted", True)
-    span.set_status(trace.StatusCode.ERROR, "retries exhausted")
-    span.end()
-    return False
+        log.warning("RETRY_TRIGGERED[%s] error=%s \u2014 will retry", session.name, error)
+        for attempt in range(2, config.API_ERROR_MAX_RETRIES + 1):
+            delay = config.API_ERROR_BASE_DELAY * (2 ** (attempt - 2))
+            log.warning(
+                "Agent '%s' transient error '%s', retrying in %ds (attempt %d/%d)",
+                session.name,
+                error,
+                delay,
+                attempt,
+                config.API_ERROR_MAX_RETRIES,
+            )
+            await channel.send(
+                f"\u26a0\ufe0f API error, retrying in {delay}s... (attempt {attempt}/{config.API_ERROR_MAX_RETRIES})"
+            )
+            await asyncio.sleep(delay)
+
+            try:
+                assert session.client is not None
+                get_stdio_logger(session.name, config.LOG_DIR).debug(
+                    ">>> STDIN  %s", json.dumps({"type": "retry", "content": "Continue from where you left off."})
+                )
+                await session.client.query(as_stream("Continue from where you left off."))
+            except Exception:
+                log.exception("Agent '%s' retry query failed", session.name)
+                continue
+
+            error = await stream_response_to_channel(session, channel)
+            if error is None:
+                span.set_attribute("retry.attempts", attempt)
+                return True
+
+        log.error(
+            "Agent '%s' transient error persisted after %d retries",
+            session.name,
+            config.API_ERROR_MAX_RETRIES,
+        )
+        await channel.send(f"\u274c API error persisted after {config.API_ERROR_MAX_RETRIES} retries. Try again later.")
+        span.set_attribute("retry.exhausted", True)
+        span.set_status(trace.StatusCode.ERROR, "retries exhausted")
+        return False
 
 
 async def handle_query_timeout(session: AgentSession, channel: TextChannel) -> None:
@@ -2269,7 +2271,7 @@ async def spawn_agent(
     packs: list[str] | None = None,
 ) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
-    span = _tracer.start_span(
+    with _tracer.start_as_current_span(
         "spawn_agent",
         attributes={
             "agent.name": name,
@@ -2278,64 +2280,62 @@ async def spawn_agent(
             "agent.resumed": bool(resume),
             "prompt.length": len(initial_prompt),
         },
-    )
-    os.makedirs(cwd, exist_ok=True)
+    ):
+        os.makedirs(cwd, exist_ok=True)
 
-    normalized = normalize_channel_name(name)
-    _channels_mod.bot_creating_channels.add(normalized)
-    channel = await ensure_agent_channel(name)
+        normalized = normalize_channel_name(name)
+        _channels_mod.bot_creating_channels.add(normalized)
+        channel = await ensure_agent_channel(name)
 
-    agent_label = "flowcoder" if agent_type == "flowcoder" else "claude code"
-    if resume:
-        await send_system(
-            channel, f"Resuming **{agent_label}** agent **{name}** (session `{resume[:8]}\u2026`) in `{cwd}`..."
+        agent_label = "flowcoder" if agent_type == "flowcoder" else "claude code"
+        if resume:
+            await send_system(
+                channel, f"Resuming **{agent_label}** agent **{name}** (session `{resume[:8]}\u2026`) in `{cwd}`..."
+            )
+        else:
+            await send_system(channel, f"Spawning **{agent_label}** agent **{name}** in `{cwd}`...")
+
+        prompt = make_spawned_agent_system_prompt(cwd, packs=packs)
+        mcp_servers = _build_mcp_servers(name, cwd)
+
+        session = AgentSession(
+            name=name,
+            agent_type=agent_type,
+            cwd=cwd,
+            system_prompt=prompt,
+            system_prompt_hash=compute_prompt_hash(prompt),
+            client=None,
+            session_id=resume,
+            discord_channel_id=channel.id,
+            mcp_servers=mcp_servers,
         )
-    else:
-        await send_system(channel, f"Spawning **{agent_label}** agent **{name}** in `{cwd}`...")
 
-    prompt = make_spawned_agent_system_prompt(cwd, packs=packs)
-    mcp_servers = _build_mcp_servers(name, cwd)
+        agents[name] = session
+        channel_to_agent[channel.id] = name
+        _channels_mod.bot_creating_channels.discard(normalized)
+        log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)
 
-    session = AgentSession(
-        name=name,
-        agent_type=agent_type,
-        cwd=cwd,
-        system_prompt=prompt,
-        system_prompt_hash=compute_prompt_hash(prompt),
-        client=None,
-        session_id=resume,
-        discord_channel_id=channel.id,
-        mcp_servers=mcp_servers,
-    )
+        # Update channel topic — fire-and-forget to avoid blocking on Discord's
+        # strict channel-edit rate limit (2 per 10 min).  A category move during
+        # kill/respawn already consumes the budget, so a synchronous topic edit
+        # would stall spawn_agent and prevent the initial prompt from launching.
+        desired_topic = format_channel_topic(cwd, resume, session.system_prompt_hash, agent_type=agent_type)
+        if channel.topic != desired_topic:
+            log.info("Updating topic on #%s: %r -> %r", channel.name, channel.topic, desired_topic)
 
-    agents[name] = session
-    channel_to_agent[channel.id] = name
-    _channels_mod.bot_creating_channels.discard(normalized)
-    log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)
+            async def _update_topic(ch: Any, topic: str) -> None:
+                try:
+                    await ch.edit(topic=topic)
+                except Exception:
+                    log.warning("Failed to update topic on #%s", ch.name, exc_info=True)
 
-    # Update channel topic — fire-and-forget to avoid blocking on Discord's
-    # strict channel-edit rate limit (2 per 10 min).  A category move during
-    # kill/respawn already consumes the budget, so a synchronous topic edit
-    # would stall spawn_agent and prevent the initial prompt from launching.
-    desired_topic = format_channel_topic(cwd, resume, session.system_prompt_hash, agent_type=agent_type)
-    if channel.topic != desired_topic:
-        log.info("Updating topic on #%s: %r -> %r", channel.name, channel.topic, desired_topic)
+            fire_and_forget(_update_topic(channel, desired_topic))
 
-        async def _update_topic(ch: Any, topic: str) -> None:
-            try:
-                await ch.edit(topic=topic)
-            except Exception:
-                log.warning("Failed to update topic on #%s", ch.name, exc_info=True)
+        if not initial_prompt:
+            await send_system(channel, f"**{agent_label.title()}** agent **{name}** is ready (sleeping).")
+            return
 
-        fire_and_forget(_update_topic(channel, desired_topic))
-
-    if not initial_prompt:
-        await send_system(channel, f"**{agent_label.title()}** agent **{name}** is ready (sleeping).")
-        span.end()
-        return
-
-    fire_and_forget(run_initial_prompt(session, initial_prompt, channel))
-    span.end()
+        fire_and_forget(run_initial_prompt(session, initial_prompt, channel))
 
 
 async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
@@ -2363,72 +2363,70 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
 
 async def run_initial_prompt(session: AgentSession, prompt: MessageContent, channel: TextChannel) -> None:
     """Run the initial prompt for a spawned agent."""
-    span = _tracer.start_span(
+    with _tracer.start_as_current_span(
         "run_initial_prompt",
         attributes={
             "agent.name": session.name,
             "prompt.length": len(prompt) if isinstance(prompt, str) else -1,
         },
-    )
-    try:
-        async with session.query_lock:
-            if not is_awake(session):
-                try:
-                    await wake_agent(session)
-                except ConcurrencyLimitError:
-                    log.info("Concurrency limit hit for '%s' initial prompt \u2014 queuing", session.name)
-                    session.message_queue.append((prompt, channel, None))
-                    awake = count_awake_agents()
-                    await send_system(
-                        channel,
-                        f"\u23f3 All {awake} agent slots are busy. Initial prompt queued \u2014 will run when a slot opens.",
-                    )
-                    return
-                except Exception:
-                    log.exception("Failed to wake agent '%s' for initial prompt", session.name)
-                    await send_system(channel, f"Failed to wake agent **{session.name}**.")
-                    return
+    ):
+        try:
+            async with session.query_lock:
+                if not is_awake(session):
+                    try:
+                        await wake_agent(session)
+                    except ConcurrencyLimitError:
+                        log.info("Concurrency limit hit for '%s' initial prompt \u2014 queuing", session.name)
+                        session.message_queue.append((prompt, channel, None))
+                        awake = count_awake_agents()
+                        await send_system(
+                            channel,
+                            f"\u23f3 All {awake} agent slots are busy. Initial prompt queued \u2014 will run when a slot opens.",
+                        )
+                        return
+                    except Exception:
+                        log.exception("Failed to wake agent '%s' for initial prompt", session.name)
+                        await send_system(channel, f"Failed to wake agent **{session.name}**.")
+                        return
 
-            session.last_activity = datetime.now(UTC)
-            drain_stderr(session)
-            drain_sdk_buffer(session)
-
-            prompt_text = prompt if isinstance(prompt, str) else str(prompt)
-            await send_long(channel, f"*System:* \U0001f4dd **Initial prompt:**\n{prompt_text}")
-
-            if session.agent_log:
-                session.agent_log.info("PROMPT: %s", content_summary(prompt))
-            log.info("INITIAL_PROMPT[%s] running initial prompt: %s", session.name, content_summary(prompt))
-            session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
-            try:
-                await process_message(session, prompt, channel)
                 session.last_activity = datetime.now(UTC)
-            except RuntimeError as e:
-                log.warning("Handler error for '%s' initial prompt: %s", session.name, e)
-                await send_system(channel, f"Error: {e}")
-            finally:
-                session.activity = ActivityState(phase="idle")
+                drain_stderr(session)
+                drain_sdk_buffer(session)
 
-        log.debug("Initial prompt completed for '%s'", session.name)
-        await send_system(channel, f"Agent **{session.name}** finished initial task. {_user_mentions()}")
+                prompt_text = prompt if isinstance(prompt, str) else str(prompt)
+                await send_long(channel, f"*System:* \U0001f4dd **Initial prompt:**\n{prompt_text}")
 
-    except Exception:
-        log.exception("Error running initial prompt for agent '%s'", session.name)
-        await send_system(
-            channel, f"Agent **{session.name}** encountered an error during initial task. {_user_mentions()}"
-        )
+                if session.agent_log:
+                    session.agent_log.info("PROMPT: %s", content_summary(prompt))
+                log.info("INITIAL_PROMPT[%s] running initial prompt: %s", session.name, content_summary(prompt))
+                session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
+                try:
+                    await process_message(session, prompt, channel)
+                    session.last_activity = datetime.now(UTC)
+                except RuntimeError as e:
+                    log.warning("Handler error for '%s' initial prompt: %s", session.name, e)
+                    await send_system(channel, f"Error: {e}")
+                finally:
+                    session.activity = ActivityState(phase="idle")
 
-    if scheduler.should_yield(session.name):
-        log.info("Scheduler yield: '%s' sleeping after initial prompt (skipping queue)", session.name)
-    else:
-        await process_message_queue(session)
+            log.debug("Initial prompt completed for '%s'", session.name)
+            await send_system(channel, f"Agent **{session.name}** finished initial task. {_user_mentions()}")
 
-    try:
-        await sleep_agent(session)
-    except Exception:
-        log.exception("Error sleeping agent '%s' after initial prompt", session.name)
-    finally:
-        span.end()
+        except Exception:
+            log.exception("Error running initial prompt for agent '%s'", session.name)
+            await send_system(
+                channel, f"Agent **{session.name}** encountered an error during initial task. {_user_mentions()}"
+            )
+
+        if scheduler.should_yield(session.name):
+            log.info("Scheduler yield: '%s' sleeping after initial prompt (skipping queue)", session.name)
+        else:
+            await process_message_queue(session)
+
+        try:
+            await sleep_agent(session)
+        except Exception:
+            log.exception("Error sleeping agent '%s' after initial prompt", session.name)
 
 
 async def process_message_queue(session: AgentSession) -> None:
@@ -2641,58 +2639,52 @@ async def _process_inter_agent_prompt(
 async def connect_procmux() -> None:
     """Connect to the agent bridge and schedule reconnections for running agents."""
     global procmux_conn, wire_conn
-    span = _tracer.start_span("connect_procmux")
+    with _tracer.start_as_current_span("connect_procmux") as span:
+        try:
+            procmux_conn = await ensure_bridge(config.BRIDGE_SOCKET_PATH, timeout=10.0)
+            wire_conn = ProcmuxProcessConnection(procmux_conn)
+            log.info("Bridge connection established")
+            span.set_attribute("procmux.connected", True)
+        except Exception:
+            log.exception("Failed to connect to bridge \u2014 agents will use direct subprocess mode")
+            procmux_conn = None
+            wire_conn = None
+            span.set_attribute("procmux.connected", False)
+            return
 
-    try:
-        procmux_conn = await ensure_bridge(config.BRIDGE_SOCKET_PATH, timeout=10.0)
-        wire_conn = ProcmuxProcessConnection(procmux_conn)
-        log.info("Bridge connection established")
-        span.set_attribute("procmux.connected", True)
-    except Exception:
-        log.exception("Failed to connect to bridge \u2014 agents will use direct subprocess mode")
-        procmux_conn = None
-        wire_conn = None
-        span.set_attribute("procmux.connected", False)
-        span.end()
-        return
+        try:
+            result = await procmux_conn.send_command("list")
+            bridge_agents = result.agents or {}
+            log.info("Bridge reports %d agent(s): %s", len(bridge_agents), list(bridge_agents.keys()))
+            span.set_attribute("procmux.agents_found", len(bridge_agents))
+        except Exception:
+            log.exception("Failed to list bridge agents")
+            return
 
-    try:
-        result = await procmux_conn.send_command("list")
-        bridge_agents = result.agents or {}
-        log.info("Bridge reports %d agent(s): %s", len(bridge_agents), list(bridge_agents.keys()))
-        span.set_attribute("procmux.agents_found", len(bridge_agents))
-    except Exception:
-        log.exception("Failed to list bridge agents")
-        span.end()
-        return
+        if not bridge_agents:
+            return
 
-    if not bridge_agents:
-        span.end()
-        return
+        for agent_name, info in bridge_agents.items():
+            session = agents.get(agent_name)
+            if session is None:
+                log.warning("Bridge has agent '%s' but no matching session \u2014 killing", agent_name)
+                try:
+                    await procmux_conn.send_command("kill", name=agent_name)
+                except Exception:
+                    log.exception("Failed to kill orphan bridge agent '%s'", agent_name)
+                continue
 
-    for agent_name, info in bridge_agents.items():
-        session = agents.get(agent_name)
-        if session is None:
-            log.warning("Bridge has agent '%s' but no matching session \u2014 killing", agent_name)
-            try:
-                await procmux_conn.send_command("kill", name=agent_name)
-            except Exception:
-                log.exception("Failed to kill orphan bridge agent '%s'", agent_name)
-            continue
+            status = info.get("status", "unknown")
+            buffered = info.get("buffered_msgs", 0)
+            log.info(
+                "Reconnecting agent '%s' (status=%s, buffered=%d)",
+                agent_name,
+                status,
+                buffered,
+            )
 
-        status = info.get("status", "unknown")
-        buffered = info.get("buffered_msgs", 0)
-        log.info(
-            "Reconnecting agent '%s' (status=%s, buffered=%d)",
-            agent_name,
-            status,
-            buffered,
-        )
-
-        session.reconnecting = True
-        fire_and_forget(_reconnect_and_drain(session, info))
-
-    span.end()
+            session.reconnecting = True
+            fire_and_forget(_reconnect_and_drain(session, info))
 
 
 async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any]) -> None:
@@ -2701,6 +2693,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
         "reconnect_and_drain",
         attributes={"agent.name": session.name, "procmux.buffered_msgs": bridge_info.get("buffered_msgs", 0)},
     )
+    ctx_token = otel_context.attach(trace.set_span_in_context(span))
     try:
         async with session.query_lock:
             if procmux_conn is None or not procmux_conn.is_alive:
@@ -2788,6 +2781,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
         span.set_status(trace.StatusCode.ERROR, "reconnect failed")
         session.reconnecting = False
     finally:
+        otel_context.detach(ctx_token)
         span.end()
 
     await process_message_queue(session)

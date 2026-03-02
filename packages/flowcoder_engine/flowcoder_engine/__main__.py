@@ -25,12 +25,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import sys
 import time
 
 import flowcoder_flowchart as fc_lib
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from .cli import build_variables, parse_args
 from .protocol import ProtocolHandler
@@ -38,6 +44,20 @@ from .resolver import CommandNotFoundError, resolve_command
 from .session import Session
 from .subprocess import ClaudeProcess, find_claude
 from .walker import ExecutionError, GraphWalker
+
+_log = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
+
+
+def _init_tracing() -> TracerProvider | None:
+    """Set up OTel TracerProvider with OTLP/gRPC exporter."""
+    endpoint = os.environ.get("OTEL_ENDPOINT", "http://localhost:4317")
+    resource = Resource.create({"service.name": "flowcoder-engine"})
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True)))
+    trace.set_tracer_provider(provider)
+    _log.info("OpenTelemetry tracing initialized (endpoint=%s)", endpoint)
+    return provider
 
 
 def _parse_slash_command(text: str) -> tuple[str, str] | None:
@@ -137,8 +157,12 @@ class _MessageRouter:
 
 
 async def main() -> None:
+    global _tracer
     args = parse_args()
     protocol = ProtocolHandler()
+
+    otel_provider = _init_tracing()
+    _tracer = trace.get_tracer(__name__)
 
     # Find claude binary
     try:
@@ -257,6 +281,8 @@ async def main() -> None:
 
     finally:
         await process.stop()
+        if otel_provider:
+            otel_provider.shutdown()
         protocol.log("Shutdown complete")
 
 
@@ -287,25 +313,26 @@ async def _proxy_turn(
     router to inner Claude, preventing deadlocks during MCP init and tool
     permission requests.
     """
-    await process.write(user_msg)
+    with _tracer.start_as_current_span("proxy_turn"):
+        await process.write(user_msg)
 
-    drainer = asyncio.create_task(
-        _drain_control_responses(process, router)
-    )
-    try:
-        while True:
-            data = await process.read()
-            if data is None:
-                return
-            protocol.emit(data)
-            if data.get("type") == "result":
-                return
-    finally:
-        drainer.cancel()
+        drainer = asyncio.create_task(
+            _drain_control_responses(process, router)
+        )
         try:
-            await drainer
-        except asyncio.CancelledError:
-            pass
+            while True:
+                data = await process.read()
+                if data is None:
+                    return
+                protocol.emit(data)
+                if data.get("type") == "result":
+                    return
+        finally:
+            drainer.cancel()
+            try:
+                await drainer
+            except asyncio.CancelledError:
+                pass
 
 
 async def _drain_control_responses(
@@ -352,68 +379,77 @@ async def _run_flowchart_takeover(
     args: object,
 ) -> None:
     """Execute a flowchart command in takeover mode."""
-    start_time = time.monotonic()
-
-    # Validate flowchart
-    validation = fc_lib.validate(cmd.flowchart)
-    if not validation.valid:
-        protocol.emit_result(
-            f"Flowchart validation failed: {validation.errors}",
-            is_error=True,
-        )
-        return
-
-    # Build variables
-    try:
-        variables = build_variables(cmd_args, cmd.arguments)
-    except ValueError as e:
-        protocol.emit_result(str(e), is_error=True)
-        return
-
     block_count = len(cmd.flowchart.blocks)
-    protocol.emit_flowchart_start(cmd_name, cmd_args, block_count)
+    with _tracer.start_as_current_span(
+        "flowchart.takeover",
+        attributes={"command.name": cmd_name, "command.args": cmd_args, "flowchart.block_count": block_count},
+    ) as span:
+        start_time = time.monotonic()
 
-    walker = GraphWalker(
-        cmd.flowchart,
-        session,
-        variables,
-        protocol,
-        max_blocks=args.max_blocks,
-        search_paths=args.search_paths or [],
-    )
+        # Validate flowchart
+        validation = fc_lib.validate(cmd.flowchart)
+        if not validation.valid:
+            protocol.emit_result(
+                f"Flowchart validation failed: {validation.errors}",
+                is_error=True,
+            )
+            span.set_status(trace.StatusCode.ERROR, "validation failed")
+            return
 
-    try:
-        result = await walker.run()
-        duration_ms = int((time.monotonic() - start_time) * 1000)
+        # Build variables
+        try:
+            variables = build_variables(cmd_args, cmd.arguments)
+        except ValueError as e:
+            protocol.emit_result(str(e), is_error=True)
+            span.set_status(trace.StatusCode.ERROR, str(e))
+            return
 
-        protocol.emit_flowchart_complete(
-            status=result.status,
-            duration_ms=duration_ms,
-            cost_usd=session.total_cost,
-            blocks_executed=len(result.log),
+        protocol.emit_flowchart_start(cmd_name, cmd_args, block_count)
+
+        walker = GraphWalker(
+            cmd.flowchart,
+            session,
+            variables,
+            protocol,
+            max_blocks=args.max_blocks,
+            search_paths=args.search_paths or [],
         )
 
-        protocol.emit_result(
-            json.dumps(result.variables),
-            is_error=result.status != "completed",
-            duration_ms=duration_ms,
-            num_turns=len(result.log),
-            total_cost_usd=session.total_cost,
-        )
+        try:
+            result = await walker.run()
+            duration_ms = int((time.monotonic() - start_time) * 1000)
 
-    except ExecutionError as e:
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        protocol.emit_flowchart_complete(
-            status="error", duration_ms=duration_ms
-        )
-        protocol.emit_result(str(e), is_error=True)
+            protocol.emit_flowchart_complete(
+                status=result.status,
+                duration_ms=duration_ms,
+                cost_usd=session.total_cost,
+                blocks_executed=len(result.log),
+            )
 
-    except Exception as e:
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        protocol.emit_flowchart_complete(
-            status="error", duration_ms=duration_ms
-        )
-        protocol.emit_result(f"Unexpected error: {e}", is_error=True)
+            protocol.emit_result(
+                json.dumps(result.variables),
+                is_error=result.status != "completed",
+                duration_ms=duration_ms,
+                num_turns=len(result.log),
+                total_cost_usd=session.total_cost,
+            )
+            span.set_attributes({"flowchart.status": result.status, "flowchart.duration_ms": duration_ms})
+
+        except ExecutionError as e:
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            protocol.emit_flowchart_complete(
+                status="error", duration_ms=duration_ms
+            )
+            protocol.emit_result(str(e), is_error=True)
+            span.set_status(trace.StatusCode.ERROR, str(e))
+
+        except Exception as e:
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            protocol.emit_flowchart_complete(
+                status="error", duration_ms=duration_ms
+            )
+            protocol.emit_result(f"Unexpected error: {e}", is_error=True)
+            span.set_status(trace.StatusCode.ERROR, str(e))
 
 
 async def _handle_control_request(
