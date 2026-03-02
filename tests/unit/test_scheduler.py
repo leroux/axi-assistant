@@ -499,3 +499,66 @@ class TestConcurrentScenarios:
         assert "a" in scheduler._interactive
         scheduler.release_slot("a")
         assert "a" not in scheduler._interactive
+
+
+# ---------------------------------------------------------------------------
+# restore_slot
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreSlot:
+    async def test_restore_slot_basic(self) -> None:
+        """restore_slot adds to _slots and increases slot_count."""
+        init_scheduler({})
+        assert scheduler.slot_count() == 0
+        scheduler.restore_slot("agent-a")
+        assert "agent-a" in scheduler._slots
+        assert scheduler.slot_count() == 1
+
+    async def test_restore_slot_over_max(self) -> None:
+        """restore_slot works even if it exceeds max_slots.
+
+        After a hot restart the bridge may reconnect more agents than the
+        current config allows — we must not drop them.
+        """
+        init_scheduler({}, max_slots=1)
+        scheduler.restore_slot("a")
+        scheduler.restore_slot("b")
+        assert scheduler.slot_count() == 2
+
+    async def test_restore_slot_idempotent(self) -> None:
+        """Restoring the same name twice doesn't double-count."""
+        init_scheduler({})
+        scheduler.restore_slot("a")
+        scheduler.restore_slot("a")
+        assert scheduler.slot_count() == 1
+
+    async def test_restore_then_normal_eviction(self) -> None:
+        """After restoring N slots, requesting N+1 triggers eviction."""
+        a = await make_agent("a", awake=True, idle_secs=60)
+        agents_dict = {"a": a}
+        init_scheduler(agents_dict, max_slots=1)
+        scheduler.restore_slot("a")
+
+        b = await make_agent("b", awake=False)
+        agents_dict["b"] = b
+
+        await scheduler.request_slot("b")
+        assert a.client is None  # evicted
+        assert "b" in scheduler._slots
+
+    async def test_restore_then_release(self) -> None:
+        """Restored slot can be released normally, freeing capacity."""
+        init_scheduler({}, max_slots=1)
+        scheduler.restore_slot("a")
+        assert scheduler.slot_count() == 1
+        scheduler.release_slot("a")
+        assert scheduler.slot_count() == 0
+
+    async def test_restore_slot_appears_in_status(self) -> None:
+        """Restored slots show up in status() output."""
+        init_scheduler({})
+        scheduler.restore_slot("reconnected")
+        st = scheduler.status()
+        assert "reconnected" in st["slots"]
+        assert st["slot_count"] == 1

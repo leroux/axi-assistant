@@ -178,6 +178,16 @@ def should_yield(agent_name: str) -> bool:
     return agent_name in _yield_set
 
 
+def restore_slot(agent_name: str) -> None:
+    """Register an agent that's already awake (e.g. reconnected from bridge).
+
+    Unlike request_slot, this doesn't evict or queue — just records
+    that the agent holds a slot. Used during startup/reconnect.
+    """
+    _slots.add(agent_name)
+    log.debug("Slot restored for '%s' (%d/%d)", agent_name, len(_slots), _max_slots)
+
+
 def mark_interactive(agent_name: str) -> None:
     """Mark agent as interactive (user sent a message). Higher eviction resistance."""
     _interactive.add(agent_name)

@@ -1228,6 +1228,7 @@ async def end_session(name: str) -> None:
         if session.client is not None:
             await _disconnect_client(session.client, name)
             session.client = None
+            scheduler.release_slot(name)
         session.close_log()
         agents.pop(name, None)
         log.info("Session '%s' ended", name)
@@ -2735,6 +2736,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
             client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
             await client.__aenter__()
             session.client = client
+            scheduler.restore_slot(session.name)
             session.last_activity = datetime.now(UTC)
 
             if session.agent_log:
