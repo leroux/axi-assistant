@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     from claude_agent_sdk import ClaudeSDKClient
     from claude_agent_sdk.types import SystemPromptPreset
 
-    from axi.flowcoder import FlowcoderProcess, ManagedFlowcoderProcess
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -97,9 +96,6 @@ class AgentSession:
     reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
     bridge_busy: bool = False  # True when reconnected to a mid-task CLI (bridge idle=False)
     activity: ActivityState = field(default_factory=ActivityState)
-    flowcoder_process: FlowcoderProcess | ManagedFlowcoderProcess | None = None
-    flowcoder_command: str = ""
-    flowcoder_args: str = ""
     debug: bool = field(
         default_factory=lambda: os.environ.get("DISCORD_DEBUG", "").strip().lower() in ("1", "true", "on")
     )  # Post tool calls and thinking phases to Discord

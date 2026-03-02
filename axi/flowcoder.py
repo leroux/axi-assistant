@@ -1,13 +1,7 @@
-"""FlowcoderProcess — manages a flowcoder-engine subprocess via JSON-lines on stdin/stdout.
-
-Provides two implementations:
-- FlowcoderProcess: direct subprocess (default)
-- ManagedFlowcoderProcess: backed by procmux (via agenthub) for persistence across bot restarts
-"""
+"""Flowcoder engine helpers — binary resolution, CLI arg building, env construction."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -15,17 +9,34 @@ import shutil
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
-    from agenthub.procmux_wire import ProcmuxProcessConnection
+    from claude_agent_sdk.types import ClaudeAgentOptions
 
 log = logging.getLogger(__name__)
-
-from claudewire.types import ExitEvent, StderrEvent, StdoutEvent
 
 # ------------------------------------------------------------------
 # Shared helpers
 # ------------------------------------------------------------------
+
+_FLOWCODER_HOME = os.environ.get(
+    "FLOWCODER_HOME",
+    os.path.expanduser("~/flowcoder-rewrite"),
+)
+
+
+def get_engine_binary() -> str:
+    """Resolve the flowcoder-engine binary path."""
+    engine_bin = shutil.which("flowcoder-engine")
+    if engine_bin:
+        return engine_bin
+    return os.path.join(
+        _FLOWCODER_HOME, "packages", "flowcoder-engine", ".venv", "bin", "flowcoder-engine",
+    )
+
+
+def get_search_paths(extra: list[str] | None = None) -> list[str]:
+    """Return flowchart command search paths."""
+    default_search = os.path.join(_FLOWCODER_HOME, "examples", "commands")
+    return [default_search] + (extra or [])
 
 
 def build_engine_cmd(
@@ -37,27 +48,8 @@ def build_engine_cmd(
     and intercepts slash commands matching known flowcharts. The command
     and args are sent as a user message after starting, not as CLI flags.
     """
-
-    flowcoder_home = os.environ.get(
-        "FLOWCODER_HOME",
-        os.path.expanduser("~/flowcoder-rewrite"),
-    )
-
-    engine_bin = shutil.which("flowcoder-engine")
-    if not engine_bin:
-        engine_bin = os.path.join(
-            flowcoder_home,
-            "packages",
-            "flowcoder-engine",
-            ".venv",
-            "bin",
-            "flowcoder-engine",
-        )
-
-    default_search = os.path.join(flowcoder_home, "examples", "commands")
-
-    cmd: list[str] = [engine_bin]
-    for sp in [default_search] + (search_paths or []):
+    cmd: list[str] = [get_engine_binary()]
+    for sp in get_search_paths(search_paths):
         cmd += ["--search-path", sp]
     return cmd
 
@@ -71,310 +63,106 @@ def build_engine_env() -> dict[str, str]:
     }
 
 
-# ------------------------------------------------------------------
-# Direct subprocess implementation
-# ------------------------------------------------------------------
+def build_engine_cli_args(options: ClaudeAgentOptions) -> list[str]:
+    """Build full flowcoder-engine CLI args from agent options.
 
+    Produces the command that BridgeTransport.spawn() passes to procmux.
+    The engine parses --search-path and --max-blocks; everything else is
+    forwarded as passthrough args to inner Claude via parse_known_args.
 
-class FlowcoderProcess:
-    """Wraps a ``flowcoder-engine`` subprocess.
-
-    Communication uses newline-delimited JSON on stdin (inbound) and stdout
-    (outbound).  Stderr is forwarded to the logger.
+    Mirrors the essential flags from SubprocessCLITransport._build_command().
     """
+    cmd: list[str] = [get_engine_binary()]
 
-    is_managed: bool = False
+    # Engine-specific flags
+    for sp in get_search_paths():
+        cmd += ["--search-path", sp]
 
-    def __init__(
-        self,
-        command: str,
-        args: str = "",
-        search_paths: list[str] | None = None,
-        cwd: str | None = None,
-    ) -> None:
-        self.command = command
-        self.args = args
-        self.search_paths = search_paths or []
-        self.cwd = cwd
-        self._proc: asyncio.subprocess.Process | None = None
-        self._stderr_task: asyncio.Task[None] | None = None
+    # -- Claude passthrough flags (engine forwards to inner Claude) --
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+    cmd += ["--output-format", "stream-json", "--verbose"]
 
-    async def start(self) -> None:
-        """Spawn the flowcoder-engine subprocess."""
-        cmd = build_engine_cmd(self.search_paths)
-        env = build_engine_env()
+    # System prompt
+    if options.system_prompt is None:
+        cmd += ["--system-prompt", ""]
+    elif isinstance(options.system_prompt, str):
+        cmd += ["--system-prompt", options.system_prompt]
+    else:
+        if options.system_prompt.get("type") == "preset" and "append" in options.system_prompt:
+            cmd += ["--append-system-prompt", options.system_prompt["append"]]
 
-        log.info("Starting flowcoder-engine: %s (cwd=%s)", " ".join(cmd), self.cwd)
+    if options.model:
+        cmd += ["--model", options.model]
 
-        self._proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self.cwd,
-            env=env,
-        )
+    if options.fallback_model:
+        cmd += ["--fallback-model", options.fallback_model]
 
-        self._stderr_task = asyncio.create_task(self._forward_stderr())
+    if options.permission_mode:
+        cmd += ["--permission-mode", options.permission_mode]
 
-    async def _forward_stderr(self) -> None:
-        """Read stderr lines and forward to the logger."""
-        assert self._proc
-        assert self._proc.stderr
-        try:
-            while True:
-                line = await self._proc.stderr.readline()
-                if not line:
-                    break
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    log.debug("[flowcoder-engine stderr] %s", text)
-        except asyncio.CancelledError:
-            pass
+    if options.resume:
+        cmd += ["--resume", options.resume]
 
-    # ------------------------------------------------------------------
-    # I/O
-    # ------------------------------------------------------------------
+    if options.disallowed_tools:
+        cmd += ["--disallowedTools", ",".join(options.disallowed_tools)]
 
-    async def messages(self) -> AsyncIterator[dict[str, Any]]:
-        """Yield parsed JSON messages from stdout, one per line."""
-        if self._proc is None or self._proc.stdout is None:
-            raise RuntimeError("FlowcoderProcess not running — call start() first")
-        while True:
-            line = await self._proc.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace").strip()
-            if not text:
-                continue
+    # MCP servers
+    if options.mcp_servers and isinstance(options.mcp_servers, dict):
+        servers_for_cli: dict[str, Any] = {}
+        for name, cfg in options.mcp_servers.items():
+            if cfg.get("type") == "sdk":
+                servers_for_cli[name] = {k: v for k, v in cfg.items() if k != "instance"}
+            else:
+                servers_for_cli[name] = cfg
+        if servers_for_cli:
+            cmd += ["--mcp-config", json.dumps({"mcpServers": servers_for_cli})]
+
+    if options.include_partial_messages:
+        cmd.append("--include-partial-messages")
+
+    # Thinking / effort
+    resolved_max_thinking = options.max_thinking_tokens
+    if options.thinking is not None:
+        t = options.thinking
+        if t["type"] == "adaptive":
+            if resolved_max_thinking is None:
+                resolved_max_thinking = 32_000
+        elif t["type"] == "enabled":
+            resolved_max_thinking = t["budget_tokens"]
+        elif t["type"] == "disabled":
+            resolved_max_thinking = 0
+    if resolved_max_thinking is not None:
+        cmd += ["--max-thinking-tokens", str(resolved_max_thinking)]
+
+    if options.effort is not None:
+        cmd += ["--effort", options.effort]
+
+    # Settings / sandbox
+    settings_obj: dict[str, Any] = {}
+    if options.settings is not None:
+        s = options.settings.strip()
+        if s.startswith("{"):
             try:
-                yield json.loads(text)
+                settings_obj = json.loads(s)
             except json.JSONDecodeError:
-                log.warning("flowcoder: non-JSON stdout line: %s", text[:200])
-
-    async def send(self, msg: dict[str, Any]) -> None:
-        """Write a JSON-line message to the process's stdin."""
-        if self._proc and self._proc.stdin and not self._proc.stdin.is_closing():
-            data = json.dumps(msg, separators=(",", ":")) + "\n"
-            self._proc.stdin.write(data.encode("utf-8"))
-            await self._proc.stdin.drain()
-
-    # ------------------------------------------------------------------
-    # Shutdown
-    # ------------------------------------------------------------------
-
-    async def stop(self) -> None:
-        """Gracefully stop the subprocess (shutdown message, close stdin, terminate, kill)."""
-        if self._proc is None:
-            return
-
-        # Send shutdown message so the engine exits its message loop cleanly
-        try:
-            await self.send({"type": "shutdown"})
-        except Exception:
-            pass
-
-        # Close stdin to signal EOF
-        if self._proc.stdin and not self._proc.stdin.is_closing():
-            try:
-                self._proc.stdin.close()
-            except Exception:
                 pass
+    if options.sandbox is not None:
+        settings_obj["sandbox"] = options.sandbox
+    if settings_obj:
+        cmd += ["--settings", json.dumps(settings_obj)]
 
-        # Try graceful termination
-        if self._proc.returncode is None:
-            try:
-                self._proc.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(self._proc.wait(), timeout=5.0)
-            except TimeoutError:
-                try:
-                    self._proc.kill()
-                except ProcessLookupError:
-                    pass
-                await self._proc.wait()
+    # Setting sources
+    sources_value = ",".join(options.setting_sources) if options.setting_sources is not None else ""
+    cmd += ["--setting-sources", sources_value]
 
-        # Cancel stderr forwarder
-        if self._stderr_task and not self._stderr_task.done():
-            self._stderr_task.cancel()
-            try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
+    # Extra args passthrough
+    for flag, value in options.extra_args.items():
+        if value is None:
+            cmd.append(f"--{flag}")
+        else:
+            cmd += [f"--{flag}", str(value)]
 
-        log.info("flowcoder-engine stopped (returncode=%s)", self._proc.returncode)
+    # Always last
+    cmd += ["--input-format", "stream-json"]
 
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def is_running(self) -> bool:
-        """True if the subprocess is still running."""
-        return self._proc is not None and self._proc.returncode is None
-
-
-# ------------------------------------------------------------------
-# Managed (procmux-backed) implementation
-# ------------------------------------------------------------------
-
-
-class ManagedFlowcoderProcess:
-    """Flowcoder engine managed by procmux via agenthub.
-
-    Same interface as FlowcoderProcess but the subprocess lives in procmux,
-    surviving bot.py restarts. Uses the claudewire ProcessConnection protocol.
-    """
-
-    is_managed: bool = True
-
-    def __init__(
-        self,
-        process_name: str,
-        conn: ProcmuxProcessConnection,
-        command: str,
-        args: str = "",
-        search_paths: list[str] | None = None,
-        cwd: str | None = None,
-    ) -> None:
-        self.process_name = process_name
-        self.command = command
-        self.args = args
-        self.search_paths = search_paths or []
-        self.cwd = cwd
-        self._conn = conn
-        self._queue: Any = None  # ProcessEventQueue
-        self._running = False
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    async def start(self) -> None:
-        """Spawn the engine in procmux and subscribe to its output."""
-        cmd = build_engine_cmd(self.search_paths)
-        env = build_engine_env()
-
-        log.info(
-            "Starting managed flowcoder '%s': %s (cwd=%s)",
-            self.process_name,
-            " ".join(cmd),
-            self.cwd,
-        )
-
-        # Register queue before spawn so we don't miss early output
-        self._queue = self._conn.register(self.process_name)
-
-        result = await self._conn.spawn(
-            self.process_name,
-            cli_args=cmd,
-            env=env,
-            cwd=self.cwd or "",
-        )
-        if not result.ok and not result.already_running:
-            self._conn.unregister(self.process_name)
-            self._queue = None
-            raise RuntimeError(f"Spawn failed for '{self.process_name}': {result.error}")
-
-        sub_result = await self._conn.subscribe(self.process_name)
-        if not sub_result.ok:
-            log.warning("Subscribe warning for '%s': %s", self.process_name, sub_result.error)
-
-        self._running = True
-
-    async def subscribe(self) -> Any:
-        """Reconnect — register + subscribe without spawning.
-
-        Returns the subscribe CommandResult (has .replayed, .status, .idle fields).
-        """
-        self._queue = self._conn.register(self.process_name)
-        result = await self._conn.subscribe(self.process_name)
-        if not result.ok:
-            self._conn.unregister(self.process_name)
-            self._queue = None
-            raise RuntimeError(f"Subscribe failed for '{self.process_name}': {result.error}")
-        self._running = True
-        return result
-
-    # ------------------------------------------------------------------
-    # I/O
-    # ------------------------------------------------------------------
-
-    async def messages(self) -> AsyncIterator[dict[str, Any]]:
-        """Async iterator reading from procmux agent queue.
-
-        Yields StdoutEvent.data dicts, logs StderrEvent, stops on ExitEvent/None.
-        """
-        if not self._queue:
-            return
-
-        while True:
-            msg = await self._queue.get()
-            if msg is None:
-                # Connection lost sentinel
-                self._running = False
-                break
-            if isinstance(msg, StdoutEvent):
-                yield msg.data
-            elif isinstance(msg, StderrEvent):
-                log.debug("[flowcoder-engine stderr] %s", msg.text)
-            elif isinstance(msg, ExitEvent):
-                self._running = False
-                log.info(
-                    "Managed flowcoder '%s' exited (code=%s)",
-                    self.process_name,
-                    msg.code,
-                )
-                break
-
-    async def send(self, msg: dict[str, Any]) -> None:
-        """Send a JSON message to the engine's stdin via procmux."""
-        await self._conn.send_stdin(self.process_name, msg)
-
-    # ------------------------------------------------------------------
-    # Shutdown
-    # ------------------------------------------------------------------
-
-    async def stop(self) -> None:
-        """Send shutdown message, then kill via procmux, then unregister."""
-        try:
-            await self.send({"type": "shutdown"})
-        except Exception:
-            pass
-        try:
-            await self._conn.kill(self.process_name)
-        except Exception:
-            pass
-        self._conn.unregister(self.process_name)
-        self._queue = None
-        self._running = False
-        log.info("Managed flowcoder '%s' stopped", self.process_name)
-
-    async def detach(self) -> None:
-        """Unsubscribe and unregister without killing — procmux buffers output.
-
-        Used during sleep/shutdown when the engine is mid-execution.
-        """
-        try:
-            await self._conn.send_raw_command("unsubscribe", name=self.process_name)
-        except Exception:
-            pass
-        self._conn.unregister(self.process_name)
-        self._queue = None
-        self._running = False
-        log.info("Managed flowcoder '%s' detached (procmux buffering)", self.process_name)
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def is_running(self) -> bool:
-        """True if the engine is believed to be running in procmux."""
-        return self._running
+    return cmd

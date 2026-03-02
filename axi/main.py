@@ -836,21 +836,6 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
     # Flowcoder-specific status
     if session.agent_type == "flowcoder":
         lines.append("Type: flowcoder")
-        lines.append(f"Command: `{session.flowcoder_command}`")
-        if session.flowcoder_args:
-            lines.append(f"Args: `{session.flowcoder_args}`")
-        if session.flowcoder_process and session.flowcoder_process.is_running:
-            lines.append("State: **running**")
-            activity = session.activity
-            if activity.tool_name:
-                lines.append(f"Current block: {activity.tool_name}")
-            if activity.query_started:
-                elapsed = int((now - activity.query_started).total_seconds())
-                lines.append(f"Elapsed: {agents.format_time_remaining(elapsed)}")
-        else:
-            lines.append("State: finished")
-            idle = int((now - session.last_activity).total_seconds())
-            lines.append(f"Finished: {agents.format_time_remaining(idle)} ago")
         lines.append(f"cwd: `{session.cwd}`")
         return "\n".join(lines)
 
@@ -1275,18 +1260,22 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
             return True
 
         fc_parts = cmd_args.split(None, 1)
-        fc_name = fc_parts[0]
+        fc_name = fc_parts[0].lstrip("/")
         fc_args = fc_parts[1] if len(fc_parts) > 1 else ""
 
         if session.query_lock.locked():
             await agents.send_system(channel, f"Agent **{agent_name}** is busy.")
             return True
 
-        if session.flowcoder_process and session.flowcoder_process.is_running:
-            await agents.send_system(channel, f"Agent **{agent_name}** already has a flowchart running.")
-            return True
+        slash_content = f"/{fc_name}" + (f" {fc_args}" if fc_args else "")
 
-        agents.fire_and_forget(agents.run_inline_flowchart(session, channel, fc_name, fc_args))
+        async def _run_flowchart() -> None:
+            if not agents.is_awake(session):
+                await agents.wake_agent(session)
+            async with session.query_lock:
+                await agents.process_message(session, slash_content, channel)
+
+        agents.fire_and_forget(_run_flowchart())
         return True
 
     return False
@@ -1505,20 +1494,25 @@ async def flowchart_cmd(interaction: discord.Interaction, name: str, args: str |
         )
         return
 
-    if session.flowcoder_process and session.flowcoder_process.is_running:
-        await interaction.response.send_message(
-            f"Agent **{agent_name}** already has a flowchart running.", ephemeral=True
-        )
-        return
-
     await interaction.response.defer()
 
     assert session.discord_channel_id is not None
     ch = bot.get_channel(session.discord_channel_id)
     assert isinstance(ch, TextChannel)
-    agents.fire_and_forget(agents.run_inline_flowchart(session, ch, name, args or ""))
 
-    await interaction.followup.send(f"*System:* Flowchart `{name}` started on **{agent_name}**.")
+    fc_name = name.lstrip("/")
+    fc_args = args or ""
+    slash_content = f"/{fc_name}" + (f" {fc_args}" if fc_args else "")
+
+    async def _run_flowchart() -> None:
+        if not agents.is_awake(session):
+            await agents.wake_agent(session)
+        async with session.query_lock:
+            await agents.process_message(session, slash_content, ch)
+
+    agents.fire_and_forget(_run_flowchart())
+
+    await interaction.followup.send(f"*System:* Flowchart `{fc_name}` started on **{agent_name}**.")
 
 
 @bot.tree.command(name="flowchart-list", description="List available flowchart commands.")

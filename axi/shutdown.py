@@ -181,7 +181,7 @@ class ShutdownCoordinator:
         for name, session in list(self._agents.items()):
             if name == skip:
                 continue
-            if session.client is not None or getattr(session, "flowcoder_process", None) is not None:
+            if session.client is not None:
                 try:
                     await self._sleep_fn(session)
                 except Exception:

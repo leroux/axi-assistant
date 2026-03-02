@@ -88,10 +88,6 @@ if TYPE_CHECKING:
     from discord.ext.commands import Bot
 
     from axi.bridge import BridgeConnection
-    from axi.flowcoder import FlowcoderProcess, ManagedFlowcoderProcess
-
-if config.FLOWCODER_ENABLED:
-    from axi.flowcoder import FlowcoderProcess, ManagedFlowcoderProcess
 
 log = logging.getLogger("axi")
 
@@ -910,14 +906,6 @@ def init_shutdown_coordinator() -> None:
     assert _bot is not None
 
     async def _send_goodbye() -> None:
-        from axi.flowcoder import ManagedFlowcoderProcess as _MFPType
-
-        for s in agents.values():
-            if s.flowcoder_process and isinstance(s.flowcoder_process, _MFPType):
-                await s.flowcoder_process.detach()
-                log.info("Detached managed flowcoder for '%s' before shutdown", s.name)
-                s.flowcoder_process = None
-
         master_ch = await get_master_channel()
         if master_ch:
             await master_ch.send("*System:* Shutting down \u2014 see you soon!")
@@ -938,15 +926,11 @@ def init_shutdown_coordinator() -> None:
 
 def is_awake(session: AgentSession) -> bool:
     """Check if agent is ready to process messages."""
-    if session.agent_type == "flowcoder":
-        return session.flowcoder_process is not None
     return session.client is not None
 
 
 def is_processing(session: AgentSession) -> bool:
     """Check if agent has active work."""
-    if session.agent_type == "flowcoder":
-        return session.flowcoder_process is not None and session.flowcoder_process.is_running
     return session.query_lock.locked()
 
 
@@ -983,6 +967,35 @@ async def _create_transport(session: AgentSession, reconnecting: bool = False):
 _disconnect_client = disconnect_client
 
 
+async def _create_sdk_client(session: AgentSession, options: ClaudeAgentOptions) -> ClaudeSDKClient:
+    """Create a ClaudeSDKClient for a session.
+
+    For flowcoder agents, spawns the engine in procmux via BridgeTransport.
+    For claude_code agents, uses the SDK's built-in SubprocessCLITransport.
+    """
+    if session.agent_type == "flowcoder" and config.FLOWCODER_ENABLED:
+        from axi.flowcoder import build_engine_cli_args, build_engine_env
+
+        transport = await _create_transport(session)
+        if not transport:
+            raise RuntimeError(f"Procmux required for flowcoder agent '{session.name}'")
+
+        cli_args = build_engine_cli_args(options)
+        env = build_engine_env()
+        log.info("Spawning flowcoder engine for '%s': %s", session.name, " ".join(cli_args[:6]) + "...")
+        await transport.spawn(cli_args, env, session.cwd)
+        await transport.subscribe()
+
+        client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
+        await client.__aenter__()
+        return client
+
+    # Claude Code agent — SDK spawns its own subprocess
+    client = ClaudeSDKClient(options=options)
+    await client.__aenter__()
+    return client
+
+
 # ---------------------------------------------------------------------------
 # Concurrency management
 # ---------------------------------------------------------------------------
@@ -990,11 +1003,7 @@ _disconnect_client = disconnect_client
 
 def count_awake_agents() -> int:
     """Count agents that are currently awake."""
-    return sum(
-        1
-        for s in agents.values()
-        if s.client is not None or (s.flowcoder_process is not None and s.flowcoder_process.is_running)
-    )
+    return sum(1 for s in agents.values() if s.client is not None)
 
 
 async def _evict_idle_agent(exclude: str | None = None) -> bool:
@@ -1062,16 +1071,6 @@ async def sleep_agent(session: AgentSession, *, force: bool = False) -> None:
         log.debug("Skipping sleep for '%s' \u2014 query_lock is held", session.name)
         return
 
-    if session.flowcoder_process:
-        from axi.flowcoder import ManagedFlowcoderProcess as _MFPType
-
-        proc = session.flowcoder_process
-        if isinstance(proc, _MFPType) and session.query_lock.locked():
-            await proc.detach()
-        else:
-            await proc.stop()
-        session.flowcoder_process = None
-
     if session.client is None:
         return
 
@@ -1135,10 +1134,9 @@ async def wake_agent(session: AgentSession) -> None:
         resume_id = session.session_id
         options = _make_agent_options(session, resume_id)
 
-        log.debug("Waking '%s' (resume=%s)", session.name, resume_id)
+        log.debug("Waking '%s' (resume=%s, type=%s)", session.name, resume_id, session.agent_type)
         try:
-            client = ClaudeSDKClient(options=options)
-            await client.__aenter__()
+            client = await _create_sdk_client(session, options)
             session.client = client
             log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
             if session.agent_log:
@@ -1146,8 +1144,7 @@ async def wake_agent(session: AgentSession) -> None:
         except Exception:
             log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
             options = _make_agent_options(session, resume_id=None)
-            client = ClaudeSDKClient(options=options)
-            await client.__aenter__()
+            client = await _create_sdk_client(session, options)
             session.client = client
             session.session_id = None
             if session.name == config.MASTER_AGENT_NAME:
@@ -1231,9 +1228,6 @@ async def end_session(name: str) -> None:
     session = agents.get(name)
     if session is None:
         return
-    if session.flowcoder_process:
-        await session.flowcoder_process.stop()
-        session.flowcoder_process = None
     if session.client is not None:
         await _disconnect_client(session.client, name)
         session.client = None
@@ -1461,28 +1455,6 @@ async def _receive_response_safe(session: AgentSession):
             return
 
 
-_KNOWN_ENGINE_TYPES = {"assistant", "stream_event", "result", "system"}
-
-
-def _parse_flowcoder_message(
-    data: dict[str, Any],
-) -> AssistantMessage | StreamEvent | ResultMessage | SystemMessage | None:
-    """Parse a flowcoder engine JSON message into an SDK typed object.
-
-    Returns None for message types not handled by SDK (e.g. rate_limit_event).
-    Fills missing fields that the engine doesn't emit but parse_message requires.
-    """
-    msg_type = data.get("type", "")
-    if data.get("type") == "result":
-        data.setdefault("duration_api_ms", 0)
-    try:
-        return parse_message(data)  # type: ignore[return-value]
-    except MessageParseError as exc:
-        if msg_type in _KNOWN_ENGINE_TYPES:
-            log.warning("Failed to parse flowcoder %s message: %s  data=%s", msg_type, exc, str(data)[:300])
-        return None
-
-
 # ---------------------------------------------------------------------------
 # Activity tracking
 # ---------------------------------------------------------------------------
@@ -1529,6 +1501,7 @@ class _StreamCtx:
         "flush_count",
         "hit_rate_limit",
         "hit_transient_error",
+        "in_flowchart",
         "msg_total",
         "text_buffer",
         "tool_input_json",
@@ -1543,6 +1516,7 @@ class _StreamCtx:
         self.flush_count: int = 0
         self.msg_total: int = 0
         self.tool_input_json: str = ""  # Accumulates full tool input JSON for current tool_use block
+        self.in_flowchart: bool = False  # True during flowchart execution (protects session_id)
 
 
 async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChannel, reason: str = "?") -> None:
@@ -1590,7 +1564,7 @@ async def _handle_stream_event(
     event = msg.event
     event_type = event.get("type", "")
 
-    if msg.session_id and msg.session_id != session.session_id:
+    if not ctx.in_flowchart and msg.session_id and msg.session_id != session.session_id:
         await _set_session_id(session, msg.session_id, channel=channel)
 
     _update_activity(session, event)
@@ -1856,7 +1830,11 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
             elif isinstance(msg, ResultMessage):
                 await _handle_result_message(ctx, session, channel, msg, typing_ctx)
             elif isinstance(msg, SystemMessage):
-                await _handle_system_message(session, channel, msg)
+                if msg.subtype == "flowchart_start":
+                    ctx.in_flowchart = True
+                elif msg.subtype == "flowchart_complete":
+                    ctx.in_flowchart = False
+                await _handle_system_message(session, channel, msg, ctx)
             elif session.agent_log:
                 session.agent_log.debug("OTHER_MSG: %s", type(msg).__name__)
 
@@ -1994,31 +1972,12 @@ async def handle_query_timeout(session: AgentSession, channel: TextChannel) -> N
 
 
 async def process_message(session: AgentSession, content: MessageContent, channel: TextChannel) -> None:
-    """Process a user message through the appropriate agent type.
+    """Process a user message through the agent's Claude session.
 
-    Flowcoder agents are a superset of Claude Code agents — they use the same
-    Claude session for conversation, but can also run flowcharts. If a flowchart
-    is actively running, forward the message to the engine instead.
+    Flowcoder agents are a superset of Claude Code agents — the engine acts as
+    a transparent proxy for normal messages and intercepts slash commands for
+    flowchart execution. All messages go through session.client (the SDK).
     """
-    # If a flowchart engine is actively running, forward to it
-    if session.flowcoder_process and session.flowcoder_process.is_running:
-        if isinstance(content, str):
-            text = content
-        else:
-            text_parts = [b["text"] for b in content if b.get("type") == "text"]
-            if not text_parts:
-                await send_system(channel, "Flowcharts don't support image-only messages.")
-                return
-            text = "\n".join(text_parts)
-        user_msg = {
-            "type": "user",
-            "message": {"role": "user", "content": text},
-        }
-        await session.flowcoder_process.send(user_msg)
-        log.debug("Sent message to flowcoder engine '%s'", session.name)
-        return
-
-    # Claude Code / Flowcoder agent — use the Claude session
     if session.client is None:
         raise RuntimeError(f"Agent '{session.name}' not awake")
 
@@ -2423,34 +2382,6 @@ async def connect_bridge() -> None:
         return
 
     for agent_name, info in bridge_agents.items():
-        if agent_name.endswith(":flowcoder"):
-            if not config.FLOWCODER_ENABLED:
-                log.info("Flowcoder disabled \u2014 killing managed flowcoder '%s'", agent_name)
-                try:
-                    await wire_conn.kill(agent_name)
-                except Exception:
-                    log.exception("Failed to kill managed flowcoder '%s' (disabled)", agent_name)
-                continue
-            base_name = agent_name.removesuffix(":flowcoder")
-            session = agents.get(base_name)
-            if session is None:
-                log.warning("Procmux has flowcoder '%s' but no matching session \u2014 killing", agent_name)
-                try:
-                    await wire_conn.kill(agent_name)
-                except Exception:
-                    log.exception("Failed to kill orphan flowcoder '%s'", agent_name)
-                continue
-            if info.get("status") == "exited":
-                log.info("Managed flowcoder '%s' already exited \u2014 cleaning up", agent_name)
-                try:
-                    await wire_conn.kill(agent_name)
-                except Exception:
-                    pass
-                continue
-            session.reconnecting = True
-            fire_and_forget(_reconnect_flowcoder(session, agent_name, info))
-            continue
-
         session = agents.get(agent_name)
         if session is None:
             log.warning("Bridge has agent '%s' but no matching session \u2014 killing", agent_name)
@@ -2563,226 +2494,6 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
     await process_message_queue(session)
 
 
-async def _reconnect_flowcoder(session: AgentSession, process_name: str, process_info: dict[str, Any]) -> None:
-    """Reconnect to a flowcoder engine that survived bot.py restart."""
-    log.info("Reconnecting flowcoder '%s' for session '%s'", process_name, session.name)
-    try:
-        async with session.query_lock:
-            if wire_conn is None or not wire_conn.is_alive:
-                log.warning("Procmux connection lost during flowcoder reconnect of '%s'", process_name)
-                session.reconnecting = False
-                return
-
-            proc = ManagedFlowcoderProcess(
-                process_name=process_name,
-                conn=wire_conn,
-                command=session.flowcoder_command,
-                args=session.flowcoder_args,
-                cwd=session.cwd,
-            )
-            sub_result = await proc.subscribe()
-            session.flowcoder_process = proc
-            session.reconnecting = False
-
-            replayed = sub_result.replayed or 0
-            log.info(
-                "Flowcoder '%s' subscribed (replayed=%d, status=%s)",
-                process_name,
-                replayed,
-                sub_result.status,
-            )
-
-            channel = await get_agent_channel(session.name)
-
-            await proc.send({"type": "status_request"})
-
-            if channel:
-                if replayed > 0:
-                    await send_system(channel, "*(reconnected \u2014 resuming flowchart)*")
-                await _stream_flowcoder_to_channel(session, channel)
-
-            await proc.stop()
-            session.flowcoder_process = None
-            session.activity = ActivityState(phase="idle")
-            log.info("Flowcoder '%s' reconnect complete \u2014 cleaned up", process_name)
-
-    except Exception:
-        log.exception("Failed to reconnect flowcoder '%s'", process_name)
-        session.reconnecting = False
-
-    await process_message_queue(session)
-
-
-# ---------------------------------------------------------------------------
-# Flowcoder streaming — reuses Claude Code message handlers
-# ---------------------------------------------------------------------------
-
-
-async def _auto_approve_control(proc: Any, raw: dict[str, Any]) -> None:
-    """Auto-approve a control_request from the flowcoder engine."""
-    request = raw.get("request", raw)
-    request_id = request.get("request_id", "")
-    await proc.send(
-        {
-            "type": "control_response",
-            "response": {"request_id": request_id, "allowed": True},
-        }
-    )
-
-
-async def _stream_flowcoder_to_channel(session: AgentSession, channel: TextChannel) -> None:
-    """Stream flowcoder engine messages to Discord, reusing Claude Code handlers.
-
-    The engine emits the same message types as Claude Code (assistant,
-    stream_event, result, system) plus flowchart-specific system subtypes.
-    Messages are parsed into SDK typed objects and dispatched through the
-    same handlers used by stream_response_to_channel.
-    """
-    proc = session.flowcoder_process
-    assert proc is not None
-
-    ctx = _StreamCtx()
-    in_flowchart = False  # Track whether we're inside a flowchart execution
-
-    async with channel.typing() as typing_ctx:
-        log.info("Flowcoder streaming started for '%s', waiting for messages...", session.name)
-        async for raw in proc.messages():
-            session.last_activity = datetime.now(UTC)
-            raw_type = raw.get("type", "")
-            log.debug("Flowcoder raw message for '%s': type=%s", session.name, raw_type)
-
-            # Auto-approve control requests from inner Claude
-            if raw_type == "control_request":
-                await _auto_approve_control(proc, raw)
-                continue
-
-            # Skip status_response (used for reconnect polling)
-            if raw_type == "status_response":
-                if not raw.get("busy", False):
-                    break
-                continue
-
-            # Replace inner Claude session_ids with the agent's own session_id
-            # so they don't overwrite the agent's real session.  Keep session_id
-            # on result messages — we need the original value to detect flowchart
-            # results (session_id=="flowchart") vs inner Claude results.
-            # We replace rather than remove because parse_message requires
-            # session_id for stream_event messages.
-            if raw_type != "result" and "session_id" in raw:
-                raw["session_id"] = session.session_id or ""
-
-            parsed = _parse_flowcoder_message(raw)
-            if parsed is None:
-                continue
-
-            # During flowcharts, don't stop the typing indicator on inner
-            # Claude assistant messages — the flowchart is still running.
-            # The final result handler will stop typing.
-            fc_typing = None if in_flowchart else typing_ctx
-
-            if isinstance(parsed, StreamEvent):
-                await _handle_stream_event(ctx, session, channel, parsed, fc_typing)
-            elif isinstance(parsed, AssistantMessage):
-                await _handle_assistant_message(ctx, session, channel, parsed, fc_typing)
-            elif isinstance(parsed, ResultMessage):
-                # During flowcharts, inner block results should not end the stream —
-                # only the final result (session_id="flowchart") or a proxy turn result should.
-                if in_flowchart and parsed.session_id != "flowchart":
-                    # Inner block result — flush text buffer between blocks, then continue
-                    if ctx.text_buffer.strip():
-                        await _flush_text(ctx, session, channel, "block_result")
-                    continue
-                await _handle_result_message(ctx, session, channel, parsed, typing_ctx)
-                break
-            else:  # SystemMessage
-                # Track flowchart state
-                if parsed.subtype == "flowchart_start":
-                    in_flowchart = True
-                elif parsed.subtype == "flowchart_complete":
-                    in_flowchart = False
-                await _handle_system_message(session, channel, parsed, ctx)
-
-            # Mid-turn flush (same as Claude Code path)
-            if not ctx.hit_rate_limit and len(ctx.text_buffer) >= 1800:
-                split_at = ctx.text_buffer.rfind("\n", 0, 1800)
-                if split_at == -1:
-                    split_at = 1800
-                remainder = ctx.text_buffer[split_at:].lstrip("\n")
-                ctx.text_buffer = ctx.text_buffer[:split_at]
-                await _flush_text(ctx, session, channel, "mid_turn_split")
-                ctx.text_buffer = remainder
-
-    # Final flush
-    if ctx.text_buffer.strip():
-        await _flush_text(ctx, session, channel, "flowcoder_end")
-
-
-# ---------------------------------------------------------------------------
-# Run helpers
-# ---------------------------------------------------------------------------
-
-
-async def _run_and_stream_flowcoder(
-    session: AgentSession, channel: TextChannel, command: str, args: str, label: str
-) -> None:
-    """Shared: create flowcoder process, stream output, handle cancellation/cleanup."""
-    if wire_conn and wire_conn.is_alive:
-        proc = ManagedFlowcoderProcess(
-            process_name=f"{session.name}:flowcoder",
-            conn=wire_conn,
-            command=command,
-            args=args,
-            cwd=session.cwd,
-        )
-    else:
-        proc = FlowcoderProcess(command=command, args=args, cwd=session.cwd)
-    await proc.start()
-    session.flowcoder_process = proc
-
-    # The engine is a persistent proxy — send the flowchart command as a
-    # user message with a slash command so the engine intercepts it.
-    slash_content = f"/{command}" + (f" {args}" if args else "")
-    await proc.send(
-        {
-            "type": "user",
-            "message": {"content": slash_content},
-        }
-    )
-    log.info("Sent flowchart command to engine: %s", slash_content)
-
-    try:
-        await _stream_flowcoder_to_channel(session, channel)
-    except asyncio.CancelledError:
-        if isinstance(proc, ManagedFlowcoderProcess):
-            await proc.detach()
-            session.flowcoder_process = None
-            session.activity = ActivityState(phase="idle")
-            log.info("%s '%s' detached on cancel (procmux will buffer)", label, session.name)
-            raise
-        raise
-    except Exception:
-        log.exception("Error streaming %s for '%s'", label, session.name)
-        await send_system(channel, f"{label} **{session.name}** encountered a streaming error.")
-    finally:
-        if session.flowcoder_process is not None:
-            await proc.stop()
-            session.flowcoder_process = None
-            session.activity = ActivityState(phase="idle")
-
-
-async def run_inline_flowchart(session: AgentSession, channel: TextChannel, command: str, args: str) -> None:
-    """Run a flowchart command inline in an agent's channel."""
-    async with session.query_lock:
-        session.last_activity = datetime.now(UTC)
-        session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
-
-        cmd_display = command + (f" {args}" if args else "")
-        await send_system(channel, f"Running flowchart: `{cmd_display}`")
-        await _run_and_stream_flowcoder(session, channel, command, args, f"Flowchart `{command}`")
-
-    await process_message_queue(session)
-
-
 # ---------------------------------------------------------------------------
 # Re-exports from channels module (agents.py used to re-export these)
 # ---------------------------------------------------------------------------
@@ -2843,8 +2554,6 @@ __all__ = [
     "remove_reaction",
     "reset_session",
     "run_initial_prompt",
-    # Flowcoder
-    "run_inline_flowchart",
     "schedule_last_fired",
     "send_long",
     "send_prompt_to_agent",
