@@ -1,0 +1,53 @@
+{
+  "name": "recast",
+  "description": "Take a story and replace the characters with new ones in a different setting",
+  "arguments": [
+    {"name": "story", "description": "The original story or topic", "required": true},
+    {"name": "new_setting", "description": "New setting/characters to use", "required": true}
+  ],
+  "flowchart": {
+    "name": "Story Recaster",
+    "blocks": {
+      "start": {
+        "type": "start",
+        "name": "Begin"
+      },
+      "original": {
+        "type": "prompt",
+        "name": "Get Original",
+        "prompt": "Write a very short story (2 paragraphs) based on: $1\n\nInclude named characters and a clear setting.",
+        "output_variable": "original_story"
+      },
+      "analyze": {
+        "type": "prompt",
+        "name": "Analyze",
+        "session": "analyst",
+        "prompt": "Analyze this story and identify:\n1. The main characters and their traits\n2. The key plot points\n3. The emotional arc\n\nStory:\n{{original_story}}\n\nBe concise — one line per item.",
+        "output_variable": "analysis"
+      },
+      "recast": {
+        "type": "prompt",
+        "name": "Recast",
+        "prompt": "Here is a story:\n\n{{original_story}}\n\nHere is its structure:\n{{analysis}}\n\nNow rewrite this story but set it in: $2\n\nKeep the same emotional arc and plot beats, but replace all characters and adapt the setting completely. Make it feel like a fresh story, not a find-and-replace."
+      },
+      "end": {
+        "type": "end",
+        "name": "Done"
+      }
+    },
+    "connections": [
+      {"source_id": "start", "target_id": "original"},
+      {"source_id": "original", "target_id": "analyze"},
+      {"source_id": "analyze", "target_id": "recast"},
+      {"source_id": "recast", "target_id": "end"}
+    ],
+    "sessions": {
+      "default": {
+        "system_prompt": "You are a creative fiction writer. Output only the story text."
+      },
+      "analyst": {
+        "system_prompt": "You are a literary analyst. Be precise and concise."
+      }
+    }
+  }
+}

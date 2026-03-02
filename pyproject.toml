@@ -12,11 +12,21 @@ dependencies = [
     "arrow",
     "flowcoder-engine",
     "flowcoder-flowchart",
+    "flowcoder-tui",
+    "procmux",
+    "claudewire",
+    "discordquery",
+    "agenthub",
 ]
 
 [tool.uv.sources]
-flowcoder-engine = { path = "/home/ubuntu/flowcoder-rewrite/packages/flowcoder-engine", editable = true }
-flowcoder-flowchart = { path = "/home/ubuntu/flowcoder-rewrite/packages/flowcoder-flowchart", editable = true }
+flowcoder-engine = { path = "packages/flowcoder_engine", editable = true }
+flowcoder-flowchart = { path = "packages/flowcoder_flowchart", editable = true }
+flowcoder-tui = { path = "packages/flowcoder_tui", editable = true }
+procmux = { path = "packages/procmux", editable = true }
+claudewire = { path = "packages/claudewire", editable = true }
+discordquery = { path = "packages/discordquery", editable = true }
+agenthub = { path = "packages/agenthub", editable = true }
 
 [dependency-groups]
 dev = [
@@ -73,11 +83,13 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "test_*.py" = ["F841", "T20", "PT012"]  # test files: unused vars, print, complex pytest.raises
 "axi/axi_test.py" = ["T20"]     # CLI tool — print() is expected
-"discordquery/__main__.py" = ["T20"]  # CLI entry point
-"discordquery/query.py" = ["T20"]  # CLI tool
-"discordquery/wait.py" = ["T20"]   # CLI tool
+"packages/discordquery/discordquery/__main__.py" = ["T20"]  # CLI entry point
+"packages/discordquery/discordquery/query.py" = ["T20"]  # CLI tool
+"packages/discordquery/discordquery/wait.py" = ["T20"]   # CLI tool
 "axi/bridge/server.py" = ["T20"]  # CLI entrypoint
-"procmux/server.py" = ["T20"]  # CLI entrypoint
+"packages/procmux/procmux/server.py" = ["T20"]  # CLI entrypoint
+"packages/flowcoder_engine/examples/*.py" = ["T20"]  # dev scripts
+"packages/flowcoder_tui/flowcoder_tui/repl.py" = ["T20"]  # TUI prints to terminal
 "lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
 
 [tool.ruff.lint.isort]

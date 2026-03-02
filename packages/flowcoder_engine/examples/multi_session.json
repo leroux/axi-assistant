@@ -1,0 +1,33 @@
+{
+  "name": "code-review",
+  "description": "Generate code and review it with a second session",
+  "arguments": [
+    {"name": "task", "description": "What to build", "required": true}
+  ],
+  "flowchart": {
+    "sessions": {
+      "coder": {"model": "sonnet", "system_prompt": "You are a senior developer. Write clean, concise code."},
+      "reviewer": {"model": "opus", "system_prompt": "You are a thorough code reviewer. Be constructive."}
+    },
+    "blocks": {
+      "b1": {"type": "start", "name": "Start"},
+      "b2": {"type": "prompt", "name": "Code", "session": "coder",
+             "prompt": "Write the code for: $1"},
+      "b3": {"type": "prompt", "name": "Review", "session": "reviewer",
+             "prompt": "Review this code and provide feedback:\n\n{{code_output}}",
+             "output_schema": {"approved": "boolean", "feedback": "string"}},
+      "b4": {"type": "branch", "name": "Approved?", "condition": "approved"},
+      "b5": {"type": "end", "name": "Done"},
+      "b6": {"type": "prompt", "name": "Revise", "session": "coder",
+             "prompt": "Revise based on feedback: {{feedback}}"}
+    },
+    "connections": [
+      {"source_id": "b1", "target_id": "b2"},
+      {"source_id": "b2", "target_id": "b3"},
+      {"source_id": "b3", "target_id": "b4"},
+      {"source_id": "b4", "target_id": "b5", "is_true_path": true},
+      {"source_id": "b4", "target_id": "b6", "is_true_path": false},
+      {"source_id": "b6", "target_id": "b3"}
+    ]
+  }
+}

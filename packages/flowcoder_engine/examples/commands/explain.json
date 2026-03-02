@@ -1,0 +1,59 @@
+{
+  "name": "explain",
+  "description": "Explain a concept at multiple levels: simple, medium, expert",
+  "arguments": [
+    {"name": "concept", "description": "The concept to explain", "required": true}
+  ],
+  "flowchart": {
+    "name": "Multi-Level Explainer",
+    "blocks": {
+      "start": {
+        "type": "start",
+        "name": "Begin"
+      },
+      "simple": {
+        "type": "prompt",
+        "name": "Simple",
+        "prompt": "Explain \"$1\" like I'm 10 years old. Use an analogy. Keep it to 2-3 sentences.",
+        "output_variable": "simple_explanation"
+      },
+      "medium": {
+        "type": "prompt",
+        "name": "Medium",
+        "prompt": "Explain \"$1\" at a college level. Include key terminology. One short paragraph.",
+        "output_variable": "medium_explanation"
+      },
+      "expert": {
+        "type": "prompt",
+        "name": "Expert",
+        "prompt": "Explain \"$1\" for a domain expert. Include nuances, edge cases, and current debates. One paragraph.",
+        "output_variable": "expert_explanation"
+      },
+      "synthesize": {
+        "type": "prompt",
+        "name": "Synthesize",
+        "session": "editor",
+        "prompt": "Here are three explanations of \"$1\" at different levels:\n\n**Simple:**\n{{simple_explanation}}\n\n**Intermediate:**\n{{medium_explanation}}\n\n**Expert:**\n{{expert_explanation}}\n\nWrite a final, unified explanation that starts simple and builds in complexity. It should flow naturally from beginner to advanced. Keep it under 200 words."
+      },
+      "end": {
+        "type": "end",
+        "name": "Done"
+      }
+    },
+    "connections": [
+      {"source_id": "start", "target_id": "simple"},
+      {"source_id": "simple", "target_id": "medium"},
+      {"source_id": "medium", "target_id": "expert"},
+      {"source_id": "expert", "target_id": "synthesize"},
+      {"source_id": "synthesize", "target_id": "end"}
+    ],
+    "sessions": {
+      "default": {
+        "system_prompt": "You are a teacher. Be clear, accurate, and concise. Output only the explanation."
+      },
+      "editor": {
+        "system_prompt": "You are a science writer who makes complex topics accessible. Output only the final text."
+      }
+    }
+  }
+}

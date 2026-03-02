@@ -1,0 +1,15 @@
+{
+  "name": "chat",
+  "description": "Simple passthrough to Claude",
+  "flowchart": {
+    "blocks": {
+      "b1": {"type": "start", "name": "Start"},
+      "b2": {"type": "prompt", "name": "Chat", "prompt": "$1"},
+      "b3": {"type": "end", "name": "End"}
+    },
+    "connections": [
+      {"source_id": "b1", "target_id": "b2"},
+      {"source_id": "b2", "target_id": "b3"}
+    ]
+  }
+}
