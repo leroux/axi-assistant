@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1842,6 +1843,7 @@ async def _send_startup_notification(
     master_ch: TextChannel,
     rollback_info: dict[str, Any] | None,
     crash_info: dict[str, Any] | None,
+    startup_elapsed: float = 0.0,
 ) -> None:
     """Send startup/rollback/crash notification to master channel."""
     if rollback_info:
@@ -1878,7 +1880,7 @@ async def _send_startup_notification(
         if config.ENABLE_CRASH_HANDLER:
             crash_msg += "\nSpawning crash analysis agent..."
         await master_ch.send(crash_msg)
-    await master_ch.send("*System:* Axi ready.")
+    await master_ch.send(f"*System:* Axi ready. ({startup_elapsed:.1f}s)")
     log.info("Sent restart notification to master channel")
 
 
@@ -1977,6 +1979,7 @@ async def on_ready() -> None:
     master_session = _register_master_agent(master_resume_id, master_old_prompt_hash, master_todo_msg)
     await _setup_guild_infrastructure(master_session)
 
+    _startup_t0 = time.monotonic()
     master_ch = await agents.get_master_channel()
     if master_ch:
         await master_ch.send("*System:* Axi starting up...")
@@ -1996,9 +1999,10 @@ async def on_ready() -> None:
     global _startup_complete
     _startup_complete = True
 
+    _startup_elapsed = time.monotonic() - _startup_t0
     master_ch = await agents.get_master_channel()
     if master_ch:
-        await _send_startup_notification(master_ch, rollback_info, crash_info)
+        await _send_startup_notification(master_ch, rollback_info, crash_info, _startup_elapsed)
 
     if not config.ENABLE_CRASH_HANDLER:
         if rollback_info or crash_info:

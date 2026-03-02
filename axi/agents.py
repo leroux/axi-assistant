@@ -1865,6 +1865,11 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         )
         return ctx.hit_transient_error
 
+    # Append response timing to the last chunk
+    if session.activity.query_started and (ctx.flush_count > 0 or ctx.text_buffer.strip()):
+        elapsed = (datetime.now(UTC) - session.activity.query_started).total_seconds()
+        ctx.text_buffer += f"\n-# {elapsed:.1f}s"
+
     await _flush_text(ctx, session, channel, "post_loop")
     log.info("STREAM_END[%s] result=ok msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
 
