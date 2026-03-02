@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from opentelemetry import trace
+from opentelemetry.propagate import inject
 
 from claudewire.types import CommandResult, ExitEvent, StderrEvent, StdoutEvent
 
@@ -104,6 +105,12 @@ class BridgeTransport:
                     await self._queue.put(StdoutEvent(name=self._name, data=fake_response))
                 self._reconnecting = False
                 return
+
+            # Inject OTel trace context so downstream processes can link spans
+            carrier: dict[str, str] = {}
+            inject(carrier)
+            if carrier:
+                msg["_trace_context"] = carrier
 
             if self._stdio_logger:
                 self._stdio_logger.debug(">>> STDIN  %s", json.dumps(msg))

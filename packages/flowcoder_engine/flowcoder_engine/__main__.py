@@ -32,8 +32,10 @@ import sys
 import time
 
 import flowcoder_flowchart as fc_lib
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.propagate import extract
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -58,6 +60,14 @@ def _init_tracing() -> TracerProvider | None:
     trace.set_tracer_provider(provider)
     _log.info("OpenTelemetry tracing initialized (endpoint=%s)", endpoint)
     return provider
+
+
+def _extract_trace_context(msg: dict) -> otel_context.Context | None:
+    """Extract and remove _trace_context from a message, returning an OTel context."""
+    carrier = msg.pop("_trace_context", None)
+    if carrier and isinstance(carrier, dict):
+        return extract(carrier)
+    return None
 
 
 def _parse_slash_command(text: str) -> tuple[str, str] | None:
@@ -225,36 +235,45 @@ async def main() -> None:
                 break
 
             if msg_type == "user":
-                content = msg.get("message", {}).get("content", "")
-                if not content:
-                    continue
+                # Extract propagated trace context (strips _trace_context from msg)
+                parent_ctx = _extract_trace_context(msg)
+                ctx_token = otel_context.attach(parent_ctx) if parent_ctx else None
 
-                parsed = _parse_slash_command(content)
-                if parsed:
-                    cmd_name, cmd_args = parsed
-                    # Try to resolve as a flowchart command
-                    try:
-                        cmd = resolve_command(
-                            cmd_name, args.search_paths
-                        )
-                    except CommandNotFoundError:
-                        # Not a known command — forward to claude as-is
-                        protocol.log(
-                            f"Unknown command /{cmd_name}, proxying to claude"
-                        )
-                        await _proxy_turn(process, protocol, msg, router)
+                try:
+                    content = msg.get("message", {}).get("content", "")
+                    if not content:
                         continue
 
-                    # Known command — takeover for flowchart execution
-                    protocol.log(f"Flowchart takeover: /{cmd_name} {cmd_args}")
-                    await _run_flowchart_takeover(
-                        session, cmd, cmd_name, cmd_args, protocol, args,
-                    )
-                else:
-                    # Normal message — proxy to inner claude
-                    await _proxy_turn(process, protocol, msg, router)
+                    parsed = _parse_slash_command(content)
+                    if parsed:
+                        cmd_name, cmd_args = parsed
+                        # Try to resolve as a flowchart command
+                        try:
+                            cmd = resolve_command(
+                                cmd_name, args.search_paths
+                            )
+                        except CommandNotFoundError:
+                            # Not a known command — forward to claude as-is
+                            protocol.log(
+                                f"Unknown command /{cmd_name}, proxying to claude"
+                            )
+                            await _proxy_turn(process, protocol, msg, router)
+                            continue
+
+                        # Known command — takeover for flowchart execution
+                        protocol.log(f"Flowchart takeover: /{cmd_name} {cmd_args}")
+                        await _run_flowchart_takeover(
+                            session, cmd, cmd_name, cmd_args, protocol, args,
+                        )
+                    else:
+                        # Normal message — proxy to inner claude
+                        await _proxy_turn(process, protocol, msg, router)
+                finally:
+                    if ctx_token is not None:
+                        otel_context.detach(ctx_token)
 
             elif msg_type == "control_request":
+                msg.pop("_trace_context", None)  # strip before forwarding
                 subtype = msg.get("request", {}).get("subtype", "")
                 if subtype == "initialize":
                     # Engine handles initialize directly — inner Claude
@@ -277,6 +296,7 @@ async def main() -> None:
 
             else:
                 # Forward any other message types to inner claude
+                msg.pop("_trace_context", None)
                 await process.write(msg)
 
     finally:
