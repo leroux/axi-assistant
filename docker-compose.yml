@@ -1,0 +1,8 @@
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    restart: unless-stopped
+    ports:
+      - "16686:16686"  # Trace UI
+      - "4317:4317"    # OTLP/gRPC
+      - "4318:4318"    # OTLP/HTTP

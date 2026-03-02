@@ -14,6 +14,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from opentelemetry import trace
+
 from claudewire.types import CommandResult, ExitEvent, StderrEvent, StdoutEvent
 
 if TYPE_CHECKING:
@@ -72,33 +74,38 @@ class BridgeTransport:
 
     async def write(self, data: str) -> None:
         """Write data to the CLI's stdin."""
-        if not self._conn.is_alive:
-            raise ConnectionError("Process connection is dead")
-        msg = json.loads(data)
-
-        # Intercept initialize for reconnecting agents -- fake success
-        if (
-            self._reconnecting
-            and msg.get("type") == "control_request"
-            and msg.get("request", {}).get("subtype") == "initialize"
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(
+            "bridge.write",
+            attributes={"agent.name": self._name, "data.bytes": len(data)},
         ):
-            request_id = msg.get("request_id")
-            fake_response: dict[str, Any] = {
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": request_id,
-                    "response": {},
-                },
-            }
-            if self._queue:
-                await self._queue.put(StdoutEvent(name=self._name, data=fake_response))
-            self._reconnecting = False
-            return
+            if not self._conn.is_alive:
+                raise ConnectionError("Process connection is dead")
+            msg = json.loads(data)
 
-        if self._stdio_logger:
-            self._stdio_logger.debug(">>> STDIN  %s", json.dumps(msg))
-        await self._conn.send_stdin(self._name, msg)
+            # Intercept initialize for reconnecting agents -- fake success
+            if (
+                self._reconnecting
+                and msg.get("type") == "control_request"
+                and msg.get("request", {}).get("subtype") == "initialize"
+            ):
+                request_id = msg.get("request_id")
+                fake_response: dict[str, Any] = {
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": {},
+                    },
+                }
+                if self._queue:
+                    await self._queue.put(StdoutEvent(name=self._name, data=fake_response))
+                self._reconnecting = False
+                return
+
+            if self._stdio_logger:
+                self._stdio_logger.debug(">>> STDIN  %s", json.dumps(msg))
+            await self._conn.send_stdin(self._name, msg)
 
     async def read_messages(self):
         """Async generator yielding parsed JSON dicts from CLI stdout."""

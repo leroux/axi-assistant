@@ -3,7 +3,9 @@ name = "claudewire"
 version = "0.1.0"
 description = "Claude CLI stream-json protocol wrapper"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "opentelemetry-api>=1.20",
+]
 
 [build-system]
 requires = ["hatchling"]

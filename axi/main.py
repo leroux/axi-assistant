@@ -22,6 +22,7 @@ from discord import TextChannel, app_commands
 from discord.enums import ChannelType
 from discord.ext import tasks
 from discord.ext.commands import Bot
+from opentelemetry import trace
 
 from axi import agents, channels, config, tools
 from axi.axi_types import ActivityState, AgentSession, tool_display
@@ -40,6 +41,7 @@ from axi.schedule_tools import (
     schedules_lock,
 )
 from axi.shutdown import kill_supervisor
+from axi.tracing import init_tracing
 
 log = logging.getLogger("axi")
 
@@ -303,41 +305,51 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # --- Normal processing path ---
-    log.info("ON_MSG[%s][%s] ACQUIRING query_lock", agent_name, msg_id)
-    async with session.query_lock:
-        log.info("ON_MSG[%s][%s] ACQUIRED query_lock", agent_name, msg_id)
-        if not agents.is_awake(session):
-            log.debug("Waking agent '%s' for user message", agent_name)
-            if not await agents.wake_or_queue(session, content, channel, message):
-                return
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span(
+        "on_message",
+        attributes={
+            "discord.message_id": msg_id,
+            "discord.channel": channel.name,
+            "agent.name": agent_name,
+            "message.length": len(content) if isinstance(content, str) else -1,
+        },
+    ):
+        log.info("ON_MSG[%s][%s] ACQUIRING query_lock", agent_name, msg_id)
+        async with session.query_lock:
+            log.info("ON_MSG[%s][%s] ACQUIRED query_lock", agent_name, msg_id)
+            if not agents.is_awake(session):
+                log.debug("Waking agent '%s' for user message", agent_name)
+                if not await agents.wake_or_queue(session, content, channel, message):
+                    return
 
-        log.info("ON_MSG[%s][%s] calling process_message", agent_name, msg_id)
-        session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
+            log.info("ON_MSG[%s][%s] calling process_message", agent_name, msg_id)
+            session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
 
-        try:
-            await agents.process_message(session, content, channel)
-            await agents.add_reaction(message, "✅")
-        except TimeoutError:
-            log.warning("Query timeout for agent '%s'", agent_name)
-            await agents.add_reaction(message, "⏳")
-            await agents.handle_query_timeout(session, channel)
-        except RuntimeError as e:
-            log.warning("Runtime error for agent '%s': %s", agent_name, e)
-            await agents.add_reaction(message, "❌")
-            await agents.send_system(channel, str(e))
-        except Exception:
-            log.exception("Error processing message for agent '%s'", agent_name)
-            await agents.add_reaction(message, "❌")
-            await agents.send_system(
-                channel,
-                f"Error communicating with agent **{agent_name}**. Try `/kill-agent {agent_name}` and respawn.",
-            )
-        finally:
-            session.activity = ActivityState(phase="idle")
+            try:
+                await agents.process_message(session, content, channel)
+                await agents.add_reaction(message, "✅")
+            except TimeoutError:
+                log.warning("Query timeout for agent '%s'", agent_name)
+                await agents.add_reaction(message, "⏳")
+                await agents.handle_query_timeout(session, channel)
+            except RuntimeError as e:
+                log.warning("Runtime error for agent '%s': %s", agent_name, e)
+                await agents.add_reaction(message, "❌")
+                await agents.send_system(channel, str(e))
+            except Exception:
+                log.exception("Error processing message for agent '%s'", agent_name)
+                await agents.add_reaction(message, "❌")
+                await agents.send_system(
+                    channel,
+                    f"Error communicating with agent **{agent_name}**. Try `/kill-agent {agent_name}` and respawn.",
+                )
+            finally:
+                session.activity = ActivityState(phase="idle")
 
-    log.info("ON_MSG[%s][%s] query_lock RELEASED, checking queue", agent_name, msg_id)
-    await agents.process_message_queue(session)
-    await bot.process_commands(message)
+        log.info("ON_MSG[%s][%s] query_lock RELEASED, checking queue", agent_name, msg_id)
+        await agents.process_message_queue(session)
+        await bot.process_commands(message)
 
 
 # ---------------------------------------------------------------------------
@@ -1973,6 +1985,7 @@ async def on_ready() -> None:
     _bot_start_time = datetime.now(UTC)
 
     agents.init(bot)
+    init_tracing("axi-bot")
     agents.set_utils_mcp_server(tools.utils_mcp_server)
 
     master_resume_id, master_old_prompt_hash, master_todo_msg = _load_master_session_data()

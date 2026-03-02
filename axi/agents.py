@@ -31,6 +31,7 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 from discord import TextChannel
+from opentelemetry import trace
 
 from agenthub.procmux_wire import ProcmuxProcessConnection
 from agenthub.tasks import BackgroundTaskSet
@@ -81,6 +82,7 @@ from axi.rate_limits import (
 )
 from axi.schedule_tools import make_schedule_mcp_server
 from axi.shutdown import ShutdownCoordinator, exit_for_restart, kill_supervisor
+from axi.tracing import shutdown_tracing
 from claudewire.events import as_stream, update_activity
 from claudewire.session import disconnect_client, get_stdio_logger
 
@@ -910,9 +912,15 @@ def init_shutdown_coordinator() -> None:
         if master_ch:
             await master_ch.send("*System:* Shutting down \u2014 see you soon!")
 
+    bot_ref = _bot
+
+    async def _close_bot() -> None:
+        shutdown_tracing()
+        await bot_ref.close()
+
     use_bridge = bridge_conn is not None and bridge_conn.is_alive
     shutdown_coordinator = make_shutdown_coordinator(
-        close_bot_fn=_bot.close,
+        close_bot_fn=_close_bot,
         kill_fn=exit_for_restart if use_bridge else kill_supervisor,
         goodbye_fn=_send_goodbye,
         bridge_mode=use_bridge,
@@ -1134,27 +1142,36 @@ async def wake_agent(session: AgentSession) -> None:
         resume_id = session.session_id
         options = _make_agent_options(session, resume_id)
 
-        log.debug("Waking '%s' (resume=%s, type=%s)", session.name, resume_id, session.agent_type)
-        try:
-            client = await _create_sdk_client(session, options)
-            session.client = client
-            log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
-            if session.agent_log:
-                session.agent_log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
-        except Exception:
-            log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
-            options = _make_agent_options(session, resume_id=None)
-            client = await _create_sdk_client(session, options)
-            session.client = client
-            session.session_id = None
-            if session.name == config.MASTER_AGENT_NAME:
-                try:
-                    os.remove(config.MASTER_SESSION_PATH)
-                except OSError:
-                    pass
-            log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
-            if session.agent_log:
-                session.agent_log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(
+            "wake_agent",
+            attributes={
+                "agent.name": session.name,
+                "agent.type": session.agent_type or "",
+                "agent.resumed": bool(resume_id),
+            },
+        ):
+            log.debug("Waking '%s' (resume=%s, type=%s)", session.name, resume_id, session.agent_type)
+            try:
+                client = await _create_sdk_client(session, options)
+                session.client = client
+                log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
+                if session.agent_log:
+                    session.agent_log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
+            except Exception:
+                log.warning("Failed to resume agent '%s' with session_id=%s, retrying fresh", session.name, resume_id)
+                options = _make_agent_options(session, resume_id=None)
+                client = await _create_sdk_client(session, options)
+                session.client = client
+                session.session_id = None
+                if session.name == config.MASTER_AGENT_NAME:
+                    try:
+                        os.remove(config.MASTER_SESSION_PATH)
+                    except OSError:
+                        pass
+                log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
+                if session.agent_log:
+                    session.agent_log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
 
         prompt_changed = False
         if resume_id and session.system_prompt is not None:
@@ -1807,10 +1824,17 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         caller = "".join(f.name or "?" for f in traceback.extract_stack(limit=4)[:-1])
         log.info("STREAM_START[%s] caller=%s", stream_id, caller)
 
+    tracer = trace.get_tracer(__name__)
+    span = tracer.start_span("stream_to_discord", attributes={"agent.name": session.name})
+    t0 = time.monotonic()
+    t_first_event: float | None = None
+
     ctx = _StreamCtx()
 
     async with channel.typing() as typing_ctx:
         async for msg in _receive_response_safe(session):
+            if t_first_event is None:
+                t_first_event = time.monotonic()
             ctx.msg_total += 1
             if session.agent_log:
                 session.agent_log.debug(
@@ -1853,6 +1877,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
 
     if ctx.hit_rate_limit:
         log.info("STREAM_END[%s] result=rate_limit msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
+        span.set_attributes({"stream.msg_total": ctx.msg_total, "stream.flush_count": ctx.flush_count})
+        span.end()
         return None
 
     if ctx.hit_transient_error:
@@ -1863,6 +1889,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
             ctx.msg_total,
             ctx.flush_count,
         )
+        span.set_attributes({"stream.msg_total": ctx.msg_total, "stream.flush_count": ctx.flush_count})
+        span.end()
         return ctx.hit_transient_error
 
     # Append response timing to the last chunk
@@ -1877,6 +1905,13 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         mentions = " ".join(f"<@{uid}>" for uid in config.ALLOWED_USER_IDS)
         await send_system(channel, f"Bot has finished responding and is awaiting input. {mentions}")
 
+    ttfe_ms = (t_first_event - t0) * 1000 if t_first_event is not None else -1
+    span.set_attributes({
+        "stream.msg_total": ctx.msg_total,
+        "stream.flush_count": ctx.flush_count,
+        "stream.time_to_first_event_ms": ttfe_ms,
+    })
+    span.end()
     return None
 
 
@@ -1997,15 +2032,17 @@ async def process_message(session: AgentSession, content: MessageContent, channe
     get_stdio_logger(session.name, config.LOG_DIR).debug(
         ">>> STDIN  %s", json.dumps({"type": "user", "content": content if isinstance(content, str) else "[blocks]"})
     )
-    try:
-        async with asyncio.timeout(config.QUERY_TIMEOUT):
-            await session.client.query(as_stream(content))
-            await stream_with_retry(session, channel)
-    except TimeoutError:
-        await handle_query_timeout(session, channel)
-    except Exception:
-        log.exception("Error querying Claude Code agent '%s'", session.name)
-        raise RuntimeError(f"Query failed for agent '{session.name}'") from None
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("process_message", attributes={"agent.name": session.name}):
+        try:
+            async with asyncio.timeout(config.QUERY_TIMEOUT):
+                await session.client.query(as_stream(content))
+                await stream_with_retry(session, channel)
+        except TimeoutError:
+            await handle_query_timeout(session, channel)
+        except Exception:
+            log.exception("Error querying Claude Code agent '%s'", session.name)
+            raise RuntimeError(f"Query failed for agent '{session.name}'") from None
 
 
 # ---------------------------------------------------------------------------
