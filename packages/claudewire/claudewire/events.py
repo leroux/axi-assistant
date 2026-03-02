@@ -116,6 +116,45 @@ def update_activity(activity: ActivityState, event: dict[str, Any]) -> None:
             activity.phase = "waiting"
 
 
+# ---------------------------------------------------------------------------
+# Rate limit event parsing
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RateLimitInfo:
+    """Parsed rate_limit_event from the Claude CLI stream."""
+
+    rate_limit_type: str  # "five_hour", etc.
+    status: str  # "allowed", "allowed_warning", "rejected"
+    resets_at: datetime
+    utilization: float | None = None
+
+
+def parse_rate_limit_event(data: dict[str, Any]) -> RateLimitInfo | None:
+    """Parse a rate_limit_event stream message.
+
+    Returns None if the message isn't a rate_limit_event or lacks required data.
+    """
+    if data.get("type") != "rate_limit_event":
+        return None
+    info = data.get("rate_limit_info", {})
+    resets_at_unix = info.get("resetsAt")
+    if resets_at_unix is None:
+        return None
+    return RateLimitInfo(
+        rate_limit_type=info.get("rateLimitType", "unknown"),
+        status=info.get("status", "unknown"),
+        resets_at=datetime.fromtimestamp(resets_at_unix, tz=UTC),
+        utilization=info.get("utilization"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stream helpers
+# ---------------------------------------------------------------------------
+
+
 async def as_stream(content: str | list[dict[str, Any]]):
     """Wrap a prompt as an AsyncIterable for the SDK streaming interface."""
     yield {

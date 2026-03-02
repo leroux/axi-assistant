@@ -2,45 +2,69 @@
 
 Defines the interface that a frontend (Discord, CLI, etc.) implements
 to receive notifications from the agent orchestration layer.
+
+All callbacks are async. The hub calls these to notify the frontend
+about agent lifecycle events and to send messages to users.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
-
-class PostMessageFn(Protocol):
-    async def __call__(self, agent_name: str, text: str) -> None: ...
-
-
-class PostSystemFn(Protocol):
-    async def __call__(self, agent_name: str, text: str) -> None: ...
-
-
-class OnLifecycleFn(Protocol):
-    async def __call__(self, agent_name: str) -> None: ...
-
-
-class OnSessionIdFn(Protocol):
-    async def __call__(self, agent_name: str, session_id: str) -> None: ...
-
-
-class GetChannelFn(Protocol):
-    async def __call__(self, agent_name: str) -> Any: ...
+# Callback type aliases — plain callables, no Protocol classes needed.
+# Each documents its signature in the FrontendCallbacks docstring.
+PostMessageFn = Callable[[str, str], Awaitable[None]]  # (agent_name, text)
+PostSystemFn = Callable[[str, str], Awaitable[None]]  # (agent_name, text)
+OnLifecycleFn = Callable[[str], Awaitable[None]]  # (agent_name)
+OnSessionIdFn = Callable[[str, str], Awaitable[None]]  # (agent_name, session_id)
+GetChannelFn = Callable[[str], Awaitable[Any]]  # (agent_name) -> channel
+OnSpawnFn = Callable[[Any], Awaitable[None]]  # (session)
+OnKillFn = Callable[[str, str | None], Awaitable[None]]  # (agent_name, session_id)
+BroadcastFn = Callable[[str], Awaitable[None]]  # (message)
+ScheduleExpiryFn = Callable[[float], Awaitable[None]]  # (delay_secs)
+OnIdleFn = Callable[[str, float], Awaitable[None]]  # (agent_name, idle_minutes)
+OnReconnectFn = Callable[[str, bool], Awaitable[None]]  # (agent_name, was_mid_task)
+CloseAppFn = Callable[[], Awaitable[None]]
+KillProcessFn = Callable[[], Awaitable[None]]
+GoodbyeFn = Callable[[], Awaitable[None]]
 
 
 @dataclass
 class FrontendCallbacks:
     """Callbacks from Agent Hub to the frontend layer.
 
-    All callbacks are async. The hub calls these to notify the frontend
-    about agent lifecycle events and to send messages to users.
+    Required callbacks must be provided at init. Optional callbacks
+    default to no-ops. Add new callbacks as needed when extracting
+    modules — start minimal.
     """
 
-    post_message: PostMessageFn  # Send a message to the agent's channel
-    post_system: PostSystemFn  # Send a system notification
-    on_wake: OnLifecycleFn  # Agent woke up
-    on_sleep: OnLifecycleFn  # Agent went to sleep
-    on_session_id: OnSessionIdFn  # Persist session ID
-    get_channel: GetChannelFn  # Get frontend channel for an agent
+    # Core messaging
+    post_message: PostMessageFn
+    post_system: PostSystemFn
+
+    # Lifecycle events
+    on_wake: OnLifecycleFn
+    on_sleep: OnLifecycleFn
+    on_session_id: OnSessionIdFn
+    get_channel: GetChannelFn
+
+    # Session events
+    on_spawn: OnSpawnFn
+    on_kill: OnKillFn
+
+    # Broadcast (rate limits, system announcements)
+    broadcast: BroadcastFn
+    schedule_rate_limit_expiry: ScheduleExpiryFn
+
+    # Idle monitoring
+    on_idle_reminder: OnIdleFn
+
+    # Hot restart
+    on_reconnect: OnReconnectFn
+
+    # Shutdown
+    close_app: CloseAppFn
+    kill_process: KillProcessFn
+    send_goodbye: GoodbyeFn | None = None

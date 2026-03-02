@@ -26,7 +26,7 @@ from discord.ext.commands import Bot
 from opentelemetry import trace
 
 from axi import agents, channels, config, scheduler, tools
-from axi.axi_types import ActivityState, AgentSession, tool_display
+from axi.axi_types import ActivityState, AgentSession, discord_state, tool_display
 from axi.log_context import set_agent_context, set_trigger
 from axi.prompts import (
     MASTER_SYSTEM_PROMPT,
@@ -114,40 +114,44 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
         agent_name = agents.channel_to_agent.get(payload.channel_id)
         if agent_name is not None:
             session = agents.agents.get(agent_name)
-            if (
-                session is not None
-                and session.plan_approval_message_id is not None
-                and session.plan_approval_message_id == payload.message_id
-                and session.plan_approval_future is not None
-                and not session.plan_approval_future.done()
-            ):
-                emoji = str(payload.emoji)
-                channel = bot.get_channel(payload.channel_id)
-                if emoji == "\u2705":
-                    session.plan_approval_future.set_result({"approved": True, "message": ""})
-                    if isinstance(channel, TextChannel):
-                        await agents.send_system(channel, "Plan approved — agent resuming implementation.")
-                    return
-                elif emoji == "\u274c":
-                    session.plan_approval_future.set_result(
-                        {"approved": False, "message": "User rejected the plan. Please revise."}
-                    )
-                    if isinstance(channel, TextChannel):
-                        await agents.send_system(channel, "Plan rejected — agent will revise.")
-                    return
+            if session is not None:
+                ds = discord_state(session)
+                if (
+                    ds.plan_approval_message_id is not None
+                    and ds.plan_approval_message_id == payload.message_id
+                    and ds.plan_approval_future is not None
+                    and not ds.plan_approval_future.done()
+                ):
+                    emoji = str(payload.emoji)
+                    channel = bot.get_channel(payload.channel_id)
+                    if emoji == "\u2705":
+                        ds.plan_approval_future.set_result({"approved": True, "message": ""})
+                        if isinstance(channel, TextChannel):
+                            await agents.send_system(channel, "Plan approved — agent resuming implementation.")
+                        return
+                    elif emoji == "\u274c":
+                        ds.plan_approval_future.set_result(
+                            {"approved": False, "message": "User rejected the plan. Please revise."}
+                        )
+                        if isinstance(channel, TextChannel):
+                            await agents.send_system(channel, "Plan rejected — agent will revise.")
+                        return
 
     # --- AskUserQuestion emoji answers ---
     session = agents.find_session_by_question_message(payload.message_id)
-    if session is None or session.question_future is None or session.question_future.done():
+    if session is None:
+        return
+    ds = discord_state(session)
+    if ds.question_future is None or ds.question_future.done():
         return
 
     emoji_str = str(payload.emoji)
-    q = session.question_data or {}
+    q = ds.question_data or {}
     answer = agents.resolve_reaction_answer(emoji_str, q)
     if answer is None:
         return  # Unrecognized emoji, ignore
 
-    session.question_future.set_result(answer)
+    ds.question_future.set_result(answer)
     log.info("Question answered via reaction: %s -> %s", emoji_str, answer)
 
 
@@ -178,9 +182,9 @@ async def on_message(message: discord.Message) -> None:
         if message.author.id not in config.ALLOWED_USER_IDS:
             return
         master_session = agents.get_master_session()
-        if master_session and master_session.discord_channel_id:
+        if master_session and discord_state(master_session).channel_id:
             await message.channel.send(
-                f"*System:* Please use <#{master_session.discord_channel_id}> in the server instead."
+                f"*System:* Please use <#{discord_state(master_session).channel_id}> in the server instead."
             )
         else:
             await message.channel.send("*System:* Please use the server channels instead.")
@@ -238,22 +242,23 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # --- Plan approval gate ---
-    if session.plan_approval_future is not None and not session.plan_approval_future.done():
+    ds = discord_state(session)
+    if ds.plan_approval_future is not None and not ds.plan_approval_future.done():
         raw = content.strip() if isinstance(content, str) else ""
         text = re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\]\s*", "", raw).strip().lower()
         if text in ("approve", "approved", "yes", "y", "lgtm", "go", "proceed", "ok"):
-            session.plan_approval_future.set_result({"approved": True, "message": ""})
+            ds.plan_approval_future.set_result({"approved": True, "message": ""})
             await agents.add_reaction(message, "✅")
             await agents.send_system(channel, "Plan approved — agent resuming implementation.")
         elif text in ("reject", "rejected", "no", "n", "cancel", "stop"):
-            session.plan_approval_future.set_result(
+            ds.plan_approval_future.set_result(
                 {"approved": False, "message": "User rejected the plan. Please revise."}
             )
             await agents.add_reaction(message, "❌")
             await agents.send_system(channel, "Plan rejected — agent will revise.")
         else:
             feedback = content if isinstance(content, str) else str(content)
-            session.plan_approval_future.set_result(
+            ds.plan_approval_future.set_result(
                 {
                     "approved": False,
                     "message": f"User wants changes to the plan: {feedback}",
@@ -264,12 +269,12 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # --- AskUserQuestion gate (text reply) ---
-    if session.question_future is not None and not session.question_future.done():
+    if ds.question_future is not None and not ds.question_future.done():
         raw = content.strip() if isinstance(content, str) else str(content)
         raw = re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\]\s*", "", raw).strip()
-        q = session.question_data or {}
+        q = ds.question_data or {}
         answer = agents.parse_question_answer(raw, q)
-        session.question_future.set_result(answer)
+        ds.question_future.set_result(answer)
         await agents.add_reaction(message, "\u2705")
         return
 
@@ -469,8 +474,9 @@ async def _check_idle_agents(now_utc: datetime, master_ch: TextChannel | None) -
             continue
         if session.query_lock.locked():
             continue
-        if channels.killed_category and session.discord_channel_id:
-            ch = bot.get_channel(session.discord_channel_id)
+        ds = discord_state(session)
+        if channels.killed_category and ds.channel_id:
+            ch = bot.get_channel(ds.channel_id)
             if isinstance(ch, TextChannel) and ch.category_id == channels.killed_category.id:
                 continue
         if session.idle_reminder_count >= len(config.IDLE_REMINDER_THRESHOLDS):
@@ -498,7 +504,7 @@ async def _check_idle_agents(now_utc: datetime, master_ch: TextChannel | None) -
                 f"(cwd: `{session.cwd}`). Use `/kill-agent` to terminate.",
             )
         session.idle_reminder_count += 1
-        session.last_idle_notified = datetime.now(UTC)
+        discord_state(session).last_idle_notified = datetime.now(UTC)
 
 
 async def _recover_stranded_messages() -> None:
@@ -641,9 +647,10 @@ async def ping_command(interaction: discord.Interaction) -> None:
         bot_str = "initializing"
 
     procmux_str = None
-    if agents.procmux_conn is not None and agents.procmux_conn.is_alive:
+    raw_conn = agents.hub.raw_procmux_conn if agents.hub else None
+    if raw_conn is not None and raw_conn.is_alive:
         try:
-            result = await agents.procmux_conn.send_command("status")
+            result = await raw_conn.send_command("status")
             if result.ok and result.uptime_seconds is not None:
                 procmux_str = _fmt_uptime(result.uptime_seconds)
         except Exception:
@@ -653,7 +660,7 @@ async def ping_command(interaction: discord.Interaction) -> None:
     parts = [f"Pong! Latency: {latency}ms", f"Bot uptime: {bot_str}"]
     if procmux_str is not None:
         parts.append(f"Bridge uptime: {procmux_str}")
-    elif agents.procmux_conn is None or not agents.procmux_conn.is_alive:
+    elif raw_conn is None or not raw_conn.is_alive:
         parts.append("Bridge: not connected")
     await interaction.response.send_message(" | ".join(parts))
 
@@ -818,14 +825,15 @@ async def list_agents(interaction: discord.Interaction) -> None:
         else:
             status = " [sleeping]"
         is_killed = False
-        if channels.killed_category and session.discord_channel_id:
-            ch = bot.get_channel(session.discord_channel_id)
+        ds = discord_state(session)
+        if channels.killed_category and ds.channel_id:
+            ch = bot.get_channel(ds.channel_id)
             if isinstance(ch, TextChannel) and ch.category_id == channels.killed_category.id:
                 is_killed = True
         killed_tag = " [killed]" if is_killed else ""
         protected = " [protected]" if name == config.MASTER_AGENT_NAME else ""
         sid = f" | sid: `{session.session_id[:8]}…`" if session.session_id else ""
-        ch_mention = f" | <#{session.discord_channel_id}>" if session.discord_channel_id else ""
+        ch_mention = f" | <#{discord_state(session).channel_id}>" if discord_state(session).channel_id else ""
         lines.append(
             f"- **{name}**{status}{killed_tag}{protected}{ch_mention} | cwd: `{session.cwd}` | idle: {idle_minutes}m{sid}"
         )
@@ -998,18 +1006,18 @@ async def debug_command(interaction: discord.Interaction, mode: str | None = Non
     if mode is not None:
         mode_lower = mode.strip().lower()
         if mode_lower == "on":
-            session.debug = True
+            discord_state(session).debug = True
         elif mode_lower == "off":
-            session.debug = False
+            discord_state(session).debug = False
         else:
             await interaction.response.send_message(
                 "Usage: `/debug` (toggle), `/debug on`, `/debug off`", ephemeral=True
             )
             return
     else:
-        session.debug = not session.debug
+        discord_state(session).debug = not discord_state(session).debug
 
-    state = "on" if session.debug else "off"
+    state = "on" if discord_state(session).debug else "off"
     await interaction.response.send_message(f"*System:* Debug output **{state}** for **{agent_name}**.")
 
 
@@ -1081,14 +1089,15 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
             except Exception:
                 log.exception("Failed to reset permission mode for '%s' during /stop", agent_name)
 
-        if session.plan_approval_future and not session.plan_approval_future.done():
-            session.plan_approval_future.set_result({"approved": False, "message": "Interrupted by /stop."})
-        session.plan_approval_message_id = None
+        ds = discord_state(session)
+        if ds.plan_approval_future and not ds.plan_approval_future.done():
+            ds.plan_approval_future.set_result({"approved": False, "message": "Interrupted by /stop."})
+        ds.plan_approval_message_id = None
 
-        if session.question_future and not session.question_future.done():
-            session.question_future.set_result("")
-            session.question_data = None
-            session.question_message_id = None
+        if ds.question_future and not ds.question_future.done():
+            ds.question_future.set_result("")
+            ds.question_data = None
+            ds.question_message_id = None
 
         cleared = 0
         while session.message_queue:
@@ -1220,15 +1229,15 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
         if cmd_args is not None:
             mode_lower = cmd_args.lower()
             if mode_lower == "on":
-                session.debug = True
+                discord_state(session).debug = True
             elif mode_lower == "off":
-                session.debug = False
+                discord_state(session).debug = False
             else:
                 await agents.send_system(channel, "Usage: `//debug` (toggle), `//debug on`, `//debug off`")
                 return True
         else:
-            session.debug = not session.debug
-        state = "on" if session.debug else "off"
+            discord_state(session).debug = not discord_state(session).debug
+        state = "on" if discord_state(session).debug else "off"
         await agents.send_system(channel, f"Debug output **{state}** for **{agent_name}**.")
         return True
 
@@ -1238,8 +1247,8 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
         return True
 
     if cmd == "todo":
-        if session.todo_items:
-            await agents.send_long(channel, f"**Todo List**\n{agents.format_todo_list(session.todo_items)}")
+        if discord_state(session).todo_items:
+            await agents.send_long(channel, f"**Todo List**\n{agents.format_todo_list(discord_state(session).todo_items)}")
         else:
             await agents.send_system(channel, f"No todo list for **{agent_name}**.")
         return True
@@ -1325,14 +1334,15 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
                 except Exception:
                     log.exception("Failed to reset permission mode for '%s' during //stop", agent_name)
 
-            if session.plan_approval_future and not session.plan_approval_future.done():
-                session.plan_approval_future.set_result({"approved": False, "message": "Interrupted by //stop."})
-            session.plan_approval_message_id = None
+            ds = discord_state(session)
+            if ds.plan_approval_future and not ds.plan_approval_future.done():
+                ds.plan_approval_future.set_result({"approved": False, "message": "Interrupted by //stop."})
+            ds.plan_approval_message_id = None
 
-            if session.question_future and not session.question_future.done():
-                session.question_future.set_result("")
-                session.question_data = None
-                session.question_message_id = None
+            if ds.question_future and not ds.question_future.done():
+                ds.question_future.set_result("")
+                ds.question_data = None
+                ds.question_message_id = None
 
             cleared = 0
             while session.message_queue:
@@ -1389,8 +1399,9 @@ async def _run_agent_sdk_command(interaction: discord.Interaction, agent_name: s
         session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
         try:
             async with asyncio.timeout(config.QUERY_TIMEOUT):
-                assert session.discord_channel_id is not None
-                ch = bot.get_channel(session.discord_channel_id)
+                ds = discord_state(session)
+                assert ds.channel_id is not None
+                ch = bot.get_channel(ds.channel_id)
                 assert isinstance(ch, TextChannel)
                 await session.client.query(agents.as_stream(command))
                 await agents.stream_with_retry(session, ch)
@@ -1491,8 +1502,9 @@ async def telos_interview_cmd(interaction: discord.Interaction, agent_name: str 
 
         try:
             async with asyncio.timeout(config.QUERY_TIMEOUT):
-                assert session.discord_channel_id is not None
-                ch = bot.get_channel(session.discord_channel_id)
+                ds = discord_state(session)
+                assert ds.channel_id is not None
+                ch = bot.get_channel(ds.channel_id)
                 assert isinstance(ch, TextChannel)
                 await _run_telos_interview(session, ch)
             await interaction.followup.send(f"*System:* TELOS interview complete for **{agent_name}**.")
@@ -1575,8 +1587,9 @@ async def flowchart_cmd(interaction: discord.Interaction, name: str, args: str |
 
     await interaction.response.defer()
 
-    assert session.discord_channel_id is not None
-    ch = bot.get_channel(session.discord_channel_id)
+    ds = discord_state(session)
+    assert ds.channel_id is not None
+    ch = bot.get_channel(ds.channel_id)
     assert isinstance(ch, TextChannel)
 
     fc_name = name.lstrip("/")
@@ -1703,9 +1716,9 @@ def _register_agent_from_channel(channel: TextChannel, cwd: str) -> None:
         cwd=cwd,
         system_prompt=prompt,
         system_prompt_hash=compute_prompt_hash(prompt),
-        discord_channel_id=channel.id,
         mcp_servers=mcp_servers,
     )
+    discord_state(session).channel_id = channel.id
     agents.agents[agent_name] = session
     agents.channel_to_agent[channel.id] = agent_name
 
@@ -1966,9 +1979,10 @@ def _register_master_agent(resume_id: str | None, prompt_hash: str | None, todo_
         client=None,
         mcp_servers=master_mcp,
         session_id=resume_id,
-        todo_items=agents.load_todo_items(config.MASTER_AGENT_NAME),
-        todo_message_id=todo_msg_id,
     )
+    ds = discord_state(session)
+    ds.todo_items = agents.load_todo_items(config.MASTER_AGENT_NAME)
+    ds.todo_message_id = todo_msg_id
     agents.agents[config.MASTER_AGENT_NAME] = session
     log.info("Master agent registered (sleeping, session_id=%s)", resume_id and resume_id[:8])
     return session
@@ -1980,7 +1994,7 @@ async def _setup_guild_infrastructure(master_session: AgentSession) -> None:
         await agents.ensure_guild_infrastructure()
         await channels.deduplicate_master_channel()
         master_channel = await agents.ensure_agent_channel(config.MASTER_AGENT_NAME)
-        master_session.discord_channel_id = master_channel.id
+        discord_state(master_session).channel_id = master_channel.id
         agents.channel_to_agent[master_channel.id] = config.MASTER_AGENT_NAME
         log.info("Guild infrastructure ready (guild=%s, master_channel=#%s)", config.DISCORD_GUILD_ID, master_channel.name)
 

@@ -17,8 +17,18 @@ transport to the ProcessConnection protocol.
 from claudewire.direct import DirectProcessConnection, find_claude
 from claudewire.events import (
     ActivityState,
+    RateLimitInfo,
     as_stream,
+    parse_rate_limit_event,
     update_activity,
+)
+from claudewire.permissions import (
+    allow_all,
+    compose,
+    cwd_policy,
+    deny_all,
+    tool_allow_policy,
+    tool_block_policy,
 )
 from claudewire.session import disconnect_client, ensure_process_dead, get_subprocess_pid
 from claudewire.transport import BridgeTransport
@@ -49,13 +59,21 @@ __all__ = [
     "ProcessConnection",
     "ProcessEvent",
     "ProcessEventQueue",
+    "RateLimitInfo",
     "StderrEvent",
     "StdoutEvent",
+    "allow_all",
     "as_stream",
     "build_cli_spawn_args",
+    "compose",
+    "cwd_policy",
+    "deny_all",
     "disconnect_client",
     "ensure_process_dead",
     "find_claude",
     "get_subprocess_pid",
+    "parse_rate_limit_event",
+    "tool_allow_policy",
+    "tool_block_policy",
     "update_activity",
 ]

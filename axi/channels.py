@@ -19,6 +19,7 @@ from discord import CategoryChannel, TextChannel
 from opentelemetry import trace
 
 from axi import config
+from axi.axi_types import discord_state
 
 if TYPE_CHECKING:
     from discord.ext.commands import Bot
@@ -342,10 +343,12 @@ async def get_agent_channel(agent_name: str) -> TextChannel | None:
     assert _bot is not None
     assert _agents_dict is not None
     session = _agents_dict.get(agent_name)
-    if session and session.discord_channel_id:
-        ch = _bot.get_channel(session.discord_channel_id)
-        if isinstance(ch, TextChannel):
-            return ch
+    if session:
+        ds = discord_state(session)
+        if ds.channel_id:
+            ch = _bot.get_channel(ds.channel_id)
+            if isinstance(ch, TextChannel):
+                return ch
     normalized = normalize_channel_name(agent_name)
     for cat in (axi_category, active_category):
         if cat is None:

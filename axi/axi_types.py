@@ -1,8 +1,7 @@
 """Pure data types for the Axi bot.
 
-Dataclasses, type aliases, and exceptions. No methods that delegate to other modules.
-AgentSession is a pure data container — lifecycle operations use module-level
-functions in agents.py (e.g. agents.wake_agent(session)).
+AgentSession comes from agenthub (hub-facing fields only). Discord-specific
+fields live in DiscordAgentState, stored as session.frontend_state.
 """
 
 from __future__ import annotations
@@ -13,42 +12,42 @@ __all__ = [
     "AgentSession",
     "ConcurrencyLimitError",
     "ContentBlock",
+    "DiscordAgentState",
     "McpArgs",
     "McpResult",
     "MessageContent",
     "PlanApprovalResult",
     "RateLimitQuota",
     "SessionUsage",
+    "discord_state",
+    "setup_agent_log",
     "tool_display",
 ]
 
-import asyncio
 import logging
 import os
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from agenthub.types import (
+    AgentSession,
+    ConcurrencyLimitError,
+    MessageContent,
+    RateLimitQuota,
+    SessionUsage,
+)
 from axi import config
+from claudewire.events import TOOL_DISPLAY_NAMES, ActivityState, tool_display
 
 if TYPE_CHECKING:
-    from claude_agent_sdk import ClaudeSDKClient
-    from claude_agent_sdk.types import SystemPromptPreset
-
-
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
+    import asyncio
+    from datetime import datetime
 
 # Anthropic API content block (text, image, tool_use, etc.)
 ContentBlock = dict[str, Any]
-
-# Message content: plain string or list of content blocks
-MessageContent = str | list[ContentBlock]
 
 # MCP tool handler: receives JSON args, returns MCP response
 McpArgs = dict[str, Any]
@@ -62,113 +61,74 @@ class PlanApprovalResult(TypedDict):
     message: str  # empty string when no feedback
 
 
-
 # ---------------------------------------------------------------------------
-# Activity tracking (canonical definitions live in claudewire.events)
-# ---------------------------------------------------------------------------
-
-from claudewire.events import TOOL_DISPLAY_NAMES, ActivityState, tool_display
-
-# ---------------------------------------------------------------------------
-# Agent session
+# Discord-specific session state
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class AgentSession:
-    name: str
-    agent_type: str = "flowcoder"  # "flowcoder" (default) or "claude_code"
-    client: ClaudeSDKClient | None = None
-    cwd: str = ""
-    query_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+class DiscordAgentState:
+    """Fields specific to the Discord frontend.
+
+    Stored as session.frontend_state on each AgentSession. The hub never
+    touches these — only Discord-side code reads/writes them.
+    """
+
+    channel_id: int | None = None
+    # Stderr buffering (thread-safe — SDK stderr callback runs in a thread)
     stderr_buffer: list[str] = field(default_factory=lambda: list[str]())
     stderr_lock: threading.Lock = field(default_factory=threading.Lock)
-    last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
-    system_prompt: SystemPromptPreset | str | None = None
-    system_prompt_hash: str | None = None  # Hash of system prompt text for change detection across restarts
-    system_prompt_posted: bool = False  # Set True after posting system prompt to Discord
+    # Prompt change tracking
+    system_prompt_posted: bool = False
+    # Idle notification state
     last_idle_notified: datetime | None = None
-    idle_reminder_count: int = 0
-    session_id: str | None = None
-    discord_channel_id: int | None = None
-    message_queue: deque[tuple[MessageContent, Any, Any]] = field(default_factory=lambda: deque[tuple[MessageContent, Any, Any]]())
-    mcp_servers: dict[str, Any] | None = None
-    reconnecting: bool = False  # True during bridge reconnect (blocks on_message from waking)
-    bridge_busy: bool = False  # True when reconnected to a mid-task CLI (bridge idle=False)
-    activity: ActivityState = field(default_factory=ActivityState)
+    # Debug mode (post tool calls and thinking to Discord)
     debug: bool = field(
-        default_factory=lambda: os.environ.get("DISCORD_DEBUG", "").strip().lower() in ("1", "true", "on")
-    )  # Post tool calls and thinking phases to Discord
-    plan_approval_future: asyncio.Future[PlanApprovalResult] | None = None  # Set when waiting for user to approve/reject a plan
-    plan_approval_message_id: int | None = None  # Discord message ID of the approval prompt (for reaction-based approval)
-    plan_mode: bool = False  # When True, agent is in plan mode (read-only, plan before implement)
-    question_future: asyncio.Future[str] | None = None  # Set when waiting for user to answer a single question
-    question_data: dict[str, Any] | None = None  # Current question being asked (options, multiSelect, etc.)
-    question_message_id: int | None = None  # Discord message ID of the current question (for reaction matching)
-    todo_message_id: int | None = None  # Discord message ID for the todo list display (edited in-place on updates)
-    todo_items: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())  # Last known todo list from TodoWrite
-    agent_log: logging.Logger | None = None
-    last_failed_resume_id: str | None = None  # Session ID that failed resume (prevents stale-ID cycle)
+        default_factory=lambda: os.environ.get("DISCORD_DEBUG", "").strip().lower()
+        in ("1", "true", "on")
+    )
+    # Plan approval gate
+    plan_approval_future: asyncio.Future[PlanApprovalResult] | None = None
+    plan_approval_message_id: int | None = None
+    # Question gate
+    question_future: asyncio.Future[str] | None = None
+    question_data: dict[str, Any] | None = None
+    question_message_id: int | None = None
+    # Todo display
+    todo_message_id: int | None = None
+    todo_items: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
 
-    def __post_init__(self) -> None:
-        """Set up per-agent logger writing to <assistant_dir>/logs/<name>.log."""
-        from axi.log_context import StructuredContextFilter
 
-        os.makedirs(config.LOG_DIR, exist_ok=True)
-        logger = logging.getLogger(f"agent.{self.name}")
-        logger.setLevel(logging.DEBUG)
-        logger.propagate = False
-        if not logger.handlers:  # Avoid duplicate handlers on re-creation
-            fh = RotatingFileHandler(
-                os.path.join(config.LOG_DIR, f"{self.name}.log"),
-                maxBytes=5 * 1024 * 1024,
-                backupCount=2,
-            )
-            fh.setLevel(logging.DEBUG)
-            fh.addFilter(StructuredContextFilter())
-            _agent_fmt = logging.Formatter("%(asctime)s %(levelname)-8s [%(ctx_prefix)s] %(message)s")
-            _agent_fmt.converter = time.gmtime
-            fh.setFormatter(_agent_fmt)
-            logger.addHandler(fh)
-        self.agent_log = logger
-
-    def close_log(self) -> None:
-        """Remove all handlers from the per-agent logger."""
-        if self.agent_log:
-            for handler in self.agent_log.handlers[:]:
-                handler.close()
-                self.agent_log.removeHandler(handler)
+def discord_state(session: AgentSession) -> DiscordAgentState:
+    """Get the DiscordAgentState from a session, creating one if absent."""
+    if session.frontend_state is None:
+        session.frontend_state = DiscordAgentState()
+    return session.frontend_state  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
-# Usage tracking
+# Agent logger setup
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class SessionUsage:
-    agent_name: str
-    queries: int = 0
-    total_cost_usd: float = 0.0
-    total_turns: int = 0
-    total_duration_ms: int = 0
-    total_input_tokens: int = 0
-    total_output_tokens: int = 0
-    first_query: datetime | None = None
-    last_query: datetime | None = None
+def setup_agent_log(session: AgentSession) -> None:
+    """Set up per-agent logger writing to <LOG_DIR>/<name>.log."""
+    from axi.log_context import StructuredContextFilter
 
-
-@dataclass
-class RateLimitQuota:
-    status: str  # "allowed", "allowed_warning", "rejected"
-    resets_at: datetime  # from resetsAt unix timestamp
-    rate_limit_type: str  # "five_hour"
-    utilization: float | None = None  # 0.0-1.0, only present on warnings
-    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-
-# ---------------------------------------------------------------------------
-# Exceptions (canonical definition in agenthub.types)
-# ---------------------------------------------------------------------------
-
-from agenthub.types import ConcurrencyLimitError
+    os.makedirs(config.LOG_DIR, exist_ok=True)
+    logger = logging.getLogger(f"agent.{session.name}")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    if not logger.handlers:
+        fh = RotatingFileHandler(
+            os.path.join(config.LOG_DIR, f"{session.name}.log"),
+            maxBytes=5 * 1024 * 1024,
+            backupCount=2,
+        )
+        fh.setLevel(logging.DEBUG)
+        fh.addFilter(StructuredContextFilter())
+        fmt = logging.Formatter("%(asctime)s %(levelname)-8s [%(ctx_prefix)s] %(message)s")
+        fmt.converter = time.gmtime
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+    session.agent_log = logger

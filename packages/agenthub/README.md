@@ -1,83 +1,149 @@
 # agenthub
 
-Agent lifecycle management — wires procmux to claudewire. Provides multi-agent orchestration primitives.
+Multi-agent session orchestration. Manages N concurrent LLM agent sessions: lifecycle, concurrency, message queuing, rate limits, hot restart, and graceful shutdown.
+
+No UI dependency. The frontend (Discord, CLI, web) plugs in via `FrontendCallbacks` and a `StreamHandlerFn` callback.
 
 ## Purpose
 
-Glue layer between `procmux` (process multiplexing) and `claudewire` (Claude protocol). The main adapter is `ProcmuxProcessConnection`, which lets claudewire's `BridgeTransport` route through a procmux server without either package knowing about the other.
-
-Also provides shared primitives for multi-agent systems: background task management, frontend callback protocols, and concurrency limits.
+Extracted from the Axi bot's `agents.py` to make agent orchestration reusable across frontends. AgentHub is Claude-specific — it depends on Claude Wire (the stream-json protocol wrapper).
 
 ## Architecture
 
 ```
-Claude Agent SDK
+Frontend (Discord bot, CLI, web)
       |
-BridgeTransport (claudewire)
+      | FrontendCallbacks + StreamHandlerFn
+      v
+   AgentHub (orchestration)
       |
-ProcmuxProcessConnection (agenthub) ← adapter
+      | SDK factories (injected)
+      v
+   Claude Wire (stream protocol)
       |
-ProcmuxConnection (procmux)
-      |
-Unix socket → procmux server → subprocesses
+   Claude Agent SDK
 ```
+
+The hub doesn't import SDK types directly. Instead, the frontend injects three factory functions at construction:
+- `make_agent_options(session, resume_id) -> options` — builds SDK options
+- `create_client(session, options) -> client` — creates SDK client
+- `disconnect_client(client, name)` — tears down client
+
+This keeps AgentHub decoupled from the exact SDK version and option schema.
 
 ## Usage
 
-```python
-from procmux import ensure_running
-from claudewire import BridgeTransport
-from agenthub import ProcmuxProcessConnection
-
-# Connect to procmux
-conn = await ensure_running("/path/to/socket.sock")
-
-# Wrap as claudewire ProcessConnection
-proc_conn = ProcmuxProcessConnection(conn)
-
-# Use with BridgeTransport
-transport = BridgeTransport("agent-1", proc_conn)
-await transport.connect()
-await transport.spawn(cli_args=["--model", "sonnet"], env={}, cwd="/tmp")
-```
-
-## API
-
-| Export | Description |
-|---|---|
-| `ProcmuxProcessConnection` | Adapter: wraps `ProcmuxConnection` to satisfy claudewire's `ProcessConnection` protocol |
-| `BackgroundTaskSet` | GC-safe fire-and-forget async task set (prevents Python 3.12+ weak-ref collection) |
-| `FrontendCallbacks` | Callback protocol for frontends (post_message, post_system, on_wake, on_sleep, on_session_id, get_channel) |
-| `ConcurrencyLimitError` | Raised when awake-agent slots are exhausted |
-
-### BackgroundTaskSet
+### Creating the hub
 
 ```python
-from agenthub import BackgroundTaskSet
-
-tasks = BackgroundTaskSet()
-tasks.fire_and_forget(some_coroutine())
-print(len(tasks))  # number of active tasks
-```
-
-### FrontendCallbacks
-
-```python
-from agenthub import FrontendCallbacks
+from agenthub import AgentHub, FrontendCallbacks
 
 callbacks = FrontendCallbacks(
-    post_message=my_post_fn,     # async (agent_name, text) -> None
-    post_system=my_system_fn,    # async (agent_name, text) -> None
-    on_wake=my_wake_fn,          # async (agent_name) -> None
-    on_sleep=my_sleep_fn,        # async (agent_name) -> None
-    on_session_id=my_sid_fn,     # async (agent_name, session_id) -> None
-    get_channel=my_channel_fn,   # async (agent_name) -> channel
+    post_message=my_post_fn,
+    post_system=my_system_fn,
+    on_wake=my_wake_fn,
+    on_sleep=my_sleep_fn,
+    on_session_id=my_sid_fn,
+    get_channel=my_channel_fn,
+    on_spawn=my_spawn_fn,
+    on_kill=my_kill_fn,
+    broadcast=my_broadcast_fn,
+    schedule_rate_limit_expiry=my_expiry_fn,
+    on_idle_reminder=my_idle_fn,
+    on_reconnect=my_reconnect_fn,
+    close_app=my_close_fn,
+    kill_process=my_kill_process_fn,
+)
+
+hub = AgentHub(
+    max_awake=4,
+    protected={"axi-master"},
+    callbacks=callbacks,
+    make_agent_options=my_options_factory,
+    create_client=my_client_factory,
+    disconnect_client=my_disconnect_fn,
+    query_timeout=300.0,
 )
 ```
+
+### Spawning and messaging
+
+```python
+from agenthub import spawn_agent, process_message, wake_agent
+
+# Spawn a session (does not run the prompt)
+session = await spawn_agent(hub, name="worker-1", cwd="/tmp/work")
+
+# Wake and send a message
+await wake_agent(hub, session)
+await process_message(hub, session, "Build the feature", my_stream_handler)
+```
+
+### Stream handler pattern
+
+The frontend provides a `StreamHandlerFn` — an async callback that consumes the SDK stream and renders to the user. The hub orchestrates query dispatch and retry; the frontend owns rendering.
+
+```python
+from agenthub import StreamHandlerFn
+
+async def my_stream_handler(session) -> str | None:
+    """Iterate SDK stream, render to Discord/CLI/web.
+    Return None on success, or an error string for transient errors."""
+    async for msg in session.client.receive_messages():
+        render(msg)
+    return None
+```
+
+### Permission composition
+
+```python
+from agenthub import build_permission_callback, compute_allowed_paths
+
+paths = compute_allowed_paths(
+    session.cwd,
+    user_data_path="/home/user/data",
+    bot_dir="/home/user/bot",
+    worktrees_dir="/home/user/worktrees",
+)
+
+permission_cb = build_permission_callback(
+    session,
+    allowed_paths=paths,
+    plan_approval_hook=my_plan_hook,    # optional
+    question_hook=my_question_hook,      # optional
+)
+```
+
+## Module Layout
+
+| Module | Description |
+|---|---|
+| `hub.py` | `AgentHub` class — thin state holder, delegates to peer modules |
+| `lifecycle.py` | `wake_agent`, `sleep_agent`, `wake_or_queue`, helpers (`is_awake`, `is_processing`, `count_awake`) |
+| `registry.py` | `spawn_agent`, `end_session`, `rebuild_session`, `reset_session`, `reclaim_agent_name` |
+| `messaging.py` | `process_message`, `run_initial_prompt`, `process_message_queue`, `deliver_inter_agent_message`, `interrupt_session` |
+| `reconnect.py` | `connect_procmux`, `reconnect_single` — hot restart via procmux bridge |
+| `scheduler.py` | `Scheduler` — slot management, priority-based eviction (background before interactive) |
+| `shutdown.py` | `ShutdownCoordinator` — graceful shutdown with busy-agent wait, safety deadline |
+| `rate_limits.py` | `RateLimitTracker` — rate limit state, usage recording, quota tracking |
+| `permissions.py` | `build_permission_callback` — composes Claude Wire policies with session context + interactive hooks |
+| `callbacks.py` | `FrontendCallbacks` — dataclass of async callables the frontend implements |
+| `types.py` | `AgentSession`, `SessionUsage`, `RateLimitQuota`, `ConcurrencyLimitError` |
+| `procmux_wire.py` | `ProcmuxProcessConnection` — adapter from procmux to claudewire's `ProcessConnection` |
+| `tasks.py` | `BackgroundTaskSet` — GC-safe fire-and-forget async tasks |
+
+## Design Principles
+
+- **Functions over methods**: Lifecycle, registry, and messaging are module-level functions that take `hub` as first arg. AgentHub is a thin state holder that delegates — not a god object.
+- **DI for side effects**: Shutdown, rate limits, and SDK interaction use injected callbacks. No implicit global state.
+- **Explicit data flow**: Hub instance is passed explicitly. State is public (`hub.sessions`, `hub.scheduler`).
+- **Frontend-agnostic**: All user-facing notifications go through `FrontendCallbacks`. The hub never touches Discord, terminal, or web APIs.
+- **YAGNI**: `AgentSession.frontend_state: Any` lets frontends attach their own state without hub changes. No typed wrappers until needed.
 
 ## Dependencies
 
 - `claudewire`
 - `procmux`
+- `opentelemetry-api`
 
 Requires Python 3.12+.

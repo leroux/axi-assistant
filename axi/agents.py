@@ -1,4 +1,8 @@
-"""Agent lifecycle, streaming, rate limits, procmux, and channel management."""
+"""Agent lifecycle, streaming, rate limits, procmux, and channel management.
+
+Migration in progress: lifecycle, registry, and messaging delegate to AgentHub.
+Discord-specific rendering (streaming, live-edit, reactions) stays here.
+"""
 
 from __future__ import annotations
 
@@ -44,6 +48,7 @@ from axi.axi_types import (
     ConcurrencyLimitError,
     ContentBlock,
     MessageContent,
+    discord_state,
 )
 from axi.channels import (
     ensure_agent_channel,
@@ -92,6 +97,7 @@ from procmux import ensure_running as ensure_bridge
 if TYPE_CHECKING:
     from discord.ext.commands import Bot
 
+    from agenthub import AgentHub
     from procmux import ProcmuxConnection
 
 log = logging.getLogger("axi")
@@ -104,15 +110,21 @@ _tracer = trace.get_tracer(__name__)
 
 _bot: Bot | None = None
 
+# The hub owns lifecycle, registry, messaging, scheduler, rate limits.
+# Created in init() via hub_wiring.create_hub().
+hub: AgentHub | None = None
+
+# Session dict — shared between hub and legacy code.
+# hub.sessions points to this same dict during migration.
 agents: dict[str, AgentSession] = {}
 channel_to_agent: dict[int, str] = {}  # channel_id -> agent_name
-_wake_lock = asyncio.Lock()
 
 
 def find_session_by_question_message(message_id: int) -> AgentSession | None:
     """Find the agent session waiting for a reaction answer on this message."""
     for session in agents.values():
-        if session.question_message_id == message_id:
+        ds = discord_state(session)
+        if ds.question_message_id == message_id:
             return session
     return None
 
@@ -134,7 +146,7 @@ _stream_counter = 0
 # MCP server injection (set by bot.py after tools.py creates them)
 _utils_mcp_server: Any = None
 
-# Background task manager — prevents GC of fire-and-forget tasks.
+# Background task manager — hub.tasks after full migration; kept for legacy callers.
 _bg_tasks = BackgroundTaskSet()
 fire_and_forget = _bg_tasks.fire_and_forget
 
@@ -150,9 +162,15 @@ def _user_mentions() -> str:
 
 
 def init(bot_instance: Bot) -> None:
-    """Inject the Bot reference. Called once from bot.py."""
-    global _bot
+    """Inject the Bot reference and create the AgentHub. Called once from bot.py."""
+    global _bot, hub
     _bot = bot_instance
+
+    # Create the hub — shares the `agents` dict with legacy code
+    from axi.hub_wiring import create_hub
+
+    hub = create_hub(bot_instance, agents)
+
     _channels_mod.init(bot_instance, agents, channel_to_agent, send_to_exceptions)
 
 
@@ -183,21 +201,31 @@ def _build_mcp_servers(agent_name: str, cwd: str | None = None) -> dict[str, Any
 # ---------------------------------------------------------------------------
 
 
+def _close_agent_log(session: AgentSession) -> None:
+    """Remove all handlers from the per-agent logger."""
+    if session.agent_log:
+        for handler in session.agent_log.handlers[:]:
+            handler.close()
+            session.agent_log.removeHandler(handler)
+
+
 def make_stderr_callback(session: AgentSession):
     """Create a stderr callback bound to a specific agent session."""
+    ds = discord_state(session)  # cache — callback runs in a thread
 
     def callback(text: str) -> None:
-        with session.stderr_lock:
-            session.stderr_buffer.append(text)
+        with ds.stderr_lock:
+            ds.stderr_buffer.append(text)
 
     return callback
 
 
 def drain_stderr(session: AgentSession) -> list[str]:
     """Drain stderr buffer for a specific agent session."""
-    with session.stderr_lock:
-        msgs = list(session.stderr_buffer)
-        session.stderr_buffer.clear()
+    ds = discord_state(session)
+    with ds.stderr_lock:
+        msgs = list(ds.stderr_buffer)
+        ds.stderr_buffer.clear()
     return msgs
 
 
@@ -421,7 +449,7 @@ async def send_long(channel: TextChannel, text: str) -> None:
                     session = agents.get(agent_name)
                     new_ch = await ensure_agent_channel(agent_name, cwd=session.cwd if session else None)
                     if session:
-                        session.discord_channel_id = new_ch.id
+                        discord_state(session).channel_id = new_ch.id
                     await new_ch.send(chunk)
                 else:
                     raise
@@ -554,10 +582,13 @@ async def _handle_exit_plan_mode(
     tool_input: dict[str, Any],
 ) -> PermissionResultAllow | PermissionResultDeny:
     """Handle ExitPlanMode by posting the plan to Discord and waiting for user approval."""
-    if session is None or session.discord_channel_id is None:
+    if session is None:
+        return PermissionResultAllow()
+    ds = discord_state(session)
+    if ds.channel_id is None:
         return PermissionResultAllow()
 
-    channel_id = session.discord_channel_id
+    channel_id = ds.channel_id
 
     async def _send_plan_msg(content: str) -> None:
         await config.discord_client.send_message(channel_id, content)
@@ -599,22 +630,22 @@ async def _handle_exit_plan_mode(
         # Pre-react with approval/rejection emojis so the user can click them
         for emoji in ("\u2705", "\u274c"):
             await config.discord_client.add_reaction(channel_id, approval_msg_id, emoji)
-        session.plan_approval_message_id = int(approval_msg_id)
+        discord_state(session).plan_approval_message_id = int(approval_msg_id)
     except Exception:
         log.exception("_handle_exit_plan_mode: failed to post plan to Discord \u2014 denying")
         return PermissionResultDeny(message="Could not post plan to Discord for approval. Try again.")
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
-    session.plan_approval_future = future  # type: ignore[assignment]
+    discord_state(session).plan_approval_future = future  # type: ignore[assignment]
 
     log.info("Agent '%s' paused waiting for plan approval", session.name)
 
     try:
         result = await future
     finally:
-        session.plan_approval_future = None
-        session.plan_approval_message_id = None
+        discord_state(session).plan_approval_future = None
+        discord_state(session).plan_approval_message_id = None
 
     # Remove the unchosen reaction so the result is visually clear
     remove_emoji = "\u274c" if result.get("approved") else "\u2705"
@@ -737,10 +768,13 @@ async def _handle_ask_user_question(
     tool_input: dict[str, Any],
 ) -> PermissionResultAllow | PermissionResultDeny:
     """Handle AskUserQuestion by posting questions one at a time and waiting for each answer."""
-    if session is None or session.discord_channel_id is None:
+    if session is None:
+        return PermissionResultAllow()
+    ds = discord_state(session)
+    if ds.channel_id is None:
         return PermissionResultAllow()
 
-    channel_id = session.discord_channel_id
+    channel_id = ds.channel_id
     questions = tool_input.get("questions", [])
     if not questions:
         return PermissionResultAllow()
@@ -774,20 +808,20 @@ async def _handle_ask_user_question(
                 log.debug("Failed to add reaction %d to question message", j + 1)
 
         # Set session state for this question
-        session.question_message_id = msg_id
-        session.question_data = q
+        discord_state(session).question_message_id = msg_id
+        discord_state(session).question_data = q
 
         future: asyncio.Future[str] = loop.create_future()
-        session.question_future = future
+        discord_state(session).question_future = future
 
         log.info("Agent '%s' waiting for answer to question %d/%d", session.name, i + 1, len(questions))
 
         try:
             answer = await future
         finally:
-            session.question_future = None
-            session.question_message_id = None
-            session.question_data = None
+            discord_state(session).question_future = None
+            discord_state(session).question_message_id = None
+            discord_state(session).question_data = None
 
         # Empty answer means interrupted (e.g. /stop)
         if not answer:
@@ -848,23 +882,24 @@ def load_todo_items(agent_name: str) -> list[dict[str, Any]]:
 async def _post_todo_list(session: AgentSession, tool_input: dict[str, Any]) -> None:
     """Post or update the todo list display in Discord."""
     todos = tool_input.get("todos", [])
-    session.todo_items = todos
+    ds = discord_state(session)
+    ds.todo_items = todos
     _save_todo_items(session.name, todos)
     body = f"**Todo List**\n{format_todo_list(todos)}"
-    channel_id = session.discord_channel_id
+    channel_id = ds.channel_id
     if channel_id is None:
         return
 
     try:
-        if session.todo_message_id is not None:
+        if ds.todo_message_id is not None:
             # Edit existing message
-            await config.discord_client.edit_message(channel_id, session.todo_message_id, body)
+            await config.discord_client.edit_message(channel_id, ds.todo_message_id, body)
         else:
             # Create new message
             msg = await config.discord_client.send_message(channel_id, body)
             msg_id = msg.get("id")
             if msg_id is not None:
-                session.todo_message_id = int(msg_id)
+                discord_state(session).todo_message_id = int(msg_id)
                 # Persist the new message ID
                 if session.name == config.MASTER_AGENT_NAME:
                     _save_master_session(session)
@@ -887,9 +922,10 @@ async def _handle_rate_limit(error_text: str, session: AgentSession, channel: Te
     async def _broadcast(msg_text: str) -> None:
         notified_channels: set[int] = set()
         for agent_session in agents.values():
-            if not agent_session.discord_channel_id:
+            ads = discord_state(agent_session)
+            if not ads.channel_id:
                 continue
-            ch = bot_ref.get_channel(agent_session.discord_channel_id)
+            ch = bot_ref.get_channel(ads.channel_id)
             if isinstance(ch, TextChannel) and ch.id not in notified_channels:
                 notified_channels.add(ch.id)
                 try:
@@ -981,7 +1017,7 @@ def is_processing(session: AgentSession) -> bool:
 def _reset_session_activity(session: AgentSession) -> None:
     """Reset idle tracking and activity state for the start of a new query."""
     session.last_activity = datetime.now(UTC)
-    session.last_idle_notified = None
+    discord_state(session).last_idle_notified = None
     session.idle_reminder_count = 0
     session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
 
@@ -991,7 +1027,7 @@ def _reset_session_activity(session: AgentSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _create_transport(session: AgentSession, reconnecting: bool = False):
+async def create_transport(session: AgentSession, reconnecting: bool = False):
     """Create a transport for Claude Code agent (bridge or direct)."""
     if wire_conn and wire_conn.is_alive:
         transport = BridgeTransport(
@@ -1011,44 +1047,6 @@ async def _create_transport(session: AgentSession, reconnecting: bool = False):
 _disconnect_client = disconnect_client
 
 
-async def _create_sdk_client(session: AgentSession, options: ClaudeAgentOptions) -> ClaudeSDKClient:
-    """Create a ClaudeSDKClient for a session.
-
-    For flowcoder agents, spawns the engine in procmux via BridgeTransport.
-    For claude_code agents, uses the SDK's built-in SubprocessCLITransport.
-    """
-    if session.agent_type == "flowcoder" and config.FLOWCODER_ENABLED:
-        from axi.flowcoder import build_engine_cli_args, build_engine_env
-
-        transport = await _create_transport(session)
-        if not transport:
-            raise RuntimeError(f"Procmux required for flowcoder agent '{session.name}'")
-
-        cli_args = build_engine_cli_args(options)
-        env = build_engine_env()
-        log.info("Spawning flowcoder engine for '%s': %s", session.name, " ".join(cli_args[:6]) + "...")
-        try:
-            await transport.spawn(cli_args, env, session.cwd)
-            await transport.subscribe()
-
-            client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
-            await client.__aenter__()
-            return client
-        except Exception:
-            # Clean up the transport so we don't leak a registered queue
-            # or leave a spawned process running in procmux.
-            try:
-                await transport.close()
-            except Exception:
-                pass
-            raise
-
-    # Claude Code agent — SDK spawns its own subprocess
-    client = ClaudeSDKClient(options=options)
-    await client.__aenter__()
-    return client
-
-
 # ---------------------------------------------------------------------------
 # Concurrency management
 # ---------------------------------------------------------------------------
@@ -1059,152 +1057,74 @@ def count_awake_agents() -> int:
     return sum(1 for s in agents.values() if s.client is not None)
 
 
+# ---------------------------------------------------------------------------
+# Sleep / wake — delegate to hub lifecycle
+# ---------------------------------------------------------------------------
+
+
+
 async def sleep_agent(session: AgentSession, *, force: bool = False) -> None:
-    """Shut down an agent. Keep the AgentSession in the agents dict.
+    """Shut down an agent. Delegates to hub lifecycle.
 
-    If force=False (default), skips sleeping if the agent's query_lock is held
-    (i.e. the agent is actively processing a query).
+    If force=False (default), skips sleeping if the agent's query_lock is held.
     """
-    if not force and session.query_lock.locked():
-        log.debug("Skipping sleep for '%s' \u2014 query_lock is held", session.name)
-        return
+    from agenthub import lifecycle
 
-    if session.client is None:
-        return
-
-    with _tracer.start_as_current_span(
-        "sleep_agent",
-        attributes={"agent.name": session.name, "agent.force": force},
-    ):
-        log.info("Sleeping agent '%s'", session.name)
-        if session.agent_log:
-            session.agent_log.info("SESSION_SLEEP")
-        session.bridge_busy = False
-        await _disconnect_client(session.client, session.name)
-        session.client = None
-        scheduler.release_slot(session.name)
-        log.info("Agent '%s' is now sleeping", session.name)
-
-
-def _make_agent_options(session: AgentSession, resume_id: str | None = None) -> ClaudeAgentOptions:
-    """Build ClaudeAgentOptions for a session."""
-    return ClaudeAgentOptions(
-        model=config.get_model(),
-        effort="high",
-        thinking={"type": "enabled", "budget_tokens": 128000},
-        setting_sources=["local"],
-        permission_mode="plan" if session.plan_mode else "default",
-        can_use_tool=make_cwd_permission_callback(session.cwd, session),
-        cwd=session.cwd,
-        system_prompt=session.system_prompt,
-        include_partial_messages=True,
-        stderr=make_stderr_callback(session),
-        resume=resume_id,
-        sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
-        mcp_servers=session.mcp_servers or {},
-        disallowed_tools=["Task"],
-    )
+    assert hub is not None
+    await lifecycle.sleep_agent(hub, session, force=force)
 
 
 async def wake_agent(session: AgentSession) -> None:
-    """Wake a sleeping agent. Enforces concurrency limit. Posts system prompt on first wake."""
+    """Wake a sleeping agent. Delegates core lifecycle to hub, then handles Discord post-wake."""
+    from agenthub import lifecycle
+
     assert _bot is not None
+    assert hub is not None
 
     if is_awake(session):
         return
 
-    async with _wake_lock:
-        if is_awake(session):
-            return
+    resume_id = session.session_id
+    await lifecycle.wake_agent(hub, session)
 
-        await scheduler.request_slot(session.name)
+    # --- Discord-specific post-wake logic ---
 
-        set_agent_context(session.name, channel_id=session.discord_channel_id)
-        log.info("Waking agent '%s' (session_id=%s)", session.name, session.session_id)
+    # Prompt change detection
+    prompt_changed = False
+    if resume_id and session.system_prompt is not None:
+        current_hash = compute_prompt_hash(session.system_prompt)
+        if session.system_prompt_hash is not None and current_hash != session.system_prompt_hash:
+            prompt_changed = True
+            log.info(
+                "System prompt changed for '%s' (old=%s, new=%s)",
+                session.name,
+                session.system_prompt_hash,
+                current_hash,
+            )
+        session.system_prompt_hash = current_hash
 
-        resume_id = session.session_id
-        options = _make_agent_options(session, resume_id)
-
-        with _tracer.start_as_current_span(
-            "wake_agent",
-            attributes={
-                "agent.name": session.name,
-                "agent.type": session.agent_type or "",
-                "agent.resumed": bool(resume_id),
-                "agent.cwd": session.cwd or "",
-            },
-        ):
-            log.debug("Waking '%s' (resume=%s, type=%s)", session.name, resume_id, session.agent_type)
+    # Post system prompt to Discord on first wake
+    ds = discord_state(session)
+    if not ds.system_prompt_posted and ds.channel_id:
+        ds.system_prompt_posted = True
+        channel = _bot.get_channel(ds.channel_id)
+        if channel and isinstance(channel, TextChannel):
             try:
-                client = await _create_sdk_client(session, options)
-                session.client = client
-                log.info("Agent '%s' is now awake (resumed=%s)", session.name, resume_id)
-                if session.agent_log:
-                    session.agent_log.info("SESSION_WAKE (resumed=%s)", bool(resume_id))
-                # Successful resume — clear any previous failure marker
-                session.last_failed_resume_id = None
-            except Exception:
-                if resume_id:
-                    log.warning(
-                        "Failed to resume agent '%s' with session_id=%s, retrying fresh",
-                        session.name, resume_id, exc_info=True,
-                    )
-                    options = _make_agent_options(session, resume_id=None)
-                    try:
-                        client = await _create_sdk_client(session, options)
-                    except Exception:
-                        scheduler.release_slot(session.name)
-                        raise
-                    session.client = client
-                    session.session_id = None
-                    # Remember the failed session_id so we don't save the same
-                    # stale ID when the fresh session returns it in result messages.
-                    session.last_failed_resume_id = resume_id
-                    if session.name == config.MASTER_AGENT_NAME:
-                        try:
-                            os.remove(config.MASTER_SESSION_PATH)
-                        except OSError:
-                            pass
-                    log.warning("Agent '%s' woke with fresh session (previous context lost)", session.name)
-                    if session.agent_log:
-                        session.agent_log.info("SESSION_WAKE (resumed=False, fresh after resume failure)")
-                else:
-                    scheduler.release_slot(session.name)
-                    raise
-
-        prompt_changed = False
-        if resume_id and session.system_prompt is not None:
-            current_hash = compute_prompt_hash(session.system_prompt)
-            if session.system_prompt_hash is not None and current_hash != session.system_prompt_hash:
-                prompt_changed = True
-                log.info(
-                    "System prompt changed for '%s' (old=%s, new=%s)",
-                    session.name,
-                    session.system_prompt_hash,
-                    current_hash,
+                await post_system_prompt_to_channel(
+                    channel,
+                    session.system_prompt,
+                    is_resume=bool(resume_id),
+                    prompt_changed=prompt_changed,
+                    session_id=session.session_id or resume_id,
                 )
-            session.system_prompt_hash = current_hash
+            except Exception:
+                log.warning(
+                    "Failed to post system prompt to Discord for '%s'",
+                    session.name,
+                    exc_info=True,
+                )
 
-        if not session.system_prompt_posted and session.discord_channel_id:
-            session.system_prompt_posted = True
-            channel = _bot.get_channel(session.discord_channel_id)
-            if channel and isinstance(channel, TextChannel):
-                try:
-                    await post_system_prompt_to_channel(
-                        channel,
-                        session.system_prompt,
-                        is_resume=bool(resume_id),
-                        prompt_changed=prompt_changed,
-                        session_id=session.session_id or resume_id,
-                    )
-                except Exception:
-                    log.warning(
-                        "Failed to post system prompt to Discord for '%s'",
-                        session.name,
-                        exc_info=True,
-                    )
-
-        await _post_model_warning(session)
+    await _post_model_warning(session)
 
 
 async def wake_or_queue(
@@ -1241,18 +1161,15 @@ async def wake_or_queue(
 
 async def end_session(name: str) -> None:
     """End a named Claude session and remove it from the registry."""
-    set_agent_context(name)
-    with _tracer.start_as_current_span("end_session", attributes={"agent.name": name}):
-        session = agents.get(name)
-        if session is None:
-            return
-        if session.client is not None:
-            await _disconnect_client(session.client, name)
-            session.client = None
-            scheduler.release_slot(name)
-        session.close_log()
-        agents.pop(name, None)
-        log.info("Session '%s' ended", name)
+    session = agents.get(name)
+    if session is None:
+        return
+    if session.client is not None:
+        await _disconnect_client(session.client, name)
+        session.client = None
+    _close_agent_log(session)
+    agents.pop(name, None)
+    log.info("Session '%s' ended", name)
 
 
 async def _rebuild_session(name: str, *, cwd: str | None = None, session_id: str | None = None) -> AgentSession:
@@ -1262,7 +1179,7 @@ async def _rebuild_session(name: str, *, cwd: str | None = None, session_id: str
     """
     session = agents.get(name)
     old_cwd = session.cwd if session else config.DEFAULT_CWD
-    old_channel_id = session.discord_channel_id if session else None
+    old_channel_id = discord_state(session).channel_id if session else None
     old_mcp = getattr(session, "mcp_servers", None)
     resolved_cwd = cwd or old_cwd
     prompt = (
@@ -1277,9 +1194,9 @@ async def _rebuild_session(name: str, *, cwd: str | None = None, session_id: str
         system_prompt_hash=prompt_hash,
         client=None,
         session_id=session_id,
-        discord_channel_id=old_channel_id,
         mcp_servers=old_mcp,
     )
+    discord_state(new_session).channel_id = old_channel_id
     agents[name] = new_session
     return new_session
 
@@ -1331,11 +1248,12 @@ async def reconstruct_agents_from_channels() -> int:
                 system_prompt=prompt,
                 system_prompt_hash=old_prompt_hash,
                 session_id=session_id,
-                discord_channel_id=ch.id,
                 mcp_servers=mcp_servers,
-                todo_items=load_todo_items(agent_name),
-                todo_message_id=todo_msg,
             )
+            ds = discord_state(session)
+            ds.channel_id = ch.id
+            ds.todo_items = load_todo_items(agent_name)
+            ds.todo_message_id = todo_msg
             agents[agent_name] = session
             channel_to_agent[ch.id] = agent_name
             reconstructed += 1
@@ -1361,16 +1279,17 @@ async def reconstruct_agents_from_channels() -> int:
 def _update_channel_topic(session: AgentSession, channel: TextChannel | None = None) -> None:
     """Update the Discord channel topic with current session metadata (spawned agents only)."""
     assert _bot is not None
-    if session.name == config.MASTER_AGENT_NAME or not session.discord_channel_id:
+    ds = discord_state(session)
+    if session.name == config.MASTER_AGENT_NAME or not ds.channel_id:
         return
-    ch = channel or _bot.get_channel(session.discord_channel_id)
+    ch = channel or _bot.get_channel(ds.channel_id)
     if not ch or not isinstance(ch, TextChannel):
         return
     desired_topic = format_channel_topic(
         session.cwd,
         session.session_id,
         session.system_prompt_hash,
-        session.todo_message_id,
+        discord_state(session).todo_message_id,
         agent_type=session.agent_type,
     )
     if ch.topic != desired_topic:
@@ -1393,8 +1312,8 @@ def _save_master_session(session: AgentSession) -> None:
             data["session_id"] = session.session_id
         if session.system_prompt_hash:
             data["prompt_hash"] = session.system_prompt_hash
-        if session.todo_message_id is not None:
-            data["todo_message_id"] = session.todo_message_id
+        if discord_state(session).todo_message_id is not None:
+            data["todo_message_id"] = discord_state(session).todo_message_id
         with open(config.MASTER_SESSION_PATH, "w") as f:
             json.dump(data, f)
         log.info("Saved master session data to %s", config.MASTER_SESSION_PATH)
@@ -1436,9 +1355,10 @@ async def _post_model_warning(session: AgentSession) -> None:
     """Post a warning to Discord if the agent is running on a non-opus model."""
     assert _bot is not None
     model = config.get_model()
-    if model == "opus" or not session.discord_channel_id:
+    ds = discord_state(session)
+    if model == "opus" or not ds.channel_id:
         return
-    channel = _bot.get_channel(session.discord_channel_id)
+    channel = _bot.get_channel(ds.channel_id)
     if channel and isinstance(channel, TextChannel):
         try:
             await channel.send(
@@ -1812,7 +1732,7 @@ async def _handle_stream_event(
         ctx.tool_input_json = ""
 
     # Debug output
-    if session.debug and event_type == "content_block_stop":
+    if discord_state(session).debug and event_type == "content_block_stop":
         if session.activity.phase == "thinking" and session.activity.thinking_text:
             thinking = session.activity.thinking_text.strip()
             if thinking:
@@ -2373,9 +2293,9 @@ async def spawn_agent(
             system_prompt_hash=compute_prompt_hash(prompt),
             client=None,
             session_id=resume,
-            discord_channel_id=channel.id,
             mcp_servers=mcp_servers,
         )
+        discord_state(session).channel_id = channel.id
 
         agents[name] = session
         channel_to_agent[channel.id] = name
@@ -2507,7 +2427,7 @@ async def process_message_queue(session: AgentSession) -> None:
             attributes={"agent.name": session.name, "queue.size": len(session.message_queue)},
         ).end()  # mark event; individual messages are traced via process_message
     while session.message_queue:
-        if shutdown_coordinator and shutdown_coordinator.requested:
+        if hub and hub.shutdown_requested:
             log.info("Shutdown requested \u2014 not processing further queued messages for '%s'", session.name)
             break
         # Yield slot if scheduler needs it for another agent
@@ -2584,7 +2504,7 @@ async def deliver_inter_agent_message(
     content: str,
 ) -> str:
     """Deliver a message from one agent to another."""
-    set_agent_context(target_session.name, channel_id=target_session.discord_channel_id)
+    set_agent_context(target_session.name, channel_id=discord_state(target_session).channel_id)
     set_trigger("inter_agent", detail=f"from={sender_name}")
     _tracer.start_span(
         "deliver_inter_agent_message",
@@ -2766,7 +2686,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
                 session.reconnecting = False
                 return
 
-            transport = await _create_transport(session, reconnecting=True)
+            transport = await create_transport(session, reconnecting=True)
             assert transport is not None
 
             sub_result = await transport.subscribe()
