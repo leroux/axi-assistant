@@ -442,7 +442,7 @@ wheels = [
 [[package]]
 name = "flowcoder-engine"
 version = "0.1.0"
-source = { directory = "../flowcoder-rewrite/packages/flowcoder-engine" }
+source = { editable = "../flowcoder-rewrite/packages/flowcoder-engine" }
 dependencies = [
     { name = "flowcoder-flowchart" },
 ]
@@ -458,7 +458,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "flowcoder-flowchart"
 version = "0.1.0"
-source = { directory = "../flowcoder-rewrite/packages/flowcoder-flowchart" }
+source = { editable = "../flowcoder-rewrite/packages/flowcoder-flowchart" }
 dependencies = [
     { name = "pydantic" },
 ]
@@ -920,8 +920,8 @@ requires-dist = [
     { name = "claude-agent-sdk" },
     { name = "croniter" },
     { name = "discord-py" },
-    { name = "flowcoder-engine", directory = "../flowcoder-rewrite/packages/flowcoder-engine" },
-    { name = "flowcoder-flowchart", directory = "../flowcoder-rewrite/packages/flowcoder-flowchart" },
+    { name = "flowcoder-engine", editable = "../flowcoder-rewrite/packages/flowcoder-engine" },
+    { name = "flowcoder-flowchart", editable = "../flowcoder-rewrite/packages/flowcoder-flowchart" },
     { name = "httpx" },
     { name = "python-dotenv" },
     { name = "tzdata", specifier = ">=2025.3" },
