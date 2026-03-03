@@ -1684,14 +1684,6 @@ def _stop_typing(ctx: _StreamCtx, typing_ctx: Any) -> None:
         ctx.typing_stopped = True
 
 
-async def _drain_stderr_to_channel(session: AgentSession, channel: TextChannel) -> None:
-    """Send any accumulated stderr to the channel."""
-    for stderr_msg in drain_stderr(session):
-        stderr_text = stderr_msg.strip()
-        if stderr_text:
-            for part in split_message(f"```\n{stderr_text}\n```"):
-                await channel.send(part)
-
 
 # ---------------------------------------------------------------------------
 # Stream event handlers
@@ -2004,8 +1996,6 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                     len(ctx.text_buffer),
                 )
 
-            await _drain_stderr_to_channel(session, channel)
-
             if isinstance(msg, StreamEvent):
                 await _handle_stream_event(ctx, session, channel, msg, typing_ctx)
             elif isinstance(msg, AssistantMessage):
@@ -2030,9 +2020,6 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                 ctx.text_buffer = ctx.text_buffer[:split_at]
                 await _flush_text(ctx, session, channel, "mid_turn_split")
                 ctx.text_buffer = remainder
-
-    # Flush remaining stderr
-    await _drain_stderr_to_channel(session, channel)
 
     if ctx.hit_rate_limit:
         # Finalize any in-flight streaming message (remove cursor)
