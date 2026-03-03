@@ -160,11 +160,16 @@ MASTER_SYSTEM_PROMPT: SystemPromptPreset = {
 }
 
 
-def make_spawned_agent_system_prompt(cwd: str, packs: list[str] | None = None) -> SystemPromptPreset:
+def make_spawned_agent_system_prompt(
+    cwd: str,
+    packs: list[str] | None = None,
+    compact_instructions: str | None = None,
+) -> SystemPromptPreset:
     """Build system prompt for a spawned agent based on its working directory.
 
     packs: explicit list of pack names to include, or None for DEFAULT_SPAWNED_PACKS.
            Pass [] to disable packs entirely.
+    compact_instructions: if provided, appended as a compaction guidance section.
     """
     if _is_axi_dev_cwd(cwd):
         # Admin agent — full soul + dev context
@@ -180,6 +185,12 @@ def make_spawned_agent_system_prompt(cwd: str, packs: list[str] | None = None) -
     packs_text = _pack_prompt_text(pack_names)
     if packs_text:
         append += "\n\n" + packs_text
+    if compact_instructions:
+        append += (
+            "\n\n# Context Compaction Instructions\n"
+            "When summarizing/compacting this conversation, prioritize preserving:\n"
+            f"- {compact_instructions}"
+        )
     return {
         "type": "preset",
         "preset": "claude_code",

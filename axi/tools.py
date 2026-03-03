@@ -78,6 +78,10 @@ _tracer = trace.get_tracer(__name__)
                 "type": "boolean",
                 "description": "Skip auto-worktree creation and use cwd directly (default: false)",
             },
+            "compact_instructions": {
+                "type": "string",
+                "description": "Instructions for what to preserve during context compaction (e.g. 'always preserve the bug description, current fix approach, and test results')",
+            },
         },
         "required": ["name", "prompt"],
     },
@@ -96,6 +100,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     fc_command_args = args.get("command_args", "")
     agent_packs = args.get("packs")  # None = use defaults, [] = no packs
     no_worktree = args.get("no_worktree", False)
+    compact_instructions = args.get("compact_instructions")
 
     # --- Validate name/agent before any side effects ---
     if not agent_name:
@@ -183,6 +188,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
                 command=fc_command,
                 command_args=fc_command_args,
                 packs=agent_packs,
+                compact_instructions=compact_instructions,
             )
         except Exception:
             channels.bot_creating_channels.discard(agents.normalize_channel_name(agent_name))

@@ -131,6 +131,10 @@ log.addHandler(_file_handler)
 FLOWCODER_ENABLED = os.environ.get("FLOWCODER_ENABLED", "1").lower() in ("1", "true", "yes")
 STREAMING_DISCORD = os.environ.get("STREAMING_DISCORD", "").lower() in ("1", "true", "yes")
 
+# Context compaction threshold — fraction of context window that triggers auto-compact.
+# Default 0.80 (80%). Set lower to compact earlier, higher to use more context before compacting.
+COMPACT_THRESHOLD = float(os.environ.get("COMPACT_THRESHOLD", "0.80"))
+
 # Streaming edit interval in seconds — how often to edit the Discord message with new content.
 # Must stay well under Discord's per-channel rate limit (~5 req/5s).
 STREAMING_EDIT_INTERVAL = float(os.environ.get("STREAMING_EDIT_INTERVAL", "1.5"))

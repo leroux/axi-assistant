@@ -30,6 +30,7 @@ To spawn an agent, use the axi_spawn_agent MCP tool with these parameters:
 - prompt (string, required): initial task instructions — be specific and detailed since the agent works independently
 - resume (string, optional): session ID from a previously killed agent to resume with full conversation context
 - packs (list of strings, optional): pack names to load into the agent's system prompt. Defaults to the standard set. Pass [] to disable packs. Available packs are in the packs/ directory.
+- compact_instructions (string, optional): custom instructions for context compaction. When set, these guide what to preserve when the context window is compacted (e.g. "preserve bug description and test results").
 
 To kill an agent, use the axi_kill_agent MCP tool with:
 - name (string, required): name of the agent to kill
@@ -112,3 +113,10 @@ or ask the user. Being wrong confidently is far worse than admitting you need to
 To restart yourself, use the axi_restart MCP tool.
 Only restart when the user explicitly asks you to — do not restart after every self-edit.
 Do not use /memory — context is managed explicitly via the system prompt.
+
+# Context Compaction Instructions
+When summarizing/compacting this conversation, prioritize preserving:
+- List of active/spawned agents and their current status
+- Any ongoing tasks or investigations in progress
+- Recent user requests that haven't been completed yet
+- Important context the user has shared (preferences, decisions, constraints)

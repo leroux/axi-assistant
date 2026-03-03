@@ -934,6 +934,10 @@ def _format_agent_status(name: str, session: AgentSession) -> str:
     if session.plan_mode:
         lines.append("📋 **Plan mode active**")
 
+    if session.context_tokens > 0 and session.context_window > 0:
+        pct = session.context_tokens / session.context_window
+        lines.append(f"Context: {session.context_tokens:,}/{session.context_window:,} tokens ({pct:.0%})")
+
     if session.session_id:
         lines.append(f"Session: `{session.session_id[:8]}...`")
     lines.append(f"cwd: `{session.cwd}`")
@@ -1256,6 +1260,9 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
     if cmd in ("clear", "compact"):
         label = "Context cleared" if cmd == "clear" else "Context compacted"
         command = f"/{cmd}"
+        # Append stored compact instructions for /compact
+        if cmd == "compact" and session.compact_instructions:
+            command = f"/compact {session.compact_instructions}"
 
         if session.query_lock.locked():
             await agents.send_system(channel, f"Agent **{agent_name}** is busy.")
@@ -1421,7 +1428,13 @@ async def _run_agent_sdk_command(interaction: discord.Interaction, agent_name: s
 @app_commands.autocomplete(agent_name=agent_autocomplete)
 async def compact_context(interaction: discord.Interaction, agent_name: str | None = None) -> None:
     log.info("Slash command /compact agent=%s from %s", agent_name, interaction.user)
-    await _run_agent_sdk_command(interaction, agent_name, "/compact", "Context compacted")
+    # Resolve agent to get compact_instructions
+    resolved_name = agent_name or agents.channel_to_agent.get(interaction.channel_id or 0)
+    session = agents.agents.get(resolved_name) if resolved_name else None
+    command = "/compact"
+    if session and session.compact_instructions:
+        command = f"/compact {session.compact_instructions}"
+    await _run_agent_sdk_command(interaction, agent_name, command, "Context compacted")
 
 
 @bot.tree.command(name="clear", description="Clear an agent's conversation context. Infers agent from current channel.")
@@ -1979,6 +1992,12 @@ def _register_master_agent(resume_id: str | None, prompt_hash: str | None, todo_
         client=None,
         mcp_servers=master_mcp,
         session_id=resume_id,
+        compact_instructions=(
+            "List of active/spawned agents and their current status. "
+            "Any ongoing tasks or investigations in progress. "
+            "Recent user requests that haven't been completed yet. "
+            "Important context the user has shared (preferences, decisions, constraints)."
+        ),
     )
     ds = discord_state(session)
     ds.todo_items = agents.load_todo_items(config.MASTER_AGENT_NAME)

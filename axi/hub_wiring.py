@@ -142,6 +142,8 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
         sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
         mcp_servers=session.mcp_servers or {},
         disallowed_tools=["Task"],
+        extra_args={"debug-to-stderr": None},
+        env={"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "100"},
     )
 
 

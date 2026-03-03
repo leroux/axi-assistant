@@ -58,6 +58,11 @@ class AgentSession:
     last_failed_resume_id: str | None = None  # Session ID that failed resume (prevents stale-ID cycle)
     transport: Any = None  # BridgeTransport for flowcoder agents (set by create_client)
     frontend_state: Any = None  # Opaque — frontend casts to its own type
+    # Custom compact instructions — used for both system prompt injection and manual /compact
+    compact_instructions: str | None = None
+    # Context window monitoring (updated from stderr autocompact debug lines)
+    context_tokens: int = 0
+    context_window: int = 0
 
 
 # ---------------------------------------------------------------------------

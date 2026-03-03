@@ -209,6 +209,9 @@ def _close_agent_log(session: AgentSession) -> None:
             session.agent_log.removeHandler(handler)
 
 
+_AUTOCOMPACT_RE = re.compile(r"autocompact: tokens=(\d+) threshold=\d+ effectiveWindow=(\d+)")
+
+
 def make_stderr_callback(session: AgentSession):
     """Create a stderr callback bound to a specific agent session."""
     ds = discord_state(session)  # cache — callback runs in a thread
@@ -216,6 +219,11 @@ def make_stderr_callback(session: AgentSession):
     def callback(text: str) -> None:
         with ds.stderr_lock:
             ds.stderr_buffer.append(text)
+        # Parse autocompact debug line for context window monitoring
+        m = _AUTOCOMPACT_RE.search(text)
+        if m:
+            session.context_tokens = int(m.group(1))
+            session.context_window = int(m.group(2))
 
     return callback
 
@@ -1890,13 +1898,31 @@ async def _handle_system_message(
     """Handle a SystemMessage during response streaming."""
     if session.agent_log:
         session.agent_log.debug("SYSTEM_MSG: subtype=%s data=%s", msg.subtype, json.dumps(msg.data)[:500])
-    if msg.subtype == "compact_boundary":
+    if msg.subtype == "status" and msg.data.get("status") == "compacting":
+        # CLI signals compaction is starting — only notify if we didn't trigger it ourselves
+        if session.name not in _self_compacting:
+            token_info = f" ({session.context_tokens:,} tokens)" if session.context_tokens else ""
+            log.info("Agent '%s' compaction started (CLI-triggered)%s", session.name, token_info)
+            await channel.send(f"\U0001f504 Compacting{token_info}...")
+
+    elif msg.subtype == "compact_boundary":
         metadata = msg.data.get("compact_metadata", {})
         trigger = metadata.get("trigger", "unknown")
         pre_tokens = metadata.get("pre_tokens")
-        log.info("Agent '%s' context compacted: trigger=%s pre_tokens=%s", session.name, trigger, pre_tokens)
-        token_info = f" ({pre_tokens:,} tokens)" if pre_tokens else ""
-        await channel.send(f"\U0001f504 Context compacted{token_info}")
+        start_time = _compact_start_times.pop(session.name, None)
+        log.info(
+            "Agent '%s' context compacted: trigger=%s pre_tokens=%s",
+            session.name, trigger, pre_tokens,
+        )
+        # Defer the completion message to the next query, when post_tokens
+        # will be available from the autocompact stderr line.
+        if pre_tokens:
+            _pending_compact[session.name] = {
+                "pre_tokens": pre_tokens,
+                "start_time": start_time or time.monotonic(),
+            }
+        else:
+            await channel.send("\U0001f504 Context compacted")
 
     # Flowchart events (emitted by flowcoder-engine during takeover mode)
     elif msg.subtype == "block_start":
@@ -2182,6 +2208,44 @@ async def handle_query_timeout(session: AgentSession, channel: TextChannel) -> N
 
 
 # ---------------------------------------------------------------------------
+# Axi-owned auto-compact
+# ---------------------------------------------------------------------------
+
+_self_compacting: set[str] = set()  # Agent names currently in Axi-triggered compaction
+_compact_start_times: dict[str, float] = {}  # Agent name -> monotonic start time
+# Pending compact result — shown at the start of the next query when post_tokens is available
+_pending_compact: dict[str, dict[str, int | float]] = {}  # agent name -> {"pre_tokens": int, "start_time": float}
+
+
+async def _maybe_compact(session: AgentSession, channel: TextChannel) -> None:
+    """Trigger manual compaction with custom instructions if context is getting full."""
+    if session.context_tokens <= 0 or session.context_window <= 0:
+        return
+    usage_pct = session.context_tokens / session.context_window
+    if usage_pct < config.COMPACT_THRESHOLD:
+        return
+
+    pre_tokens = session.context_tokens
+    instructions = session.compact_instructions or ""
+    cmd = f"/compact {instructions}".strip()
+    log.info(
+        "Auto-compact for '%s': %d/%d tokens (%.0f%%), sending: %s",
+        session.name, pre_tokens, session.context_window,
+        usage_pct * 100, cmd[:80],
+    )
+
+    await channel.send(f"\U0001f504 Context at {usage_pct:.0%} ({pre_tokens:,} tokens) \u2014 compacting...")
+    _self_compacting.add(session.name)
+    _compact_start_times[session.name] = time.monotonic()
+    try:
+        await session.client.query(as_stream(cmd))
+        await stream_with_retry(session, channel)
+    finally:
+        _self_compacting.discard(session.name)
+    # compact_boundary handler posts the completion message with timing + stats
+
+
+# ---------------------------------------------------------------------------
 # Message processing, spawning, and inter-agent delivery
 # ---------------------------------------------------------------------------
 
@@ -2221,7 +2285,29 @@ async def process_message(session: AgentSession, content: MessageContent, channe
         try:
             async with asyncio.timeout(config.QUERY_TIMEOUT):
                 await session.client.query(as_stream(content))
+                # After query() the CLI emits the autocompact stderr line with
+                # updated token counts. Brief yield lets the stderr thread process it.
+                await asyncio.sleep(0.3)
+                # Show deferred compact result now that we have fresh post_tokens
+                pending = _pending_compact.pop(session.name, None)
+                if pending:
+                    post_tokens = session.context_tokens
+                    pre_tokens = int(pending["pre_tokens"])
+                    elapsed = time.monotonic() - float(pending["start_time"])
+                    if post_tokens > 0 and post_tokens != pre_tokens:
+                        saved = int(pre_tokens - post_tokens)
+                        pct = post_tokens / session.context_window if session.context_window else 0
+                        await channel.send(
+                            f"\U0001f504 Compacted in {elapsed:.1f}s: {pre_tokens:,} \u2192 {post_tokens:,} tokens "
+                            f"({saved:,} freed, {pct:.0%} used)"
+                        )
+                    else:
+                        await channel.send(
+                            f"\U0001f504 Compacted in {elapsed:.1f}s ({pre_tokens:,} tokens)"
+                        )
                 await stream_with_retry(session, channel)
+                # Axi-owned auto-compact: trigger after response if context is near full
+                await _maybe_compact(session, channel)
         except TimeoutError:
             await handle_query_timeout(session, channel)
         except Exception:
@@ -2257,6 +2343,7 @@ async def spawn_agent(
     command: str = "",
     command_args: str = "",
     packs: list[str] | None = None,
+    compact_instructions: str | None = None,
 ) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
     with _tracer.start_as_current_span(
@@ -2286,7 +2373,7 @@ async def spawn_agent(
         else:
             await send_system(channel, f"Spawning **{agent_label}** agent **{name}** in `{cwd}`...")
 
-        prompt = make_spawned_agent_system_prompt(cwd, packs=packs)
+        prompt = make_spawned_agent_system_prompt(cwd, packs=packs, compact_instructions=compact_instructions)
         mcp_servers = _build_mcp_servers(name, cwd)
 
         session = AgentSession(
@@ -2298,6 +2385,7 @@ async def spawn_agent(
             client=None,
             session_id=resume,
             mcp_servers=mcp_servers,
+            compact_instructions=compact_instructions,
         )
         discord_state(session).channel_id = channel.id
 
@@ -2714,6 +2802,8 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
                 include_partial_messages=True,
                 stderr=make_stderr_callback(session),
                 disallowed_tools=["Task"],
+                extra_args={"debug-to-stderr": None},
+                env={"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "100"},
             )
 
             client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
