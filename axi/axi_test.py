@@ -310,6 +310,7 @@ def _write_env(guild_name: str, config: dict[str, Any], instance_path: str, data
         f"AXI_USER_DATA={data_path}\n"
         f"DAY_BOUNDARY_HOUR={defaults.get('day_boundary_hour', '0')}\n"
         f"SHOW_AWAITING_INPUT=true\n"
+        f"AXI_MODEL=haiku\n"
     )
     with open(os.path.join(instance_path, ".env"), "w") as f:
         f.write(env_content)

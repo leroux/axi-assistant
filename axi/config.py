@@ -271,7 +271,14 @@ def _save_config(config: dict[str, Any]) -> None:
 
 
 def get_model() -> str:
-    """Get the current model preference."""
+    """Get the current model preference.
+
+    The AXI_MODEL env var takes precedence over the config file.
+    This is used by test instances to force haiku.
+    """
+    env_override = os.environ.get("AXI_MODEL", "").lower()
+    if env_override and env_override in VALID_MODELS:
+        return env_override
     with _config_lock:
         config = _load_config()
     return config.get("model", "opus")
