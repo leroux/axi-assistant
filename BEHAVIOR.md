@@ -127,11 +127,7 @@ Non-initialize control requests (e.g., from inner Claude during execution) are f
 
 ## Engine Binary Resolution
 
-`get_engine_binary()` resolves the flowcoder-engine binary:
-1. First checks `shutil.which("flowcoder-engine")` on PATH
-2. Falls back to `$FLOWCODER_HOME/packages/flowcoder-engine/.venv/bin/flowcoder-engine`
-
-**Important**: The engine binary uses the Python interpreter from its venv. If the engine package is installed via `uv pip install`, the `uv run` command (used by `axi_test.py`) can re-sync packages and **overwrite editable installs** with the lock file version. Direct file copies (`cp`) to site-packages survive this.
+`get_engine_binary()` resolves the flowcoder-engine binary via `shutil.which("flowcoder-engine")` on PATH. The binary is installed as a package entry point from the vendored `packages/flowcoder_engine/` package.
 
 ## CLI Arg Construction
 
@@ -148,11 +144,10 @@ The engine uses `parse_known_args` to absorb its own flags and pass everything e
 ## Configuration
 
 - **`FLOWCODER_ENABLED`** (env var): Must be `1`/`true`/`yes` to enable flowcoder agents. When disabled, flowcoder agents fall back to standard Claude Code behavior (no engine, no flowcharts).
-- **`FLOWCODER_HOME`** (env var): Root of the flowcoder-rewrite repo. Defaults to `~/flowcoder-rewrite`.
 
 ## Available Flowchart Commands
 
-Located in `$FLOWCODER_HOME/examples/commands/`:
+Located in `packages/flowcoder_engine/examples/commands/` (resolved at runtime from the installed package):
 - `story.json` — Multi-block creative writing flowchart
 - `explain.json` — Explanation flowchart
 - `recast.json` — Text recasting flowchart

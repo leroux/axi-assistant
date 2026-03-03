@@ -2,7 +2,6 @@
 
 Validates that example flowcharts/commands load correctly,
 pass validation, and can be executed by the walker with mocked sessions.
-Run from the flowcoder-rewrite directory with the engine venv.
 """
 
 import sys

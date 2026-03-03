@@ -172,7 +172,7 @@ What is 100/4?
 
 ### 10. Available flowchart commands
 
-The engine supports these commands (from `flowcoder-rewrite/examples/commands/`):
+The engine supports these commands (from `packages/flowcoder_engine/examples/commands/`):
 
 - `story` — Write a story (draft, critique, refine)
 - `explain` — Explain a topic (simple, medium, expert, synthesize)

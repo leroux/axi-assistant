@@ -16,10 +16,13 @@ log = logging.getLogger(__name__)
 # Shared helpers
 # ------------------------------------------------------------------
 
-_FLOWCODER_HOME = os.environ.get(
-    "FLOWCODER_HOME",
-    os.path.expanduser("~/flowcoder-rewrite"),
-)
+
+def _default_commands_dir() -> str:
+    """Derive the default commands dir from the installed flowcoder_engine package."""
+    import flowcoder_engine
+
+    pkg_dir = os.path.dirname(os.path.dirname(flowcoder_engine.__file__))
+    return os.path.join(pkg_dir, "examples", "commands")
 
 
 def get_engine_binary() -> str:
@@ -27,14 +30,14 @@ def get_engine_binary() -> str:
     engine_bin = shutil.which("flowcoder-engine")
     if engine_bin:
         return engine_bin
-    return os.path.join(
-        _FLOWCODER_HOME, "packages", "flowcoder-engine", ".venv", "bin", "flowcoder-engine",
+    raise FileNotFoundError(
+        "flowcoder-engine not found on PATH. Is the flowcoder-engine package installed?"
     )
 
 
 def get_search_paths(extra: list[str] | None = None) -> list[str]:
     """Return flowchart command search paths."""
-    default_search = os.path.join(_FLOWCODER_HOME, "examples", "commands")
+    default_search = _default_commands_dir()
     env_raw = os.environ.get("FLOWCODER_SEARCH_PATH", "")
     env_paths = [p for p in env_raw.split(":") if p]
     return [default_search] + env_paths + (extra or [])
