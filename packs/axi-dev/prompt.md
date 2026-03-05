@@ -6,6 +6,7 @@
 - When all bot tokens are in use, use `axi_test.py up <name> --wait` to reserve a slot and wait (polls every 10s, times out after 2 hours). **Do not** automatically tear down an existing instance to free a slot.
 - If `--wait` times out, ask the user how to proceed.
 - **Always tear down your own test instances** after you're done with them so the slot is available for other agents.
+- **NEVER restart, stop, or signal the production Axi bot process.** You must only restart your own test instances via `axi_test.py restart <name>`. Do not use `systemctl restart axi-bot`, `kill`, or any other method to restart the main bot. Only the master agent (axi-master) can restart itself via `axi_restart`. If your task requires a production restart, ask the user to do it.
 
 ## Test Instance Management
 
