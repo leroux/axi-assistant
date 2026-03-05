@@ -83,6 +83,18 @@ When the conversation context gets large, the CLI compacts it:
   IN  ◄── system.status  {"status": null}   (compaction done)
 ```
 
+**Post-compaction token count**: The `compact_boundary` message carries `pre_tokens` (context size before compaction) but does **not** include `post_tokens`. The post-compaction token count only becomes available on the **next query**, when the CLI emits its `autocompact:` debug line on stderr:
+
+```
+stderr: autocompact: tokens=4069 threshold=80 effectiveWindow=200000
+```
+
+This stderr line is parsed by the host (regex: `autocompact: tokens=(\d+) threshold=\d+ effectiveWindow=(\d+)`) to update `context_tokens` and `context_window`. The host defers the compaction summary message until the next query completes, at which point both `pre_tokens` (from `compact_boundary`) and `post_tokens` (from stderr) are available:
+
+```
+🔄 Compacted in 596.9s: 150,602 → 4,069 tokens (146,533 freed, 2% used)
+```
+
 ## Message Types — Inbound (CLI → Host)
 
 ### `system`
