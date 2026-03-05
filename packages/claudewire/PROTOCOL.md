@@ -11,6 +11,24 @@ Reference for the `--output-format stream-json` wire protocol between the Claude
   - **Outbound** (host → CLI): host sends user messages, control responses
 - Every message has a `type` field as the top-level discriminator
 
+### Stderr
+
+The CLI also emits unstructured plaintext on stderr (enabled by launching with `--debug-to-stderr`). This is **not** part of the NDJSON protocol — it's a side channel of debug output. Claudewire reads it via `StderrEvent` and forwards it to a callback.
+
+The only actionable stderr output is the **autocompact debug line**, emitted after each query completes:
+
+```
+autocompact: tokens=4069 threshold=80 effectiveWindow=200000
+```
+
+This provides the current context token count and window size. It is the **only source** of post-compaction token counts (see [Context Compaction](#context-compaction)). The host parses it with:
+
+```python
+re.compile(r"autocompact: tokens=(\d+) threshold=\d+ effectiveWindow=(\d+)")
+```
+
+All other stderr content (Python warnings, wrapper process lifecycle messages) is noise and not parsed.
+
 ## Session Lifecycle
 
 ```
