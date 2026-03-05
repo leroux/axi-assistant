@@ -1185,6 +1185,19 @@ async def wake_or_queue(
     # Immediate feedback — user sees we received the message
     await add_reaction(orig_message, "\u23f3")
 
+    # Check cwd exists before attempting wake — avoids slow SDK failure
+    # when the working directory has been deleted (e.g. removed worktree)
+    if session.cwd and not os.path.isdir(session.cwd):
+        log.error("Agent '%s' cwd does not exist: %s", session.name, session.cwd)
+        await remove_reaction(orig_message, "\u23f3")
+        await add_reaction(orig_message, "\u274c")
+        await send_system(
+            channel,
+            f"Agent **{session.name}** working directory no longer exists: `{session.cwd}`\n"
+            f"Kill with `/kill-agent {session.name}` and respawn.",
+        )
+        return False
+
     try:
         await wake_agent(session)
         # Woke successfully — remove the waiting indicator

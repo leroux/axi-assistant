@@ -11,6 +11,7 @@ without knowing the concrete SDK types.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -100,6 +101,13 @@ async def wake_agent(hub: AgentHub, session: AgentSession) -> None:
     """
     if is_awake(session):
         return
+
+    # Fail fast if the working directory no longer exists — avoids requesting
+    # a scheduler slot and two SDK subprocess attempts that will both fail.
+    if session.cwd and not os.path.isdir(session.cwd):
+        raise RuntimeError(
+            f"Working directory does not exist: {session.cwd}"
+        )
 
     async with hub.wake_lock:
         if is_awake(session):
