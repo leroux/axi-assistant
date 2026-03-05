@@ -56,6 +56,7 @@ from axi.channels import (
     format_channel_topic,
     get_agent_channel,
     get_master_channel,
+    mark_channel_active,
     move_channel_to_killed,
     normalize_channel_name,
 )
@@ -428,6 +429,9 @@ from discordquery import split_message
 
 async def send_long(channel: TextChannel, text: str) -> discord.Message | None:
     """Send a potentially long message, splitting as needed. Returns the last sent message."""
+    # Track channel activity for recency reordering
+    mark_channel_active(channel.id)
+
     span = _tracer.start_span(
         "discord.send_long",
         attributes={"discord.channel": getattr(channel, "name", "?"), "message.length": len(text)},

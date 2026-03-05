@@ -200,6 +200,9 @@ async def on_message(message: discord.Message) -> None:
 
     channel = message.channel
 
+    # Track channel activity for recency reordering
+    channels.mark_channel_active(channel.id)
+
     # --- Get content and look up agent ---
     content = await agents.extract_message_content(message)
 

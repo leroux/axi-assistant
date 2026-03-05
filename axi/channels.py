@@ -9,9 +9,11 @@ Pure functions: normalize_channel_name, format_channel_topic, parse_channel_topi
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 import discord
@@ -447,3 +449,101 @@ async def ensure_master_channel_position() -> None:
         log.info("Moved #%s to position 0 (top of server, no category)", normalized)
     except Exception as e:
         log.warning("Failed to move #%s to top: %s", normalized, e)
+
+
+# ---------------------------------------------------------------------------
+# Channel recency reordering
+# ---------------------------------------------------------------------------
+
+# channel_id → monotonic timestamp of last activity
+_channel_activity: dict[int, float] = {}
+
+_REORDER_DEBOUNCE_SECONDS = 60.0
+_reorder_task: asyncio.Task[None] | None = None
+_reorder_lock = asyncio.Lock()
+
+
+def mark_channel_active(channel_id: int) -> None:
+    """Record activity on a channel and schedule a debounced reorder."""
+    _channel_activity[channel_id] = time.monotonic()
+    _schedule_reorder()
+
+
+def _schedule_reorder() -> None:
+    """Schedule a reorder after the debounce window. Resets if called again."""
+    global _reorder_task
+    if _reorder_task is not None and not _reorder_task.done():
+        _reorder_task.cancel()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _reorder_task = loop.create_task(_debounced_reorder())
+
+
+async def _debounced_reorder() -> None:
+    """Wait for the debounce period, then reorder channels by recency."""
+    try:
+        await asyncio.sleep(_REORDER_DEBOUNCE_SECONDS)
+    except asyncio.CancelledError:
+        return
+    await reorder_channels_by_recency()
+
+
+async def reorder_channels_by_recency() -> None:
+    """Reorder channels within Axi and Active categories by recent activity.
+
+    - #axi-master always stays at position 0 in its category.
+    - Other channels are sorted most-recent-first.
+    - Uses a single bulk API call per category.
+    """
+    if not _reorder_lock.locked():
+        async with _reorder_lock:
+            await _do_reorder()
+    # If already reordering, skip — the next activity will schedule another.
+
+
+async def _do_reorder() -> None:
+    """Perform the actual reorder for both Axi and Active categories."""
+    assert target_guild is not None
+    master_normalized = normalize_channel_name(config.MASTER_AGENT_NAME)
+
+    for category in (axi_category, active_category):
+        if category is None:
+            continue
+        text_channels = list(category.text_channels)
+        if len(text_channels) <= 1:
+            continue
+
+        # Sort by activity (most recent first), channels without activity go to the end
+        def _sort_key(ch: TextChannel) -> tuple[int, float]:
+            # axi-master always first (priority 0), others priority 1
+            is_master = 0 if ch.name == master_normalized else 1
+            # Negate timestamp so higher (more recent) sorts first
+            activity = -_channel_activity.get(ch.id, 0.0)
+            return (is_master, activity)
+
+        desired_order = sorted(text_channels, key=_sort_key)
+
+        # Check if reorder is actually needed
+        current_order = sorted(text_channels, key=lambda c: (c.position, c.id))
+        if [ch.id for ch in current_order] == [ch.id for ch in desired_order]:
+            log.debug("Channel order in '%s' already correct, skipping API call", category.name)
+            continue
+
+        # Build bulk update payload — cast needed because TypedDict vs dict
+        payload: Any = [{"id": ch.id, "position": idx} for idx, ch in enumerate(desired_order)]
+
+        try:
+            assert _bot is not None
+            await _bot.http.bulk_channel_update(
+                target_guild.id, payload, reason="Recency reorder"
+            )
+            log.info(
+                "Reordered %d channels in '%s': %s",
+                len(payload),
+                category.name,
+                " > ".join(ch.name for ch in desired_order),
+            )
+        except discord.HTTPException as e:
+            log.warning("Failed to reorder channels in '%s': %s", category.name, e)
