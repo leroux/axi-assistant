@@ -208,6 +208,11 @@ def slot_count() -> int:
     return len(_slots)
 
 
+def slots_full() -> bool:
+    """True if all slots are occupied (wake will need eviction or queuing)."""
+    return len(_slots) >= _max_slots
+
+
 def status() -> dict[str, Any]:
     """Return scheduler state for diagnostics."""
     return {

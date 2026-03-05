@@ -1130,20 +1130,33 @@ async def wake_or_queue(
     channel: TextChannel,
     orig_message: discord.Message | None,
 ) -> bool:
-    """Try to wake agent, return True if successful, False if queued."""
+    """Try to wake agent, return True if successful, False if queued.
+
+    Adds a ⏳ reaction immediately so the user knows the message was received
+    while we wait for a slot / SDK client creation.  The reaction is removed
+    on success or replaced with 📨/❌ on failure.
+    """
+    # Immediate feedback — user sees we received the message
+    await add_reaction(orig_message, "\u23f3")
+
     try:
         await wake_agent(session)
+        # Woke successfully — remove the waiting indicator
+        await remove_reaction(orig_message, "\u23f3")
         return True
     except ConcurrencyLimitError:
         session.message_queue.append((content, channel, orig_message))
         position = len(session.message_queue)
         awake = count_awake_agents()
         log.debug("Concurrency limit hit for '%s', queuing message (position %d)", session.name, position)
+        # Swap ⏳ → 📨 to indicate "queued, will process later"
+        await remove_reaction(orig_message, "\u23f3")
         await add_reaction(orig_message, "\U0001f4e8")
         await send_system(channel, f"\u23f3 All {awake} agent slots busy. Message queued (position {position}).")
         return False
     except Exception:
         log.exception("Failed to wake agent '%s'", session.name)
+        await remove_reaction(orig_message, "\u23f3")
         await add_reaction(orig_message, "\u274c")
         await send_system(
             channel, f"Failed to wake agent **{session.name}**. Try `/kill-agent {session.name}` and respawn."
