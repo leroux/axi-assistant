@@ -157,8 +157,21 @@ cli_args, env, cwd = build_cli_spawn_args(agent_options)
 | `find_claude()` | Locate `claude` binary on PATH |
 | `build_cli_spawn_args()` | Build CLI args from `ClaudeAgentOptions` (lazy import) |
 
+### Schema Validation
+
+| Export | Description |
+|---|---|
+| `validate_inbound()` | Validate an inbound (CLI → host) message against pydantic models |
+| `validate_outbound()` | Validate an outbound (host → CLI) message |
+| `validate_inbound_or_bare()` | Validate inbound message, handling both `stream_event`-wrapped and bare forms |
+| `ValidationResult` | Result with `.ok`, `.errors`, and typed `.model` |
+
+All stream-json messages are validated against strict pydantic models with discriminated unions. Unknown fields produce warnings (not hard errors) so new upstream fields don't break us — but they do get logged, which is how we detect CLI protocol changes.
+
+**When the Claude CLI adds new message types, content block types, or fields**: validation warnings will appear in logs. Update the models in `schema.py` and add real samples to `tests/unit/test_claudewire_schema_real.py`. See `PROTOCOL.md` for the full protocol reference.
+
 ## Dependencies
 
-None. `claude-agent-sdk` is optional (only needed for `build_cli_spawn_args`).
+`pydantic>=2.0` for schema validation. `claude-agent-sdk` is optional (only needed for `build_cli_spawn_args`).
 
 Requires Python 3.12+.
