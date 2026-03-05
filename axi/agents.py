@@ -1481,6 +1481,7 @@ class _StreamCtx:
     """Mutable state for a single stream_response_to_channel invocation."""
 
     __slots__ = (
+        "deferred_msg",
         "flush_count",
         "got_result",
         "hit_rate_limit",
@@ -1512,6 +1513,7 @@ class _StreamCtx:
         self.last_flushed_msg_id: str | None = None  # ID of the last Discord message sent/edited
         self.last_flushed_channel_id: int | None = None
         self.last_flushed_content: str = ""  # Content of the last flushed message
+        self.deferred_msg: str = ""  # Non-streaming: holds back the last message for timing append
 
 
 async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChannel, reason: str = "?") -> None:
@@ -1539,11 +1541,15 @@ async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChann
         # Streaming mode: finalize the current live-edit message(s)
         await _live_edit_finalize(ctx, session)
     else:
-        last_msg = await send_long(channel, text.lstrip())
-        if last_msg is not None:
-            ctx.last_flushed_msg_id = str(last_msg.id)
-            ctx.last_flushed_channel_id = channel.id
-            ctx.last_flushed_content = last_msg.content
+        # Non-streaming: send any previously deferred message, then defer the current one.
+        # This holds back the last message so timing can be appended before sending.
+        if ctx.deferred_msg:
+            last_msg = await send_long(channel, ctx.deferred_msg)
+            if last_msg is not None:
+                ctx.last_flushed_msg_id = str(last_msg.id)
+                ctx.last_flushed_channel_id = channel.id
+                ctx.last_flushed_content = last_msg.content
+        ctx.deferred_msg = text.lstrip()
 
 
 # ---------------------------------------------------------------------------
@@ -2053,6 +2059,10 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         return None
 
     if ctx.hit_transient_error:
+        # Send any deferred message before exiting
+        if ctx.deferred_msg:
+            await send_long(channel, ctx.deferred_msg)
+            ctx.deferred_msg = ""
         log.info(
             "STREAM_END[%s] result=transient_error(%s) msgs=%d flushes=%d",
             stream_id,
@@ -2069,6 +2079,9 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         # Stream ended without a ResultMessage — the CLI process was killed
         # (e.g. by /stop) or crashed.  Sleep the agent so the next message
         # triggers a fresh wake with a new CLI process.
+        if ctx.deferred_msg:
+            await send_long(channel, ctx.deferred_msg)
+            ctx.deferred_msg = ""
         if ctx.live_edit is not None and ctx.live_edit.message_id is not None:
             await _live_edit_finalize(ctx, session)
         await _flush_text(ctx, session, channel, "post_kill")
@@ -2083,12 +2096,16 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         elapsed = (datetime.now(UTC) - session.activity.query_started).total_seconds()
         timing_suffix = f"\n-# {elapsed:.1f}s"
 
-        if ctx.text_buffer.strip():
+        if ctx.deferred_msg:
+            # Non-streaming: deferred message waiting — append timing and send (no edit needed)
+            await send_long(channel, ctx.deferred_msg + timing_suffix)
+            ctx.deferred_msg = ""
+        elif ctx.text_buffer.strip():
             # Buffer has content — append inline and flush normally
             ctx.text_buffer += timing_suffix
             await _flush_text(ctx, session, channel, "post_loop")
         elif ctx.last_flushed_msg_id is not None and ctx.last_flushed_channel_id is not None:
-            # Buffer empty but we have a previous message — edit it to append timing
+            # Streaming: buffer empty, message already sent — edit to append timing
             new_content = ctx.last_flushed_content + timing_suffix
             try:
                 await config.discord_client.edit_message(
@@ -2096,9 +2113,12 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                 )
             except Exception:
                 log.warning("Failed to edit last message to append timing", exc_info=True)
-                # Fall back to sending as separate message
                 await channel.send(f"-# {elapsed:.1f}s")
     else:
+        # No timing — send any deferred message as-is
+        if ctx.deferred_msg:
+            await send_long(channel, ctx.deferred_msg)
+            ctx.deferred_msg = ""
         await _flush_text(ctx, session, channel, "post_loop")
     log.info("STREAM_END[%s] result=ok msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
 
