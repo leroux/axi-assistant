@@ -415,3 +415,76 @@ Outbound messages may include a `_trace_context` field injected by OpenTelemetry
 ```
 
 This field is stripped before schema validation and is never part of the protocol schema.
+
+## Provenance — Upstream vs Our Additions
+
+The protocol has three layers: the upstream Claude CLI wire format (Anthropic's code), the
+claude-agent-sdk transport contract, and our own claudewire/procmux additions.
+
+### Upstream (Claude CLI / Anthropic)
+
+Everything the CLI emits on stdout and accepts on stdin is upstream. We have no control over
+these messages — they can change with any CLI update.
+
+| What | Origin |
+|------|--------|
+| All inbound message types (`stream_event`, `assistant`, `user`, `system`, `result`, `control_request`, `control_response`, `rate_limit_event`) | Claude CLI stdout |
+| Inner stream events (`message_start`, `message_delta`, `message_stop`, `content_block_*`) | Anthropic Messages API streaming, wrapped by CLI |
+| Content blocks (`text`, `tool_use`, `thinking`) and deltas | Anthropic Messages API |
+| `system.init` fields (`tools`, `model`, `mcp_servers`, `permissionMode`, `slash_commands`, `agents`, `skills`, `plugins`, `fast_mode_state`, etc.) | Claude CLI session state |
+| `system.status` and `system.compact_boundary` | Claude CLI context management |
+| `control_request.can_use_tool` (permission check) | Claude CLI permission system |
+| `control_request.mcp_message` (MCP relay) | Claude CLI MCP integration |
+| `control_request.initialize` / `control_request.interrupt` | Claude CLI session control |
+| `result` message (query completion with costs, usage, modelUsage) | Claude CLI |
+| `rate_limit_event` (status, resetsAt, utilization, overage fields) | Claude CLI / Anthropic rate limiting |
+| `assistant` message (complete assembled message after streaming) | Claude CLI |
+| `user` message echoed back with `tool_use_result` and `isSynthetic` | Claude CLI |
+| Dual emission (each stream event emitted twice: wrapped + bare) | Claude CLI behavior |
+| MCP handshake sequence (initialize → notifications/initialized → tools/list) | Claude CLI, following MCP spec |
+| `updatedInput` in permission responses (tool input modification) | claude-agent-sdk contract |
+
+### Our Additions (claudewire/axi)
+
+These are behaviors we add on top of the upstream protocol. They are not part of the CLI
+wire format.
+
+| What | Where | Description |
+|------|-------|-------------|
+| `_trace_context` field on outbound messages | `transport.py` | OTel distributed tracing injection. Injected by `BridgeTransport.write()` before sending to CLI stdin. Stripped by `schema.py` before validation. Not part of the protocol — just piggybacks on the JSON payload. |
+| Reconnect initialize interception | `transport.py` | When `reconnecting=True`, `BridgeTransport.write()` intercepts outbound `control_request.initialize` and synthesizes a fake `control_response.success` locally instead of forwarding to the CLI. The CLI is already initialized — this satisfies the SDK's handshake without confusing the running process. |
+| Schema validation (warnings for unknown keys) | `schema.py` | Pydantic validation runs on every inbound and outbound message. Unknown keys produce warnings (not errors) so new upstream fields don't break us. This is purely our layer — the CLI has no awareness of it. |
+| `validate_inbound_or_bare()` | `schema.py` | Handles the dual emission by accepting both `stream_event`-wrapped and bare stream events. This exists because procmux's buffer replay can deliver bare events that arrived while the client was disconnected. |
+| Bridge-stdio logging | `transport.py` | Optional `stdio_logger` logs all stdin/stdout traffic for debugging. The `bridge-stdio-*.log` files that informed this document are produced by this logger. |
+| procmux buffer replay | `procmux/` | When the bot reconnects after a restart, procmux replays buffered stdout messages. These replayed messages are identical to the originals — procmux adds nothing to the payload. But the replay path means bare events (without the `stream_event` wrapper) can arrive at the claudewire layer. |
+
+### Summary
+
+```
+┌──────────────────────────────────────────────────────┐
+│                  Anthropic API                        │  Anthropic servers
+│  (Messages API streaming: message_start, deltas...)  │
+└────────────────────────┬─────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────┐
+│                   Claude CLI                          │  Upstream binary
+│  Wraps API events in stream_event envelope            │
+│  Adds: system, result, control_request, rate_limit    │
+│  Dual-emits stream events (wrapped + bare)            │
+│  Manages: MCP relay, permissions, context compaction  │
+└────────────────────────┬─────────────────────────────┘
+                         │ stdout (NDJSON)
+┌────────────────────────▼─────────────────────────────┐
+│                    procmux                            │  Ours (transport)
+│  Relays stdout/stdin opaquely (zero semantic layer)   │
+│  Buffers output during disconnects, replays on sub    │
+└────────────────────────┬─────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────┐
+│                   claudewire                          │  Ours (protocol layer)
+│  BridgeTransport: SDK transport interface             │
+│  Adds: _trace_context injection, reconnect intercept  │
+│  Adds: schema validation, bridge-stdio logging        │
+│  Handles: bare event validation (procmux replay)      │
+└──────────────────────────────────────────────────────┘
+```
