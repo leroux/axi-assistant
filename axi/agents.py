@@ -2785,7 +2785,14 @@ async def connect_procmux() -> None:
 
 
 async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any]) -> None:
-    """Reconnect a single agent to the bridge and drain any buffered output."""
+    """Reconnect a single agent to the bridge and drain any buffered output.
+
+    IMPORTANT: The SDK client must be created and initialized BEFORE subscribing
+    to the bridge agent. Subscribe replays buffered messages into the transport
+    queue — if those messages are in the queue when the SDK sends its initialize
+    control_request, the SDK reads stale data instead of the initialize response,
+    corrupting the handshake and leaving the agent stuck.
+    """
     span = _tracer.start_span(
         "reconnect_and_drain",
         attributes={"agent.name": session.name, "procmux.buffered_msgs": bridge_info.get("buffered_msgs", 0)},
@@ -2802,18 +2809,9 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
             assert transport is not None
             session.transport = transport
 
-            sub_result = await transport.subscribe()
-            replayed = sub_result.replayed or 0
-            cli_status = sub_result.status or "unknown"
-            cli_idle = sub_result.idle if sub_result.idle is not None else True
-            log.info(
-                "Subscribed to '%s' (replayed=%d, status=%s, idle=%s)",
-                session.name,
-                replayed,
-                cli_status,
-                cli_idle,
-            )
-
+            # Create and initialize SDK client FIRST — the queue is empty so
+            # the initialize handshake (intercepted by BridgeTransport) completes
+            # cleanly without interference from replayed messages.
             options = ClaudeAgentOptions(
                 can_use_tool=make_cwd_permission_callback(session.cwd, session),
                 mcp_servers=session.mcp_servers or {},
@@ -2828,6 +2826,31 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
 
             client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
             await client.__aenter__()
+
+            # NOW subscribe — replayed messages flow into the queue after init.
+            sub_result = await transport.subscribe()
+            replayed = sub_result.replayed or 0
+            cli_status = sub_result.status or "unknown"
+            cli_idle = sub_result.idle if sub_result.idle is not None else True
+            log.info(
+                "Subscribed to '%s' (replayed=%d, status=%s, idle=%s)",
+                session.name,
+                replayed,
+                cli_status,
+                cli_idle,
+            )
+
+            # Handle exited processes — clean up and leave agent sleeping
+            if cli_status == "exited":
+                log.info("Agent '%s' CLI exited while we were down — cleaning up", session.name)
+                await _disconnect_client(client, session.name)
+                session.transport = None
+                session.reconnecting = False
+                if session.agent_log:
+                    session.agent_log.info("SESSION_RECONNECT aborted — CLI exited")
+                log.info("Agent '%s' left sleeping (CLI dead, will respawn on next message)", session.name)
+                return
+
             session.client = client
             scheduler.restore_slot(session.name)
             session.last_activity = datetime.now(UTC)
@@ -2839,17 +2862,17 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
                     cli_idle,
                 )
 
-            if cli_status == "exited":
-                log.info("Agent '%s' CLI exited while we were down", session.name)
-                session.reconnecting = False
-
             session.reconnecting = False
 
             if cli_status == "running" and not cli_idle:
+                # Agent was mid-task — drain output regardless of replayed count.
+                # Even with replayed=0, the agent is actively producing output that
+                # needs to be consumed. After subscribe, live output flows into the
+                # queue alongside any replayed messages.
                 session.bridge_busy = True
                 channel = await get_agent_channel(session.name)
-                if replayed > 0 and channel:
-                    log.info("RECONNECT_DRAIN[%s] draining buffered output (replayed=%d)", session.name, replayed)
+                if channel:
+                    log.info("RECONNECT_DRAIN[%s] draining output (replayed=%d)", session.name, replayed)
                     await send_system(channel, "*(reconnected after restart \u2014 resuming output)*")
                     try:
                         async with asyncio.timeout(config.QUERY_TIMEOUT):
@@ -2858,15 +2881,12 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
                         log.warning("Drain timeout for '%s' \u2014 continuing", session.name)
                     except Exception:
                         log.exception("Error draining buffered output for '%s'", session.name)
-                    session.bridge_busy = False
-                    session.last_activity = datetime.now(UTC)
-                elif channel:
-                    await send_system(channel, "*(reconnected after restart \u2014 task still running)*")
+                session.bridge_busy = False
+                session.last_activity = datetime.now(UTC)
                 log.info(
-                    "Agent '%s' reconnected mid-task (idle=False, replayed=%d, bridge_busy=%s)",
+                    "Agent '%s' reconnected mid-task (idle=False, replayed=%d)",
                     session.name,
                     replayed,
-                    session.bridge_busy,
                 )
             elif cli_status == "running":
                 channel = await get_agent_channel(session.name)

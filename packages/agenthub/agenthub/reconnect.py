@@ -97,8 +97,10 @@ async def reconnect_single(
 ) -> None:
     """Reconnect a single agent to the bridge and drain any buffered output.
 
-    Creates a BridgeTransport, subscribes to the agent's streams, creates
-    an SDK client, and handles mid-task reconnection (draining buffered output).
+    Creates a BridgeTransport, initializes the SDK client, THEN subscribes
+    to the agent's streams. This order is critical: subscribe replays buffered
+    messages into the transport queue, which would corrupt the SDK's initialize
+    handshake if they arrive before the control_response.
     """
     from claudewire import BridgeTransport
 
@@ -127,6 +129,16 @@ async def reconnect_single(
             )
             await transport.connect()
 
+            # Create and initialize SDK client FIRST — the queue is empty so
+            # the initialize handshake completes cleanly.
+            options = hub.make_agent_options(session, session.session_id)
+
+            from claude_agent_sdk import ClaudeSDKClient
+
+            client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
+            await client.__aenter__()
+
+            # NOW subscribe — replayed messages flow into the queue after init.
             sub_result = await transport.subscribe()
             replayed = sub_result.replayed or 0
             cli_status = sub_result.status or "unknown"
@@ -139,13 +151,16 @@ async def reconnect_single(
                 cli_idle,
             )
 
-            # Build reconnect-mode options (no model/prompt — just permissions + MCP)
-            options = hub.make_agent_options(session, session.session_id)
+            # Handle exited processes — clean up and leave agent sleeping
+            if cli_status == "exited":
+                log.info("Agent '%s' CLI exited while we were down — cleaning up", session.name)
+                await hub.disconnect_client(client, session.name)
+                session.transport = None
+                session.reconnecting = False
+                if session.agent_log:
+                    session.agent_log.info("SESSION_RECONNECT aborted — CLI exited")
+                return
 
-            from claude_agent_sdk import ClaudeSDKClient
-
-            client = ClaudeSDKClient(options=options, transport=transport)  # pyright: ignore[reportArgumentType]
-            await client.__aenter__()
             session.client = client
             hub.scheduler.restore_slot(session.name)
             session.last_activity = datetime.now(UTC)
@@ -164,12 +179,6 @@ async def reconnect_single(
 
             if was_mid_task:
                 session.bridge_busy = True
-                if replayed > 0:
-                    log.info(
-                        "RECONNECT_DRAIN[%s] draining buffered output (replayed=%d)",
-                        session.name,
-                        replayed,
-                    )
                 log.info(
                     "Agent '%s' reconnected mid-task (idle=False, replayed=%d)",
                     session.name,
