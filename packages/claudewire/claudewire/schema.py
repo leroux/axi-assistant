@@ -1,9 +1,15 @@
 """Strict JSON schema validation for Claude CLI stream-json protocol messages.
 
-Validates every message exchanged with the CLI against known schemas.
-Unknown keys are flagged (protocol additions), missing required keys
-and type mismatches are errors. Validation is non-blocking — errors are
-collected and reported, never silently swallowed.
+Pydantic models for every message type in the Claude CLI stream-json protocol.
+Validates structure, flags unknown keys as warnings, and returns parsed models
+on success. Models are defined from real bridge-stdio log data.
+
+Usage:
+    result = validate_inbound(raw_dict)
+    if result.errors:
+        handle_errors(result.errors)
+    else:
+        msg = result.model  # typed pydantic model
 """
 
 from __future__ import annotations
@@ -11,12 +17,20 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import ValidationError as PydanticValidationError
 
 log = logging.getLogger(__name__)
 
 # When true, validation errors raise instead of just being returned.
 STRICT_MODE = os.environ.get("SCHEMA_STRICT_MODE", "").lower() in ("1", "true", "yes")
+
+
+# ---------------------------------------------------------------------------
+# Validation result types
+# ---------------------------------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -43,480 +57,419 @@ class SchemaValidationError(Exception):
         super().__init__(f"Schema validation failed: {errors[0]}")
 
 
-# ---------------------------------------------------------------------------
-# Schema definition helpers
-# ---------------------------------------------------------------------------
+@dataclass(slots=True)
+class ValidationResult:
+    """Result of validating a message — either a parsed model or errors."""
 
-# A schema is a dict mapping key names to specs.
-# Each spec is a tuple: (required: bool, type_check, nested_schema | None)
-# type_check is one of:
-#   - A Python type (str, int, float, bool, list, dict)
-#   - A set of allowed literal values: {"text", "tool_use", "thinking"}
-#   - None means "any type" (skip type check)
-#   - A callable (validator function) for complex cases
+    model: BaseModel | None
+    errors: list[ValidationError]
 
-type Spec = tuple[bool, Any, dict[str, Any] | None]
-type Schema = dict[str, Spec]
-
-# Sentinel for "any type is fine"
-ANY = None
-
-
-def _check(
-    data: dict[str, Any],
-    schema: Schema,
-    path: str,
-    errors: list[ValidationError],
-) -> None:
-    """Validate a dict against a schema, appending errors."""
-    if not isinstance(data, dict):
-        errors.append(ValidationError(path, f"expected dict, got {type(data).__name__}", data))
-        return
-
-    schema_keys = set(schema.keys())
-    data_keys = set(data.keys())
-
-    # Check for unknown keys
-    for key in sorted(data_keys - schema_keys):
-        # _trace_context is injected by OTel, always allow
-        if key == "_trace_context":
-            continue
-        errors.append(ValidationError(
-            f"{path}.{key}" if path else key,
-            "unknown key",
-            data[key],
-            level="warning",
-        ))
-
-    # Check each schema key
-    for key, (required, type_check, nested) in schema.items():
-        full_path = f"{path}.{key}" if path else key
-
-        if key not in data:
-            if required:
-                errors.append(ValidationError(full_path, "required key missing"))
-            continue
-
-        value = data[key]
-
-        # None values are allowed for optional fields
-        if value is None and not required:
-            continue
-
-        # Type checking
-        if type_check is not ANY:
-            if isinstance(type_check, set):
-                # Literal values check
-                if value not in type_check:
-                    errors.append(ValidationError(
-                        full_path,
-                        f"expected one of {sorted(type_check)}, got {value!r}",
-                        value,
-                    ))
-            elif isinstance(type_check, tuple):
-                # Union of types
-                if not isinstance(value, type_check):
-                    errors.append(ValidationError(
-                        full_path,
-                        f"expected {' | '.join(t.__name__ for t in type_check)}, got {type(value).__name__}",
-                        type(value).__name__,
-                    ))
-            elif isinstance(type_check, type):
-                if not isinstance(value, type_check):
-                    errors.append(ValidationError(
-                        full_path,
-                        f"expected {type_check.__name__}, got {type(value).__name__}",
-                        type(value).__name__,
-                    ))
-            elif callable(type_check):
-                type_check(value, full_path, errors)
-
-        # Nested schema
-        if nested and isinstance(value, dict):
-            _check(value, nested, full_path, errors)
+    @property
+    def ok(self) -> bool:
+        return not any(e.level == "error" for e in self.errors)
 
 
 # ---------------------------------------------------------------------------
-# Schema for inner Anthropic API stream events (inside stream_event.event)
+# Base configs
 # ---------------------------------------------------------------------------
 
-_USAGE_SCHEMA: Schema = {
-    "input_tokens": (False, int, None),
-    "output_tokens": (False, int, None),
-    "cache_creation_input_tokens": (False, int, None),
-    "cache_read_input_tokens": (False, int, None),
-    "cache_creation": (False, dict, None),
-    "service_tier": (False, str, None),
-    "inference_geo": (False, str, None),
-}
 
-_CONTEXT_MANAGEMENT_SCHEMA: Schema = {
-    "applied_edits": (False, list, None),
-}
+class _Strict(BaseModel):
+    """Default: reject unknown keys (surfaced as warnings)."""
+    model_config = ConfigDict(extra="forbid")
 
 
-def _validate_content_block(value: Any, path: str, errors: list[ValidationError]) -> None:
-    """Validate a content_block inside content_block_start."""
-    if not isinstance(value, dict):
-        errors.append(ValidationError(path, f"expected dict, got {type(value).__name__}"))
-        return
-    block_type = value.get("type")
-    if block_type == "text":
-        _check(value, {
-            "type": (True, {"text"}, None),
-            "text": (True, str, None),
-        }, path, errors)
-    elif block_type == "tool_use":
-        _check(value, {
-            "type": (True, {"tool_use"}, None),
-            "id": (True, str, None),
-            "name": (True, str, None),
-            "input": (True, dict, None),
-            "caller": (False, dict, None),
-        }, path, errors)
-    elif block_type == "thinking":
-        _check(value, {
-            "type": (True, {"thinking"}, None),
-            "thinking": (True, str, None),
-            "signature": (True, str, None),
-        }, path, errors)
-    else:
-        errors.append(ValidationError(
-            f"{path}.type",
-            f"expected one of ['text', 'thinking', 'tool_use'], got {block_type!r}",
-            block_type,
-        ))
-
-
-def _validate_delta(value: Any, path: str, errors: list[ValidationError]) -> None:
-    """Validate a delta inside content_block_delta."""
-    if not isinstance(value, dict):
-        errors.append(ValidationError(path, f"expected dict, got {type(value).__name__}"))
-        return
-    delta_type = value.get("type")
-    if delta_type == "text_delta":
-        _check(value, {
-            "type": (True, {"text_delta"}, None),
-            "text": (True, str, None),
-        }, path, errors)
-    elif delta_type == "input_json_delta":
-        _check(value, {
-            "type": (True, {"input_json_delta"}, None),
-            "partial_json": (True, str, None),
-        }, path, errors)
-    elif delta_type == "thinking_delta":
-        _check(value, {
-            "type": (True, {"thinking_delta"}, None),
-            "thinking": (True, str, None),
-        }, path, errors)
-    elif delta_type == "signature_delta":
-        _check(value, {
-            "type": (True, {"signature_delta"}, None),
-            "signature": (True, str, None),
-        }, path, errors)
-    else:
-        errors.append(ValidationError(
-            f"{path}.type",
-            f"expected one of ['input_json_delta', 'signature_delta', 'text_delta', 'thinking_delta'], got {delta_type!r}",
-            delta_type,
-        ))
-
-
-def _validate_message_delta_delta(value: Any, path: str, errors: list[ValidationError]) -> None:
-    """Validate the delta inside a message_delta event."""
-    if not isinstance(value, dict):
-        errors.append(ValidationError(path, f"expected dict, got {type(value).__name__}"))
-        return
-    _check(value, {
-        "stop_reason": (False, {"end_turn", "tool_use", "max_tokens"}, None),
-        "stop_sequence": (False, (str, type(None)), None),
-    }, path, errors)
-
-
-_STREAM_EVENT_SCHEMAS: dict[str, Schema] = {
-    "message_start": {
-        "type": (True, {"message_start"}, None),
-        "message": (True, dict, {
-            "model": (True, str, None),
-            "id": (True, str, None),
-            "type": (True, {"message"}, None),
-            "role": (True, {"assistant"}, None),
-            "content": (True, list, None),
-            "stop_reason": (False, ANY, None),
-            "stop_sequence": (False, ANY, None),
-            "usage": (False, dict, _USAGE_SCHEMA),
-            "context_management": (False, ANY, None),
-        }),
-    },
-    "message_delta": {
-        "type": (True, {"message_delta"}, None),
-        "delta": (True, _validate_message_delta_delta, None),
-        "usage": (False, dict, _USAGE_SCHEMA),
-        "context_management": (False, dict, _CONTEXT_MANAGEMENT_SCHEMA),
-    },
-    "message_stop": {
-        "type": (True, {"message_stop"}, None),
-    },
-    "content_block_start": {
-        "type": (True, {"content_block_start"}, None),
-        "index": (True, int, None),
-        "content_block": (True, _validate_content_block, None),
-    },
-    "content_block_delta": {
-        "type": (True, {"content_block_delta"}, None),
-        "index": (True, int, None),
-        "delta": (True, _validate_delta, None),
-    },
-    "content_block_stop": {
-        "type": (True, {"content_block_stop"}, None),
-        "index": (True, int, None),
-    },
-}
-
-
-def _validate_stream_event_inner(value: Any, path: str, errors: list[ValidationError]) -> None:
-    """Validate the inner event dict of a stream_event message."""
-    if not isinstance(value, dict):
-        errors.append(ValidationError(path, f"expected dict, got {type(value).__name__}"))
-        return
-    event_type = value.get("type")
-    schema = _STREAM_EVENT_SCHEMAS.get(event_type)  # type: ignore[arg-type]
-    if schema is None:
-        errors.append(ValidationError(
-            f"{path}.type",
-            f"unknown stream event type: {event_type!r}",
-            event_type,
-        ))
-        return
-    _check(value, schema, path, errors)
+class _Permissive(BaseModel):
+    """Allow extra keys silently (for dynamic/polymorphic payloads)."""
+    model_config = ConfigDict(extra="allow")
 
 
 # ---------------------------------------------------------------------------
-# Schemas for assistant message content blocks
+# Content blocks (assistant message content, content_block_start)
 # ---------------------------------------------------------------------------
 
-def _validate_assistant_content(value: Any, path: str, errors: list[ValidationError]) -> None:
-    """Validate the content array inside an assistant message."""
-    if not isinstance(value, list):
-        errors.append(ValidationError(path, f"expected list, got {type(value).__name__}"))
-        return
-    for i, block in enumerate(value):
-        _validate_content_block(block, f"{path}[{i}]", errors)
+
+class TextBlock(_Strict):
+    type: Literal["text"]
+    text: str
 
 
-def _validate_assistant_message_inner(value: Any, path: str, errors: list[ValidationError]) -> None:
-    """Validate the message object inside an assistant message."""
-    if not isinstance(value, dict):
-        errors.append(ValidationError(path, f"expected dict, got {type(value).__name__}"))
-        return
-    _check(value, {
-        "model": (True, str, None),
-        "id": (True, str, None),
-        "type": (True, {"message"}, None),
-        "role": (True, {"assistant"}, None),
-        "content": (True, _validate_assistant_content, None),
-        "stop_reason": (False, ANY, None),
-        "stop_sequence": (False, ANY, None),
-        "usage": (False, dict, _USAGE_SCHEMA),
-        "context_management": (False, ANY, None),
-    }, path, errors)
+class ToolUseBlock(_Strict):
+    type: Literal["tool_use"]
+    id: str
+    name: str
+    input: dict[str, Any]
+    caller: dict[str, Any] | None = None
 
 
-# ---------------------------------------------------------------------------
-# Schemas for user message content
-# ---------------------------------------------------------------------------
-
-def _validate_user_content(value: Any, path: str, errors: list[ValidationError]) -> None:
-    """Validate user message content (string or list of blocks)."""
-    if isinstance(value, str):
-        return
-    if isinstance(value, list):
-        for i, block in enumerate(value):
-            if not isinstance(block, dict):
-                errors.append(ValidationError(f"{path}[{i}]", f"expected dict, got {type(block).__name__}"))
-                continue
-            block_type = block.get("type")
-            if block_type == "text":
-                _check(block, {"type": (True, {"text"}, None), "text": (True, str, None)}, f"{path}[{i}]", errors)
-            elif block_type == "tool_use":
-                _check(block, {
-                    "type": (True, {"tool_use"}, None),
-                    "id": (True, str, None),
-                    "name": (True, str, None),
-                    "input": (True, dict, None),
-                }, f"{path}[{i}]", errors)
-            elif block_type == "tool_result":
-                _check(block, {
-                    "type": (True, {"tool_result"}, None),
-                    "tool_use_id": (True, str, None),
-                    "content": (False, ANY, None),
-                    "is_error": (False, bool, None),
-                }, f"{path}[{i}]", errors)
-            elif block_type is not None:
-                errors.append(ValidationError(
-                    f"{path}[{i}].type",
-                    f"unknown content block type: {block_type!r}",
-                    block_type,
-                ))
-        return
-    errors.append(ValidationError(path, f"expected str or list, got {type(value).__name__}"))
+class ThinkingBlock(_Strict):
+    type: Literal["thinking"]
+    thinking: str
+    signature: str
 
 
-def _validate_user_message_inner(value: Any, path: str, errors: list[ValidationError]) -> None:
-    """Validate the message object inside a user message."""
-    if not isinstance(value, dict):
-        errors.append(ValidationError(path, f"expected dict, got {type(value).__name__}"))
-        return
-    _check(value, {
-        "role": (True, {"user"}, None),
-        "content": (True, _validate_user_content, None),
-    }, path, errors)
+ContentBlock = Annotated[
+    TextBlock | ToolUseBlock | ThinkingBlock,
+    Field(discriminator="type"),
+]
 
 
 # ---------------------------------------------------------------------------
-# Control protocol schemas
+# Deltas (inside content_block_delta)
 # ---------------------------------------------------------------------------
 
-_CONTROL_REQUEST_SUBTYPES = {
-    "can_use_tool", "mcp_message", "initialize", "hook_callback",
-    "interrupt", "set_permission_mode", "rewind_files",
-}
 
-_CONTROL_RESPONSE_SCHEMA: Schema = {
-    "subtype": (True, {"success", "error"}, None),
-    "request_id": (True, str, None),
-    "response": (False, ANY, None),
-    "error": (False, str, None),
-}
+class TextDelta(_Strict):
+    type: Literal["text_delta"]
+    text: str
 
 
-def _validate_control_request_inner(value: Any, path: str, errors: list[ValidationError]) -> None:
-    """Validate the request object inside a control_request."""
-    if not isinstance(value, dict):
-        errors.append(ValidationError(path, f"expected dict, got {type(value).__name__}"))
-        return
-    subtype = value.get("subtype")
-    if subtype not in _CONTROL_REQUEST_SUBTYPES:
-        errors.append(ValidationError(
-            f"{path}.subtype",
-            f"expected one of {sorted(_CONTROL_REQUEST_SUBTYPES)}, got {subtype!r}",
-            subtype,
-        ))
+class InputJsonDelta(_Strict):
+    type: Literal["input_json_delta"]
+    partial_json: str
 
 
-# ---------------------------------------------------------------------------
-# Rate limit event schema
-# ---------------------------------------------------------------------------
+class ThinkingDelta(_Strict):
+    type: Literal["thinking_delta"]
+    thinking: str
 
-_RATE_LIMIT_INFO_SCHEMA: Schema = {
-    "status": (True, {"allowed", "allowed_warning", "rejected"}, None),
-    "resetsAt": (True, (int, float), None),
-    "rateLimitType": (True, str, None),
-    "utilization": (False, (int, float), None),
-    "isUsingOverage": (False, bool, None),
-    "surpassedThreshold": (False, (int, float), None),
-    "overageStatus": (False, str, None),
-    "overageDisabledReason": (False, str, None),
-}
+
+class SignatureDelta(_Strict):
+    type: Literal["signature_delta"]
+    signature: str
+
+
+Delta = Annotated[
+    TextDelta | InputJsonDelta | ThinkingDelta | SignatureDelta,
+    Field(discriminator="type"),
+]
 
 
 # ---------------------------------------------------------------------------
-# Top-level inbound message schemas
+# Shared models
 # ---------------------------------------------------------------------------
 
-_INBOUND_SCHEMAS: dict[str, Schema] = {
-    "stream_event": {
-        "type": (True, {"stream_event"}, None),
-        "uuid": (True, str, None),
-        "session_id": (True, str, None),
-        "parent_tool_use_id": (False, (str, type(None)), None),
-        "event": (True, _validate_stream_event_inner, None),
-    },
-    "assistant": {
-        "type": (True, {"assistant"}, None),
-        "message": (True, _validate_assistant_message_inner, None),
-        "parent_tool_use_id": (False, (str, type(None)), None),
-        "session_id": (True, str, None),
-        "uuid": (True, str, None),
-        "error": (False, str, None),
-    },
-    "user": {
-        "type": (True, {"user"}, None),
-        "message": (False, _validate_user_message_inner, None),
-        "content": (False, _validate_user_content, None),
-        "session_id": (False, str, None),
-        "parent_tool_use_id": (False, (str, type(None)), None),
-        "uuid": (False, str, None),
-        "tool_use_result": (False, ANY, None),
-    },
-    "system": {
-        "type": (True, {"system"}, None),
-        "subtype": (True, str, None),
-        # system messages carry arbitrary extra fields depending on subtype
-        # (init has tools, cwd, session_id, etc.)
-        # We validate subtype exists but allow extra keys without warning
-    },
-    "result": {
-        "type": (True, {"result"}, None),
-        "subtype": (True, {"success", "error"}, None),
-        "is_error": (True, bool, None),
-        "duration_ms": (True, int, None),
-        "duration_api_ms": (True, int, None),
-        "num_turns": (True, int, None),
-        "session_id": (True, str, None),
-        "result": (False, (str, type(None)), None),
-        "stop_reason": (False, ANY, None),
-        "total_cost_usd": (False, (int, float, type(None)), None),
-        "usage": (False, dict, None),
-        "modelUsage": (False, dict, None),
-        "permission_denials": (False, list, None),
-        "fast_mode_state": (False, str, None),
-        "uuid": (True, str, None),
-        "structured_output": (False, ANY, None),
-    },
-    "control_request": {
-        "type": (True, {"control_request"}, None),
-        "request_id": (True, str, None),
-        "request": (True, _validate_control_request_inner, None),
-    },
-    "control_response": {
-        "type": (True, {"control_response"}, None),
-        "response": (True, dict, _CONTROL_RESPONSE_SCHEMA),
-    },
-    "rate_limit_event": {
-        "type": (True, {"rate_limit_event"}, None),
-        "rate_limit_info": (True, dict, _RATE_LIMIT_INFO_SCHEMA),
-        "uuid": (True, str, None),
-        "session_id": (True, str, None),
-    },
-}
 
-# system messages have dynamic extra fields — suppress unknown key warnings
-_SUPPRESS_UNKNOWN_KEYS = {"system"}
+class Usage(_Permissive):
+    """Token usage — extra="allow" because new fields appear frequently."""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation: dict[str, Any] | None = None
+    service_tier: str | None = None
+    inference_geo: str | None = None
+    # Fields seen in result.usage but not in stream events:
+    iterations: list[Any] | None = None
+    server_tool_use: dict[str, Any] | None = None
+    speed: str | None = None
+
+
+class ContextManagement(_Strict):
+    applied_edits: list[Any] | None = None
+
+
+class MessageDeltaDelta(_Strict):
+    stop_reason: Literal["end_turn", "tool_use", "max_tokens"] | None = None
+    stop_sequence: str | None = None
 
 
 # ---------------------------------------------------------------------------
-# Outbound message schemas
+# Inner Anthropic API stream events
 # ---------------------------------------------------------------------------
 
-_OUTBOUND_SCHEMAS: dict[str, Schema] = {
-    "user": {
-        "type": (True, {"user"}, None),
-        "content": (False, _validate_user_content, None),
-        "session_id": (False, str, None),
-        "message": (False, _validate_user_message_inner, None),
-        "parent_tool_use_id": (False, (str, type(None)), None),
-    },
-    "control_request": {
-        "type": (True, {"control_request"}, None),
-        "request_id": (True, str, None),
-        "request": (True, _validate_control_request_inner, None),
-    },
-    "control_response": {
-        "type": (True, {"control_response"}, None),
-        "response": (True, dict, _CONTROL_RESPONSE_SCHEMA),
-    },
-}
+
+class MessageInner(_Strict):
+    """The message object inside message_start and assistant messages."""
+    model: str
+    id: str
+    type: Literal["message"]
+    role: Literal["assistant"]
+    content: list[Any]
+    stop_reason: Any = None
+    stop_sequence: Any = None
+    usage: Usage | None = None
+    context_management: Any = None
+
+
+class MessageStartEvent(_Strict):
+    type: Literal["message_start"]
+    message: MessageInner
+
+
+class MessageDeltaEvent(_Strict):
+    type: Literal["message_delta"]
+    delta: MessageDeltaDelta
+    usage: Usage | None = None
+    context_management: ContextManagement | None = None
+
+
+class MessageStopEvent(_Strict):
+    type: Literal["message_stop"]
+
+
+class ContentBlockStartEvent(_Strict):
+    type: Literal["content_block_start"]
+    index: int
+    content_block: ContentBlock
+
+
+class ContentBlockDeltaEvent(_Strict):
+    type: Literal["content_block_delta"]
+    index: int
+    delta: Delta
+
+
+class ContentBlockStopEvent(_Strict):
+    type: Literal["content_block_stop"]
+    index: int
+
+
+StreamEvent = Annotated[
+    MessageStartEvent | MessageDeltaEvent | MessageStopEvent | ContentBlockStartEvent | ContentBlockDeltaEvent | ContentBlockStopEvent,
+    Field(discriminator="type"),
+]
+
+_stream_event_adapter: TypeAdapter[StreamEvent] = TypeAdapter(StreamEvent)
+
+
+# ---------------------------------------------------------------------------
+# User message content blocks
+# ---------------------------------------------------------------------------
+
+
+class ToolResultBlock(_Permissive):
+    """Tool result — extra="allow" for the many tool-specific fields."""
+    type: Literal["tool_result"]
+    tool_use_id: str
+    content: Any = None
+    is_error: bool | None = None
+
+
+UserContentBlock = Annotated[
+    TextBlock | ToolUseBlock | ToolResultBlock,
+    Field(discriminator="type"),
+]
+
+
+class UserMessageInner(_Strict):
+    role: Literal["user"]
+    content: str | list[UserContentBlock]
+
+
+class AssistantMessageInner(_Strict):
+    model: str
+    id: str
+    type: Literal["message"]
+    role: Literal["assistant"]
+    content: list[ContentBlock]
+    stop_reason: Any = None
+    stop_sequence: Any = None
+    usage: Usage | None = None
+    context_management: Any = None
+
+
+# ---------------------------------------------------------------------------
+# Control protocol
+# ---------------------------------------------------------------------------
+
+
+class ControlRequestInner(_Permissive):
+    """Control request payload — subtypes vary, so allow extra fields."""
+    subtype: str  # open-ended: can_use_tool, mcp_message, initialize, hook_callback, etc.
+
+
+class ControlResponseInner(_Permissive):
+    """Control response — allow extra for response payload variants."""
+    subtype: Literal["success", "error"]
+    request_id: str
+    response: Any = None
+    error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Rate limit
+# ---------------------------------------------------------------------------
+
+
+class RateLimitInfoSchema(_Permissive):
+    """Rate limit info — extra="allow" for new fields like overage."""
+    status: Literal["allowed", "allowed_warning", "rejected"]
+    resetsAt: int | float | None = None
+    rateLimitType: str | None = None
+    utilization: int | float | None = None
+    isUsingOverage: bool | None = None
+    surpassedThreshold: int | float | None = None
+    overageStatus: str | None = None
+    overageDisabledReason: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Top-level inbound messages (CLI → us)
+# ---------------------------------------------------------------------------
+
+
+class StreamEventMsg(_Strict):
+    type: Literal["stream_event"]
+    uuid: str
+    session_id: str
+    parent_tool_use_id: str | None = None
+    event: StreamEvent
+
+
+class AssistantMsg(_Strict):
+    type: Literal["assistant"]
+    message: AssistantMessageInner
+    parent_tool_use_id: str | None = None
+    session_id: str
+    uuid: str
+    error: str | None = None
+
+
+class UserMsg(_Permissive):
+    """User message — extra="allow" for isSynthetic and future fields."""
+    type: Literal["user"]
+    message: UserMessageInner | None = None
+    content: str | list[UserContentBlock] | None = None
+    session_id: str | None = None
+    parent_tool_use_id: str | None = None
+    uuid: str | None = None
+    tool_use_result: Any = None
+
+
+class SystemMsg(_Permissive):
+    """System messages have dynamic extra fields depending on subtype."""
+    type: Literal["system"]
+    subtype: str
+
+
+class ResultMsg(_Permissive):
+    """Result message — extra="allow" for evolving fields."""
+    type: Literal["result"]
+    subtype: Literal["success", "error"]
+    is_error: bool
+    duration_ms: int
+    duration_api_ms: int
+    num_turns: int
+    session_id: str
+    uuid: str
+    result: str | None = None
+    stop_reason: Any = None
+    total_cost_usd: int | float | None = None
+    usage: Usage | None = None
+    modelUsage: dict[str, Any] | None = None
+    permission_denials: list[Any] | None = None
+    fast_mode_state: str | None = None
+    structured_output: Any = None
+
+
+class ControlRequestMsg(_Strict):
+    type: Literal["control_request"]
+    request_id: str
+    request: ControlRequestInner
+
+
+class ControlResponseMsg(_Strict):
+    type: Literal["control_response"]
+    response: ControlResponseInner
+
+
+class RateLimitEventMsg(_Strict):
+    type: Literal["rate_limit_event"]
+    rate_limit_info: RateLimitInfoSchema
+    uuid: str
+    session_id: str
+
+
+InboundMsg = Annotated[
+    StreamEventMsg | AssistantMsg | UserMsg | SystemMsg | ResultMsg | ControlRequestMsg | ControlResponseMsg | RateLimitEventMsg,
+    Field(discriminator="type"),
+]
+
+_inbound_adapter: TypeAdapter[InboundMsg] = TypeAdapter(InboundMsg)
+
+
+# ---------------------------------------------------------------------------
+# Top-level outbound messages (us → CLI)
+# ---------------------------------------------------------------------------
+
+
+class UserOutMsg(_Strict):
+    type: Literal["user"]
+    content: str | list[UserContentBlock] | None = None
+    session_id: str | None = None
+    message: UserMessageInner | None = None
+    parent_tool_use_id: str | None = None
+
+
+class ControlRequestOutMsg(_Strict):
+    type: Literal["control_request"]
+    request_id: str
+    request: ControlRequestInner
+
+
+class ControlResponseOutMsg(_Strict):
+    type: Literal["control_response"]
+    response: ControlResponseInner
+
+
+OutboundMsg = Annotated[
+    UserOutMsg | ControlRequestOutMsg | ControlResponseOutMsg,
+    Field(discriminator="type"),
+]
+
+_outbound_adapter: TypeAdapter[OutboundMsg] = TypeAdapter(OutboundMsg)
+
+
+# ---------------------------------------------------------------------------
+# Bare stream event types (procmux replay emits without wrapper)
+# ---------------------------------------------------------------------------
+
+_BARE_STREAM_TYPES = frozenset(_stream_event_adapter.core_schema.get("choices", {}).keys()) if False else frozenset({
+    "message_start", "message_delta", "message_stop",
+    "content_block_start", "content_block_delta", "content_block_stop",
+})
+
+
+# ---------------------------------------------------------------------------
+# Error classification
+# ---------------------------------------------------------------------------
+
+
+def _classify_pydantic_errors(exc: PydanticValidationError) -> list[ValidationError]:
+    """Convert pydantic ValidationError into our ValidationError list.
+
+    extra_forbidden errors → warning level (unknown keys from protocol updates).
+    Everything else → error level.
+    """
+    errors: list[ValidationError] = []
+    for err in exc.errors():
+        path = ".".join(str(p) for p in err["loc"])
+        msg = err["msg"]
+        err_type = err["type"]
+
+        if err_type == "extra_forbidden":
+            errors.append(ValidationError(
+                path=path,
+                message="unknown key",
+                raw_value=err.get("input"),
+                level="warning",
+            ))
+        else:
+            errors.append(ValidationError(
+                path=path,
+                message=msg,
+                raw_value=err.get("input"),
+                level="error",
+            ))
+    return errors
+
+
+def _strip_trace_context(data: dict[str, Any]) -> dict[str, Any]:
+    """Remove _trace_context before validation (OTel injection, always allowed)."""
+    if "_trace_context" in data:
+        return {k: v for k, v in data.items() if k != "_trace_context"}
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -524,62 +477,47 @@ _OUTBOUND_SCHEMAS: dict[str, Schema] = {
 # ---------------------------------------------------------------------------
 
 
-def validate_inbound(msg: dict[str, Any]) -> list[ValidationError]:
-    """Validate a message received from the CLI.
+def validate_inbound(msg: dict[str, Any]) -> ValidationResult:
+    """Validate and parse a message received from the CLI.
 
-    Returns a list of validation errors/warnings. Empty list means valid.
+    Returns a ValidationResult with either the parsed model or errors.
     """
-    errors: list[ValidationError] = []
     msg_type = msg.get("type")
-
     if msg_type is None:
-        errors.append(ValidationError("type", "missing required 'type' field"))
-        return errors
+        return ValidationResult(
+            model=None,
+            errors=[ValidationError("type", "missing required 'type' field")],
+        )
 
-    schema = _INBOUND_SCHEMAS.get(msg_type)
-    if schema is None:
-        errors.append(ValidationError("type", f"unknown inbound message type: {msg_type!r}", msg_type))
-        return errors
-
-    _check(msg, schema, "", errors)
-
-    # Suppress unknown key warnings for message types with dynamic fields
-    if msg_type in _SUPPRESS_UNKNOWN_KEYS:
-        errors = [e for e in errors if e.level != "warning" or "unknown key" not in e.message]
-
-    return errors
+    cleaned = _strip_trace_context(msg)
+    try:
+        model = _inbound_adapter.validate_python(cleaned)
+    except PydanticValidationError as exc:
+        return ValidationResult(model=None, errors=_classify_pydantic_errors(exc))
+    return ValidationResult(model=model, errors=[])
 
 
-def validate_outbound(msg: dict[str, Any]) -> list[ValidationError]:
-    """Validate a message being sent to the CLI.
+def validate_outbound(msg: dict[str, Any]) -> ValidationResult:
+    """Validate and parse a message being sent to the CLI.
 
-    Returns a list of validation errors/warnings. Empty list means valid.
+    Returns a ValidationResult with either the parsed model or errors.
     """
-    errors: list[ValidationError] = []
     msg_type = msg.get("type")
-
     if msg_type is None:
-        errors.append(ValidationError("type", "missing required 'type' field"))
-        return errors
+        return ValidationResult(
+            model=None,
+            errors=[ValidationError("type", "missing required 'type' field")],
+        )
 
-    schema = _OUTBOUND_SCHEMAS.get(msg_type)
-    if schema is None:
-        errors.append(ValidationError("type", f"unknown outbound message type: {msg_type!r}", msg_type))
-        return errors
-
-    _check(msg, schema, "", errors)
-    return errors
-
-
-# Also expose the "raw" inner stream event validators — these are also
-# emitted directly as top-level messages in some paths (procmux replay).
-# content_block_delta, message_delta, etc. appear bare (without stream_event
-# wrapper) in the procmux buffer replay path.
-
-_BARE_STREAM_TYPES = set(_STREAM_EVENT_SCHEMAS.keys())
+    cleaned = _strip_trace_context(msg)
+    try:
+        model = _outbound_adapter.validate_python(cleaned)
+    except PydanticValidationError as exc:
+        return ValidationResult(model=None, errors=_classify_pydantic_errors(exc))
+    return ValidationResult(model=model, errors=[])
 
 
-def validate_inbound_or_bare(msg: dict[str, Any]) -> list[ValidationError]:
+def validate_inbound_or_bare(msg: dict[str, Any]) -> ValidationResult:
     """Like validate_inbound, but also accepts bare Anthropic stream events.
 
     Some code paths (procmux replay) emit content_block_delta, message_start,
@@ -587,8 +525,10 @@ def validate_inbound_or_bare(msg: dict[str, Any]) -> list[ValidationError]:
     """
     msg_type = msg.get("type")
     if msg_type in _BARE_STREAM_TYPES:
-        errors: list[ValidationError] = []
-        schema = _STREAM_EVENT_SCHEMAS[msg_type]
-        _check(msg, schema, "", errors)
-        return errors
+        cleaned = _strip_trace_context(msg)
+        try:
+            model = _stream_event_adapter.validate_python(cleaned)
+        except PydanticValidationError as exc:
+            return ValidationResult(model=None, errors=_classify_pydantic_errors(exc))
+        return ValidationResult(model=model, errors=[])
     return validate_inbound(msg)

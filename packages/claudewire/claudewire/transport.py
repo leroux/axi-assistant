@@ -141,9 +141,9 @@ class BridgeTransport:
                 return
 
             # Validate outbound message
-            outbound_errors = validate_outbound(msg)
-            if outbound_errors:
-                await self._handle_validation_errors(msg, outbound_errors, "outbound")
+            outbound_result = validate_outbound(msg)
+            if outbound_result.errors:
+                await self._handle_validation_errors(msg, outbound_result.errors, "outbound")
 
             # Inject OTel trace context so downstream processes can link spans
             carrier: dict[str, str] = {}
@@ -174,9 +174,9 @@ class BridgeTransport:
                 if self._stdio_logger:
                     self._stdio_logger.debug("<<< STDOUT %s", json.dumps(msg.data))
                 # Validate inbound message
-                inbound_errors = validate_inbound_or_bare(msg.data)
-                if inbound_errors:
-                    await self._handle_validation_errors(msg.data, inbound_errors, "inbound")
+                inbound_result = validate_inbound_or_bare(msg.data)
+                if inbound_result.errors:
+                    await self._handle_validation_errors(msg.data, inbound_result.errors, "inbound")
                 yield msg.data
             elif isinstance(msg, StderrEvent):
                 log.debug("[read][%s] stderr: %.200s", self._name, msg.text)

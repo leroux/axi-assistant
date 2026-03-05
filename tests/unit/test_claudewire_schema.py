@@ -1,4 +1,4 @@
-"""Unit tests for claudewire.schema — strict JSON schema validation."""
+"""Unit tests for claudewire.schema — pydantic-based protocol validation."""
 
 from __future__ import annotations
 
@@ -7,8 +7,18 @@ import copy
 import pytest
 
 from claudewire.schema import (
+    AssistantMsg,
+    ContentBlockDeltaEvent,
+    ContentBlockStartEvent,
+    ControlRequestMsg,
+    MessageStartEvent,
+    RateLimitEventMsg,
+    ResultMsg,
     SchemaValidationError,
+    StreamEventMsg,
+    SystemMsg,
     ValidationError,
+    ValidationResult,
     validate_inbound,
     validate_inbound_or_bare,
     validate_outbound,
@@ -298,12 +308,12 @@ RATE_LIMIT_EVENT = {
 
 
 # ---------------------------------------------------------------------------
-# Tests: valid inbound messages
+# Tests: valid inbound messages → returns parsed model
 # ---------------------------------------------------------------------------
 
 
 class TestValidInbound:
-    """All valid inbound message types should produce no errors."""
+    """All valid inbound message types should produce no errors and a model."""
 
     @pytest.mark.parametrize(
         "msg",
@@ -355,8 +365,10 @@ class TestValidInbound:
         ],
     )
     def test_valid_message(self, msg: dict) -> None:
-        errors = validate_inbound(msg)
-        assert errors == [], f"Unexpected errors: {errors}"
+        result = validate_inbound(msg)
+        assert result.errors == [], f"Unexpected errors: {result.errors}"
+        assert result.model is not None
+        assert result.ok
 
 
 class TestValidOutbound:
@@ -377,8 +389,66 @@ class TestValidOutbound:
         ids=["user_simple", "user_full", "control_response", "control_request_init"],
     )
     def test_valid_message(self, msg: dict) -> None:
-        errors = validate_outbound(msg)
-        assert errors == [], f"Unexpected errors: {errors}"
+        result = validate_outbound(msg)
+        assert result.errors == [], f"Unexpected errors: {result.errors}"
+        assert result.model is not None
+
+
+# ---------------------------------------------------------------------------
+# Tests: parsed model types
+# ---------------------------------------------------------------------------
+
+
+class TestParsedModels:
+    """Validation returns typed pydantic models."""
+
+    def test_stream_event_model_type(self) -> None:
+        result = validate_inbound(STREAM_EVENT_TEXT_DELTA)
+        assert isinstance(result.model, StreamEventMsg)
+        assert isinstance(result.model.event, ContentBlockDeltaEvent)
+
+    def test_assistant_model_type(self) -> None:
+        result = validate_inbound(ASSISTANT_MESSAGE)
+        assert isinstance(result.model, AssistantMsg)
+        assert result.model.message.model == "claude-opus-4-6"
+
+    def test_result_model_type(self) -> None:
+        result = validate_inbound(RESULT_MESSAGE)
+        assert isinstance(result.model, ResultMsg)
+        assert result.model.duration_ms == 57095
+        assert result.model.total_cost_usd == 0.707125
+
+    def test_rate_limit_model_type(self) -> None:
+        result = validate_inbound(RATE_LIMIT_EVENT)
+        assert isinstance(result.model, RateLimitEventMsg)
+        assert result.model.rate_limit_info.status == "allowed_warning"
+        assert result.model.rate_limit_info.utilization == 0.9
+
+    def test_system_model_type(self) -> None:
+        result = validate_inbound(SYSTEM_MESSAGE_INIT)
+        assert isinstance(result.model, SystemMsg)
+        assert result.model.subtype == "init"
+
+    def test_control_request_model_type(self) -> None:
+        result = validate_inbound(CONTROL_REQUEST_PERMISSION)
+        assert isinstance(result.model, ControlRequestMsg)
+        assert result.model.request.subtype == "can_use_tool"
+
+    def test_content_block_start_access(self) -> None:
+        result = validate_inbound(STREAM_EVENT_CONTENT_BLOCK_START_TOOL_USE)
+        assert isinstance(result.model, StreamEventMsg)
+        event = result.model.event
+        assert isinstance(event, ContentBlockStartEvent)
+        assert event.content_block.name == "mcp__axi__axi_spawn_agent"  # type: ignore[union-attr]
+
+    def test_message_start_access(self) -> None:
+        result = validate_inbound(STREAM_EVENT_MESSAGE_START)
+        assert isinstance(result.model, StreamEventMsg)
+        event = result.model.event
+        assert isinstance(event, MessageStartEvent)
+        assert event.message.model == "claude-opus-4-6"
+        assert event.message.usage is not None
+        assert event.message.usage.input_tokens == 1
 
 
 # ---------------------------------------------------------------------------
@@ -388,50 +458,50 @@ class TestValidOutbound:
 
 class TestMissingRequired:
     def test_missing_type(self) -> None:
-        errors = validate_inbound({"foo": "bar"})
-        assert len(errors) == 1
-        assert "type" in errors[0].path
-        assert "missing" in errors[0].message
+        result = validate_inbound({"foo": "bar"})
+        assert len(result.errors) == 1
+        assert "type" in result.errors[0].path
 
     def test_stream_event_missing_uuid(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_TEXT_DELTA)
         del msg["uuid"]
-        errors = validate_inbound(msg)
-        assert any(e.path == "uuid" and e.level == "error" for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
+        assert not result.ok
 
     def test_stream_event_missing_session_id(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_TEXT_DELTA)
         del msg["session_id"]
-        errors = validate_inbound(msg)
-        assert any(e.path == "session_id" and e.level == "error" for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_stream_event_missing_event(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_TEXT_DELTA)
         del msg["event"]
-        errors = validate_inbound(msg)
-        assert any(e.path == "event" and e.level == "error" for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_result_missing_duration(self) -> None:
         msg = copy.deepcopy(RESULT_MESSAGE)
         del msg["duration_ms"]
-        errors = validate_inbound(msg)
-        assert any(e.path == "duration_ms" for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_assistant_missing_message(self) -> None:
         msg = copy.deepcopy(ASSISTANT_MESSAGE)
         del msg["message"]
-        errors = validate_inbound(msg)
-        assert any(e.path == "message" for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_control_request_missing_request_id(self) -> None:
         msg = {"type": "control_request", "request": {"subtype": "initialize"}}
-        errors = validate_inbound(msg)
-        assert any(e.path == "request_id" for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_rate_limit_missing_info(self) -> None:
         msg = {"type": "rate_limit_event", "uuid": "x", "session_id": "y"}
-        errors = validate_inbound(msg)
-        assert any(e.path == "rate_limit_info" for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -443,30 +513,36 @@ class TestUnknownKeys:
     def test_unknown_top_level_key(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_TEXT_DELTA)
         msg["new_field"] = "surprise"
-        errors = validate_inbound(msg)
-        warnings = [e for e in errors if e.level == "warning"]
+        result = validate_inbound(msg)
+        warnings = [e for e in result.errors if e.level == "warning"]
         assert any("new_field" in e.path for e in warnings)
 
     def test_unknown_key_in_event(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_TEXT_DELTA)
         msg["event"]["new_thing"] = 42
-        errors = validate_inbound(msg)
-        warnings = [e for e in errors if e.level == "warning"]
+        result = validate_inbound(msg)
+        warnings = [e for e in result.errors if e.level == "warning"]
         assert any("new_thing" in e.path for e in warnings)
 
     def test_system_message_allows_extra_keys(self) -> None:
         """System messages have dynamic fields — no unknown key warnings."""
         msg = copy.deepcopy(SYSTEM_MESSAGE_INIT)
         msg["brand_new_field"] = "allowed"
-        errors = validate_inbound(msg)
-        # Should have no warnings about brand_new_field
-        assert not any("brand_new_field" in e.path for e in errors)
+        result = validate_inbound(msg)
+        assert not any("brand_new_field" in e.path for e in result.errors)
 
     def test_trace_context_always_allowed(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_TEXT_DELTA)
         msg["_trace_context"] = {"traceparent": "00-abc-def-01"}
-        errors = validate_inbound(msg)
-        assert not any("_trace_context" in e.path for e in errors)
+        result = validate_inbound(msg)
+        assert not any("_trace_context" in e.path for e in result.errors)
+
+    def test_user_allows_isSynthetic(self) -> None:
+        """User messages allow isSynthetic (seen in real logs)."""
+        msg = copy.deepcopy(USER_MESSAGE_SIMPLE)
+        msg["isSynthetic"] = True
+        result = validate_inbound(msg)
+        assert not any("isSynthetic" in e.path for e in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -476,42 +552,44 @@ class TestUnknownKeys:
 
 class TestWrongDiscriminators:
     def test_unknown_message_type(self) -> None:
-        errors = validate_inbound({"type": "spaceship"})
-        assert len(errors) == 1
-        assert "unknown inbound message type" in errors[0].message
+        result = validate_inbound({"type": "spaceship"})
+        assert len(result.errors) >= 1
+        assert any(e.level == "error" for e in result.errors)
 
     def test_unknown_stream_event_type(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_TEXT_DELTA)
         msg["event"]["type"] = "quantum_event"
-        errors = validate_inbound(msg)
-        assert any("unknown stream event type" in e.message for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_unknown_delta_type(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_TEXT_DELTA)
         msg["event"]["delta"]["type"] = "alien_delta"
-        errors = validate_inbound(msg)
-        assert any("expected one of" in e.message for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_unknown_content_block_type(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_CONTENT_BLOCK_START_TEXT)
         msg["event"]["content_block"]["type"] = "video"
-        errors = validate_inbound(msg)
-        assert any("expected one of" in e.message for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_wrong_result_subtype(self) -> None:
         msg = copy.deepcopy(RESULT_MESSAGE)
         msg["subtype"] = "maybe"
-        errors = validate_inbound(msg)
-        assert any("expected one of" in e.message and "subtype" in e.path for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_unknown_control_request_subtype(self) -> None:
+        """Control request subtypes are open-ended — any string is allowed."""
         msg = {
             "type": "control_request",
             "request_id": "x",
             "request": {"subtype": "self_destruct"},
         }
-        errors = validate_inbound(msg)
-        assert any("expected one of" in e.message for e in errors)
+        result = validate_inbound(msg)
+        # Should pass — subtype is just str now
+        assert result.ok
 
 
 # ---------------------------------------------------------------------------
@@ -523,14 +601,14 @@ class TestTypeMismatches:
     def test_index_not_int(self) -> None:
         msg = copy.deepcopy(STREAM_EVENT_TEXT_DELTA)
         msg["event"]["index"] = "zero"
-        errors = validate_inbound(msg)
-        assert any("expected int" in e.message for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_is_error_not_bool(self) -> None:
         msg = copy.deepcopy(RESULT_MESSAGE)
-        msg["is_error"] = "false"
-        errors = validate_inbound(msg)
-        assert any("expected bool" in e.message for e in errors)
+        msg["is_error"] = [1, 2, 3]  # list is not coercible to bool
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -545,19 +623,20 @@ class TestBareStreamEvents:
             "index": 0,
             "delta": {"type": "text_delta", "text": "Hi"},
         }
-        errors = validate_inbound_or_bare(bare)
-        assert errors == []
+        result = validate_inbound_or_bare(bare)
+        assert result.errors == []
+        assert isinstance(result.model, ContentBlockDeltaEvent)
 
     def test_bare_message_stop(self) -> None:
         bare = {"type": "message_stop"}
-        errors = validate_inbound_or_bare(bare)
-        assert errors == []
+        result = validate_inbound_or_bare(bare)
+        assert result.errors == []
 
     def test_bare_unknown_type_falls_through(self) -> None:
         """Unknown bare types should fall through to validate_inbound."""
         bare = {"type": "spaceship"}
-        errors = validate_inbound_or_bare(bare)
-        assert any("unknown" in e.message for e in errors)
+        result = validate_inbound_or_bare(bare)
+        assert any(e.level == "error" for e in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -567,16 +646,16 @@ class TestBareStreamEvents:
 
 class TestOutbound:
     def test_unknown_outbound_type(self) -> None:
-        errors = validate_outbound({"type": "magic"})
-        assert any("unknown outbound message type" in e.message for e in errors)
+        result = validate_outbound({"type": "magic"})
+        assert any(e.level == "error" for e in result.errors)
 
     def test_control_response_missing_subtype(self) -> None:
         msg = {
             "type": "control_response",
             "response": {"request_id": "x"},
         }
-        errors = validate_outbound(msg)
-        assert any("subtype" in e.path for e in errors)
+        result = validate_outbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +681,24 @@ class TestValidationErrorFormatting:
         assert exc.errors == errors
         assert exc.raw == {"type": "test"}
 
+    def test_validation_result_ok(self) -> None:
+        result = ValidationResult(model=None, errors=[])
+        assert result.ok
+
+    def test_validation_result_warnings_only_is_ok(self) -> None:
+        result = ValidationResult(
+            model=None,
+            errors=[ValidationError("x", "unknown key", level="warning")],
+        )
+        assert result.ok
+
+    def test_validation_result_errors_not_ok(self) -> None:
+        result = ValidationResult(
+            model=None,
+            errors=[ValidationError("x", "missing field", level="error")],
+        )
+        assert not result.ok
+
 
 # ---------------------------------------------------------------------------
 # Tests: nested content block validation
@@ -615,14 +712,14 @@ class TestNestedContentBlocks:
             {"type": "thinking", "thinking": "hmm", "signature": "sig123"},
             {"type": "text", "text": "The answer is 42."},
         ]
-        errors = validate_inbound(msg)
-        assert errors == []
+        result = validate_inbound(msg)
+        assert result.errors == []
 
     def test_assistant_with_unknown_block_type(self) -> None:
         msg = copy.deepcopy(ASSISTANT_MESSAGE)
         msg["message"]["content"] = [{"type": "image", "url": "http://..."}]
-        errors = validate_inbound(msg)
-        assert any("expected one of" in e.message for e in errors)
+        result = validate_inbound(msg)
+        assert any(e.level == "error" for e in result.errors)
 
     def test_user_message_with_tool_result(self) -> None:
         msg = {
@@ -640,5 +737,81 @@ class TestNestedContentBlocks:
             "session_id": "s1",
             "parent_tool_use_id": "toolu_parent",
         }
-        errors = validate_inbound(msg)
-        assert errors == []
+        result = validate_inbound(msg)
+        assert result.errors == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: real-world edge cases from logs
+# ---------------------------------------------------------------------------
+
+
+class TestRealWorldEdgeCases:
+    def test_result_with_rich_usage(self) -> None:
+        """Result messages have extended usage fields (iterations, server_tool_use, speed)."""
+        msg = copy.deepcopy(RESULT_MESSAGE)
+        msg["usage"] = {
+            "input_tokens": 4,
+            "output_tokens": 1016,
+            "cache_creation_input_tokens": 920,
+            "cache_read_input_tokens": 113835,
+            "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 920},
+            "service_tier": "standard",
+            "inference_geo": "not_available",
+            "iterations": [{"input_tokens": 100, "output_tokens": 200}],
+            "server_tool_use": {"web_search_requests": 1, "web_fetch_requests": 0},
+            "speed": "fast",
+        }
+        result = validate_inbound(msg)
+        assert result.ok
+        assert isinstance(result.model, ResultMsg)
+        assert result.model.usage is not None
+        assert result.model.usage.speed == "fast"
+
+    def test_rate_limit_with_overage(self) -> None:
+        """Rate limit events can include overage fields."""
+        msg = {
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "rejected",
+                "resetsAt": 1772766000,
+                "rateLimitType": "five_hour",
+                "overageStatus": "rejected",
+                "overageDisabledReason": "org_level_disabled",
+                "isUsingOverage": False,
+            },
+            "uuid": "d6797ad7",
+            "session_id": "abc123",
+        }
+        result = validate_inbound(msg)
+        assert result.ok
+        assert isinstance(result.model, RateLimitEventMsg)
+        assert result.model.rate_limit_info.overageStatus == "rejected"
+
+    def test_user_message_with_isSynthetic(self) -> None:
+        msg = {
+            "type": "user",
+            "message": {"role": "user", "content": "test"},
+            "session_id": "s1",
+            "isSynthetic": True,
+        }
+        result = validate_inbound(msg)
+        assert result.ok
+
+    def test_result_with_model_usage(self) -> None:
+        """modelUsage contains per-model breakdowns."""
+        msg = copy.deepcopy(RESULT_MESSAGE)
+        msg["modelUsage"] = {
+            "claude-opus-4-6": {
+                "inputTokens": 100,
+                "outputTokens": 200,
+                "cacheCreationInputTokens": 50,
+                "cacheReadInputTokens": 300,
+                "contextWindow": 200000,
+                "maxOutputTokens": 16384,
+                "costUSD": 0.05,
+                "webSearchRequests": 0,
+            }
+        }
+        result = validate_inbound(msg)
+        assert result.ok

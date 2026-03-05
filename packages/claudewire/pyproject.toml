@@ -5,6 +5,7 @@ description = "Claude CLI stream-json protocol wrapper"
 requires-python = ">=3.12"
 dependencies = [
     "opentelemetry-api>=1.20",
+    "pydantic>=2.0",
 ]
 
 [build-system]
