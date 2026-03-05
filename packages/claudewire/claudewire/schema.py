@@ -415,6 +415,8 @@ _RATE_LIMIT_INFO_SCHEMA: Schema = {
     "utilization": (False, (int, float), None),
     "isUsingOverage": (False, bool, None),
     "surpassedThreshold": (False, (int, float), None),
+    "overageStatus": (False, str, None),
+    "overageDisabledReason": (False, str, None),
 }
 
 
