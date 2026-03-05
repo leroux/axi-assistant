@@ -287,6 +287,9 @@ Rate limit status update, typically after each API call.
 }
 ```
 
+**Rate limit windows are reported separately.** Each event carries a single `rateLimitType` — either `"five_hour"` or `"seven_day"` (or `null`). They are not combined into one event. A given API call may emit one event for `five_hour`, one for `seven_day`, both, or neither. To track utilization across both windows, keep the most recent event per `rateLimitType`.
+```
+
 ## Message Types — Outbound (Host → CLI)
 
 ### `user`
