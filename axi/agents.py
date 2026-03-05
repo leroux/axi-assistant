@@ -211,14 +211,20 @@ def _build_mcp_servers(
     return servers
 
 
-def _save_agent_config(agent_name: str, mcp_server_names: list[str] | None) -> None:
-    """Persist per-agent config (MCP server selections) to disk."""
+def _save_agent_config(
+    agent_name: str,
+    mcp_server_names: list[str] | None,
+    packs: list[str] | None = None,
+) -> None:
+    """Persist per-agent config (MCP servers, packs) to disk."""
     config_dir = os.path.join(config.AXI_USER_DATA, "agents", agent_name)
     os.makedirs(config_dir, exist_ok=True)
     config_path = os.path.join(config_dir, "agent_config.json")
     data: dict[str, Any] = {}
     if mcp_server_names:
         data["mcp_servers"] = mcp_server_names
+    if packs is not None:
+        data["packs"] = packs
     try:
         with open(config_path, "w") as f:
             json.dump(data, f, indent=2)
@@ -1307,8 +1313,9 @@ async def reconstruct_agents_from_channels() -> int:
                 log.debug("No cwd in topic for channel #%s, skipping", agent_name)
                 continue
 
-            prompt = make_spawned_agent_system_prompt(cwd)
             agent_cfg = _load_agent_config(agent_name)
+            saved_packs = agent_cfg.get("packs")  # None = use defaults
+            prompt = make_spawned_agent_system_prompt(cwd, packs=saved_packs)
             mcp_names = agent_cfg.get("mcp_servers") or None
             extra_mcp = config.load_mcp_servers(mcp_names) if mcp_names else None
             mcp_servers = _build_mcp_servers(agent_name, cwd, extra_mcp_servers=extra_mcp)
@@ -2496,9 +2503,9 @@ async def spawn_agent(
         )
         discord_state(session).channel_id = channel.id
 
-        # Persist custom MCP server selections for restart reconstruction
-        if mcp_names:
-            _save_agent_config(name, mcp_names)
+        # Persist agent config (MCP servers, packs) for restart reconstruction
+        if mcp_names or packs is not None:
+            _save_agent_config(name, mcp_names, packs=packs)
 
         agents[name] = session
         channel_to_agent[channel.id] = name
