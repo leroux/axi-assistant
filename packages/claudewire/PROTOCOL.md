@@ -422,11 +422,13 @@ Key ordering rules:
 
 ## Dual Emission (stream_event + bare)
 
-Every inner stream event is emitted twice:
+The CLI emits every inner stream event twice on stdout:
 1. As `stream_event` with `uuid`, `session_id`, `parent_tool_use_id` envelope
-2. As a bare event (same `type` as the inner event, no envelope)
+2. Immediately followed by the same event bare (e.g. `{"type": "content_block_delta", ...}` with no envelope)
 
-This is an artifact of the procmux buffer replay path. The `validate_inbound_or_bare()` function handles both forms.
+This is **CLI behavior**, not added by procmux or claudewire — the SDK's own `SubprocessCLITransport` sees the same duplication. The bare events are presumably for backward compatibility with consumers that don't understand the `stream_event` wrapper.
+
+The SDK's `parse_message()` only recognizes the wrapped `stream_event` form. Bare events hit the unknown-type path and raise `MessageParseError`. In claudewire, `validate_inbound_or_bare()` handles both forms, but the bare duplicates are redundant in normal operation — they carry the same data as the wrapped version.
 
 ## MCP Handshake
 
@@ -495,9 +497,9 @@ wire format.
 | `_trace_context` field on outbound messages | `transport.py` | OTel distributed tracing injection. Injected by `BridgeTransport.write()` before sending to CLI stdin. Stripped by `schema.py` before validation. Not part of the protocol — just piggybacks on the JSON payload. |
 | Reconnect initialize interception | `transport.py` | When `reconnecting=True`, `BridgeTransport.write()` intercepts outbound `control_request.initialize` and synthesizes a fake `control_response.success` locally instead of forwarding to the CLI. The CLI is already initialized — this satisfies the SDK's handshake without confusing the running process. |
 | Schema validation (warnings for unknown keys) | `schema.py` | Pydantic validation runs on every inbound and outbound message. Unknown keys produce warnings (not errors) so new upstream fields don't break us. This is purely our layer — the CLI has no awareness of it. |
-| `validate_inbound_or_bare()` | `schema.py` | Handles the dual emission by accepting both `stream_event`-wrapped and bare stream events. This exists because procmux's buffer replay can deliver bare events that arrived while the client was disconnected. |
+| `validate_inbound_or_bare()` | `schema.py` | Handles the CLI's dual emission by accepting both `stream_event`-wrapped and bare stream events. The CLI emits both forms on stdout — the SDK's `parse_message()` only handles wrapped, so bare events need separate handling. |
 | Bridge-stdio logging | `transport.py` | Optional `stdio_logger` logs all stdin/stdout traffic for debugging. The `bridge-stdio-*.log` files that informed this document are produced by this logger. |
-| procmux buffer replay | `procmux/` | When the bot reconnects after a restart, procmux replays buffered stdout messages. These replayed messages are identical to the originals — procmux adds nothing to the payload. But the replay path means bare events (without the `stream_event` wrapper) can arrive at the claudewire layer. |
+| procmux buffer replay | `procmux/` | When the bot reconnects after a restart, procmux replays buffered stdout messages. These replayed messages are identical to the originals — procmux adds nothing to the payload. |
 
 ### Summary
 
@@ -526,6 +528,6 @@ wire format.
 │  BridgeTransport: SDK transport interface             │
 │  Adds: _trace_context injection, reconnect intercept  │
 │  Adds: schema validation, bridge-stdio logging        │
-│  Handles: bare event validation (procmux replay)      │
+│  Handles: bare event validation (CLI dual emission)    │
 └──────────────────────────────────────────────────────┘
 ```
