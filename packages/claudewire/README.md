@@ -4,7 +4,9 @@ Claude CLI stream-json protocol wrapper. Backend-agnostic — no dependency on p
 
 ## Why claudewire exists
 
-The `claude-agent-sdk` provides a `Transport` ABC and a built-in `SubprocessCLITransport`, but it has significant gaps for production use:
+Claude Pro/Max subscriptions are licensed exclusively for use through Claude Code. You can't use a subscription API key to call the Anthropic API directly for arbitrary applications — but you *can* build on top of Claude Code itself. claudewire makes this viable by turning the Claude Code CLI into a programmable backend: any application (Discord bot, web UI, Slack integration) can drive Claude Code sessions through the stream-json protocol while staying within subscription terms.
+
+Beyond the licensing angle, the `claude-agent-sdk` provides a `Transport` ABC and a built-in `SubprocessCLITransport`, but it has significant gaps for production use:
 
 - **No process reuse.** The SDK always spawns a new CLI process. There's no way to reconnect to an existing process after a host restart — claudewire's `BridgeTransport` handles reconnection by intercepting the initialize handshake and faking a success response.
 - **No pluggable process backends.** The SDK's transport is hardcoded to local subprocesses. claudewire defines a `ProcessConnection` protocol that any backend can implement (local PTY, procmux over Unix socket, SSH, etc.).
