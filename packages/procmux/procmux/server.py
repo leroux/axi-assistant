@@ -133,7 +133,20 @@ class ProcmuxServer:
             await self._kill_process(mp)
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
+            # Force-close the client writer so _handle_client exits promptly
+            async with self._client_lock:
+                writer = self._client_writer
+                self._client_writer = None
+            if writer is not None:
+                try:
+                    writer.close()
+                    await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                except Exception:
+                    pass
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), timeout=3.0)
+            except TimeoutError:
+                log.warning("wait_closed() timed out — proceeding with shutdown")
         if os.path.exists(self._socket_path):
             os.unlink(self._socket_path)
         log.info("Procmux shutdown complete")

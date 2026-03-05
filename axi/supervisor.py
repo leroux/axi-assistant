@@ -70,12 +70,12 @@ def _hup_handler(signum: int, _frame: FrameType | None) -> None:
 
 
 def _kill_bridge():
-    """Find and kill the bridge process via its socket path in the cgroup."""
+    """Find and kill the bridge process, waiting for it to actually exit."""
     sock_path = DIR / BRIDGE_SOCKET
-    # Find bridge PID by looking for the process with our socket path in cmdline
+    killed_pids: list[int] = []
     try:
         result = subprocess.run(
-            ["pgrep", "-f", f"bridge.*{sock_path}"],
+            ["pgrep", "-f", str(sock_path)],
             capture_output=True,
             text=True,
         )
@@ -84,19 +84,48 @@ def _kill_bridge():
             pid = int(pid_str)
             if pid == os.getpid():
                 continue
-            log.info("Killing bridge process (pid=%d)", pid)
+            log.info("Sending SIGTERM to bridge process (pid=%d)", pid)
             try:
                 os.kill(pid, signal.SIGTERM)
+                killed_pids.append(pid)
             except ProcessLookupError:
                 pass
     except Exception as e:
         log.warning("Failed to find/kill bridge: %s", e)
+
+    # Wait up to 5s for bridge to die, then SIGKILL
+    if killed_pids:
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            alive = [p for p in killed_pids if _pid_alive(p)]
+            if not alive:
+                break
+            time.sleep(0.1)
+        else:
+            alive = [p for p in killed_pids if _pid_alive(p)]
+
+        for pid in alive:
+            log.warning("Bridge process (pid=%d) did not exit after SIGTERM, sending SIGKILL", pid)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
     # Clean up stale socket
     if sock_path.exists():
         try:
             sock_path.unlink()
         except OSError:
             pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """Check if a process is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
 
 
 def ensure_default_files():
