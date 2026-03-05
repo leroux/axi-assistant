@@ -426,8 +426,8 @@ async def send_to_exceptions(message: str) -> bool:
 from discordquery import split_message
 
 
-async def send_long(channel: TextChannel, text: str) -> None:
-    """Send a potentially long message, splitting as needed."""
+async def send_long(channel: TextChannel, text: str) -> discord.Message | None:
+    """Send a potentially long message, splitting as needed. Returns the last sent message."""
     span = _tracer.start_span(
         "discord.send_long",
         attributes={"discord.channel": getattr(channel, "name", "?"), "message.length": len(text)},
@@ -435,6 +435,7 @@ async def send_long(channel: TextChannel, text: str) -> None:
     chunks = split_message(text.strip())
     span.set_attribute("message.chunks", len(chunks))
     span.end()
+    last_msg: discord.Message | None = None
     for i, chunk in enumerate(chunks):
         if chunk:
             if log.isEnabledFor(logging.INFO):
@@ -449,7 +450,7 @@ async def send_long(channel: TextChannel, text: str) -> None:
                     chunk[:80],
                 )
             try:
-                await channel.send(chunk)
+                last_msg = await channel.send(chunk)
             except discord.NotFound:
                 agent_name = channel_to_agent.get(channel.id)
                 if agent_name:
@@ -458,9 +459,10 @@ async def send_long(channel: TextChannel, text: str) -> None:
                     new_ch = await ensure_agent_channel(agent_name, cwd=session.cwd if session else None)
                     if session:
                         discord_state(session).channel_id = new_ch.id
-                    await new_ch.send(chunk)
+                    last_msg = await new_ch.send(chunk)
                 else:
                     raise
+    return last_msg
 
 
 async def send_system(channel: TextChannel, text: str) -> None:
@@ -1467,6 +1469,9 @@ class _StreamCtx:
         "hit_rate_limit",
         "hit_transient_error",
         "in_flowchart",
+        "last_flushed_channel_id",
+        "last_flushed_content",
+        "last_flushed_msg_id",
         "live_edit",
         "msg_total",
         "text_buffer",
@@ -1487,6 +1492,9 @@ class _StreamCtx:
         self.in_flowchart: bool = False  # True during flowchart execution (protects session_id)
         self.live_edit: _LiveEditState | None = live_edit  # Set when STREAMING_DISCORD is enabled
         self.thinking_message: discord.Message | None = None  # Temporary "thinking..." indicator
+        self.last_flushed_msg_id: str | None = None  # ID of the last Discord message sent/edited
+        self.last_flushed_channel_id: int | None = None
+        self.last_flushed_content: str = ""  # Content of the last flushed message
 
 
 async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChannel, reason: str = "?") -> None:
@@ -1514,7 +1522,11 @@ async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChann
         # Streaming mode: finalize the current live-edit message(s)
         await _live_edit_finalize(ctx, session)
     else:
-        await send_long(channel, text.lstrip())
+        last_msg = await send_long(channel, text.lstrip())
+        if last_msg is not None:
+            ctx.last_flushed_msg_id = str(last_msg.id)
+            ctx.last_flushed_channel_id = channel.id
+            ctx.last_flushed_content = last_msg.content
 
 
 # ---------------------------------------------------------------------------
@@ -1622,16 +1634,25 @@ async def _live_edit_finalize(ctx: _StreamCtx, session: AgentSession) -> None:
         chunks = split_message(text)
         if len(chunks) == 1:
             await _live_edit_update(le, chunks[0], session)
+            ctx.last_flushed_msg_id = le.message_id
+            ctx.last_flushed_channel_id = le.channel_id
+            ctx.last_flushed_content = chunks[0]
         else:
             # First chunk goes into the existing message
             await _live_edit_update(le, chunks[0], session)
             # Remaining chunks are new messages
             for chunk in chunks[1:]:
-                await config.discord_client.send_message(le.channel_id, chunk)
+                resp = await config.discord_client.send_message(le.channel_id, chunk)
+                ctx.last_flushed_msg_id = resp["id"]
+                ctx.last_flushed_channel_id = le.channel_id
+                ctx.last_flushed_content = chunk
     elif le.message_id is None and text:
         # Never posted — just send normally
         for chunk in split_message(text):
-            await config.discord_client.send_message(le.channel_id, chunk)
+            resp = await config.discord_client.send_message(le.channel_id, chunk)
+            ctx.last_flushed_msg_id = resp["id"]
+            ctx.last_flushed_channel_id = le.channel_id
+            ctx.last_flushed_content = chunk
 
     # Reset for next text block
     le.message_id = None
@@ -2040,12 +2061,28 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         await sleep_agent(session, force=True)
         return None
 
-    # Append response timing to the last chunk
+    # Append response timing inline to the last message
     if session.activity.query_started and (ctx.flush_count > 0 or ctx.text_buffer.strip()):
         elapsed = (datetime.now(UTC) - session.activity.query_started).total_seconds()
-        ctx.text_buffer += f"\n-# {elapsed:.1f}s"
+        timing_suffix = f"\n-# {elapsed:.1f}s"
 
-    await _flush_text(ctx, session, channel, "post_loop")
+        if ctx.text_buffer.strip():
+            # Buffer has content — append inline and flush normally
+            ctx.text_buffer += timing_suffix
+            await _flush_text(ctx, session, channel, "post_loop")
+        elif ctx.last_flushed_msg_id is not None and ctx.last_flushed_channel_id is not None:
+            # Buffer empty but we have a previous message — edit it to append timing
+            new_content = ctx.last_flushed_content + timing_suffix
+            try:
+                await config.discord_client.edit_message(
+                    ctx.last_flushed_channel_id, ctx.last_flushed_msg_id, new_content
+                )
+            except Exception:
+                log.warning("Failed to edit last message to append timing", exc_info=True)
+                # Fall back to sending as separate message
+                await channel.send(f"-# {elapsed:.1f}s")
+    else:
+        await _flush_text(ctx, session, channel, "post_loop")
     log.info("STREAM_END[%s] result=ok msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
 
     if config.SHOW_AWAITING_INPUT:
