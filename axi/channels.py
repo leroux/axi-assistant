@@ -298,6 +298,13 @@ async def ensure_agent_channel(agent_name: str, cwd: str | None = None) -> TextC
                 log.info("Moved channel #%s from Killed to %s", normalized, target_name)
                 return ch
 
+    # Search uncategorized guild channels (e.g., master pinned to server top)
+    if target_guild is not None:
+        for ch in target_guild.text_channels:
+            if ch.name == normalized and ch.category is None:
+                _channel_to_agent[ch.id] = agent_name
+                return ch
+
     # Create new channel in target category
     already_guarded = normalized in bot_creating_channels
     bot_creating_channels.add(normalized)
@@ -365,20 +372,32 @@ async def deduplicate_master_channel() -> None:
     Called once during startup before ensure_agent_channel() for master.
     """
     normalized = normalize_channel_name(config.MASTER_AGENT_NAME)
-    master_channels: list[TextChannel] = [
-        ch
-        for cat in (axi_category, active_category, killed_category)
-        if cat is not None
-        for ch in cat.text_channels
-        if ch.name == normalized
-    ]
+    seen_ids: set[int] = set()
+    master_channels: list[TextChannel] = []
+    for cat in (axi_category, active_category, killed_category):
+        if cat is None:
+            continue
+        for ch in cat.text_channels:
+            if ch.name == normalized and ch.id not in seen_ids:
+                master_channels.append(ch)
+                seen_ids.add(ch.id)
+    # Also check uncategorized channels (master pinned to server top)
+    if target_guild is not None:
+        for ch in target_guild.text_channels:
+            if ch.name == normalized and ch.category is None and ch.id not in seen_ids:
+                master_channels.append(ch)
+                seen_ids.add(ch.id)
 
     if len(master_channels) <= 1:
         return
 
-    # Prefer the one already in Axi category
+    # Prefer the uncategorized one at the top, then one in Axi category
     keep: TextChannel | None = None
-    if axi_category:
+    for ch in master_channels:
+        if ch.category is None:
+            keep = ch
+            break
+    if keep is None and axi_category:
         for ch in master_channels:
             if ch.category_id == axi_category.id:
                 keep = ch
@@ -402,3 +421,38 @@ async def deduplicate_master_channel() -> None:
 async def get_master_channel() -> TextChannel | None:
     """Get the axi-master channel."""
     return await get_agent_channel(config.MASTER_AGENT_NAME)
+
+
+async def ensure_master_channel_position() -> None:
+    """Ensure #axi-master is at position 0 with no category (top of server).
+
+    Uses the Discord REST API (PATCH /guilds/{guild_id}/channels) to move
+    the master channel above all categories and other channels.
+    """
+    if target_guild is None:
+        return
+
+    normalized = normalize_channel_name(config.MASTER_AGENT_NAME)
+    master_ch: TextChannel | None = None
+    for ch in target_guild.text_channels:
+        if ch.name == normalized:
+            master_ch = ch
+            break
+
+    if master_ch is None:
+        return
+
+    # Already at position 0 with no category — nothing to do
+    if master_ch.position == 0 and master_ch.category_id is None:
+        log.debug("#%s already at position 0, no category", normalized)
+        return
+
+    try:
+        await config.discord_client.request(
+            "PATCH",
+            f"/guilds/{config.DISCORD_GUILD_ID}/channels",
+            json=[{"id": str(master_ch.id), "position": 0, "parent_id": None}],
+        )
+        log.info("Moved #%s to position 0 (top of server, no category)", normalized)
+    except Exception as e:
+        log.warning("Failed to move #%s to top: %s", normalized, e)

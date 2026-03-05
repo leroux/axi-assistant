@@ -1842,6 +1842,13 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel) -> None:
     elif channels.active_category and channel.category_id == channels.active_category.id:
         await _handle_active_channel_create(channel)
 
+    # Ensure master stays at top after any channel creation
+    if _startup_complete:
+        try:
+            await channels.ensure_master_channel_position()
+        except Exception:
+            log.exception("Failed to re-enforce master channel position after channel create")
+
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
@@ -1865,6 +1872,22 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
             log.exception("Error sleeping agent '%s' during channel deletion", agent_name)
 
     log.info("Channel #%s deleted — agent '%s' cleaned up (cwd=%s)", channel.name, agent_name, session.cwd)
+
+
+@bot.event
+async def on_guild_channel_update(before: discord.abc.GuildChannel, after: discord.abc.GuildChannel) -> None:
+    """Re-enforce #axi-master position when channels are reordered."""
+    if not _startup_complete:
+        return
+    if after.guild.id != config.DISCORD_GUILD_ID:
+        return
+    # Only care about position or category changes
+    if before.position == after.position and getattr(before, "category_id", None) == getattr(after, "category_id", None):
+        return
+    try:
+        await channels.ensure_master_channel_position()
+    except Exception:
+        log.exception("Failed to re-enforce master channel position")
 
 
 # ---------------------------------------------------------------------------
@@ -2028,6 +2051,11 @@ async def _setup_guild_infrastructure(master_session: AgentSession) -> None:
         await sync_readme_channel()
     except Exception:
         log.exception("Failed to sync readme channel")
+
+    try:
+        await channels.ensure_master_channel_position()
+    except Exception:
+        log.exception("Failed to ensure master channel position")
 
     try:
         await agents.reconstruct_agents_from_channels()
