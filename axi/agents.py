@@ -888,7 +888,7 @@ def load_todo_items(agent_name: str) -> list[dict[str, Any]]:
 
 
 async def _post_todo_list(session: AgentSession, tool_input: dict[str, Any]) -> None:
-    """Post or update the todo list display in Discord."""
+    """Post the updated todo list as a new message in Discord."""
     todos = tool_input.get("todos", [])
     ds = discord_state(session)
     ds.todo_items = todos
@@ -899,20 +899,7 @@ async def _post_todo_list(session: AgentSession, tool_input: dict[str, Any]) -> 
         return
 
     try:
-        if ds.todo_message_id is not None:
-            # Edit existing message
-            await config.discord_client.edit_message(channel_id, ds.todo_message_id, body)
-        else:
-            # Create new message
-            msg = await config.discord_client.send_message(channel_id, body)
-            msg_id = msg.get("id")
-            if msg_id is not None:
-                discord_state(session).todo_message_id = int(msg_id)
-                # Persist the new message ID
-                if session.name == config.MASTER_AGENT_NAME:
-                    _save_master_session(session)
-                else:
-                    _update_channel_topic(session)
+        await config.discord_client.send_message(channel_id, body)
     except Exception:
         log.exception("Failed to post todo list for agent '%s'", session.name)
 
@@ -1241,7 +1228,7 @@ async def reconstruct_agents_from_channels() -> int:
                 channel_to_agent[ch.id] = agent_name
                 continue
 
-            cwd, session_id, old_prompt_hash, todo_msg, agent_type = _parse_channel_topic(ch.topic)
+            cwd, session_id, old_prompt_hash, agent_type = _parse_channel_topic(ch.topic)
             if cwd is None:
                 log.debug("No cwd in topic for channel #%s, skipping", agent_name)
                 continue
@@ -1262,7 +1249,6 @@ async def reconstruct_agents_from_channels() -> int:
             ds = discord_state(session)
             ds.channel_id = ch.id
             ds.todo_items = load_todo_items(agent_name)
-            ds.todo_message_id = todo_msg
             agents[agent_name] = session
             channel_to_agent[ch.id] = agent_name
             reconstructed += 1
@@ -1298,7 +1284,6 @@ def _update_channel_topic(session: AgentSession, channel: TextChannel | None = N
         session.cwd,
         session.session_id,
         session.system_prompt_hash,
-        discord_state(session).todo_message_id,
         agent_type=session.agent_type,
     )
     if ch.topic != desired_topic:
@@ -1314,15 +1299,13 @@ def _update_channel_topic(session: AgentSession, channel: TextChannel | None = N
 
 
 def _save_master_session(session: AgentSession) -> None:
-    """Save master agent session metadata (session_id, prompt_hash, todo_message_id) to disk."""
+    """Save master agent session metadata (session_id, prompt_hash) to disk."""
     try:
         data: dict[str, Any] = {}
         if session.session_id:
             data["session_id"] = session.session_id
         if session.system_prompt_hash:
             data["prompt_hash"] = session.system_prompt_hash
-        if discord_state(session).todo_message_id is not None:
-            data["todo_message_id"] = discord_state(session).todo_message_id
         with open(config.MASTER_SESSION_PATH, "w") as f:
             json.dump(data, f)
         log.info("Saved master session data to %s", config.MASTER_SESSION_PATH)

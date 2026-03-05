@@ -158,45 +158,49 @@ class TestParseChannelTopic:
     """Tests for _parse_channel_topic — inverse of format_channel_topic."""
 
     def test_none_returns_nones(self) -> None:
-        assert _parse_channel_topic(None) == (None, None, None)
+        assert _parse_channel_topic(None) == (None, None, None, None)
 
     def test_empty_string_returns_nones(self) -> None:
-        assert _parse_channel_topic("") == (None, None, None)
+        assert _parse_channel_topic("") == (None, None, None, None)
 
     def test_cwd_only(self) -> None:
-        assert _parse_channel_topic("cwd: /home/user/project") == ("/home/user/project", None, None)
+        assert _parse_channel_topic("cwd: /home/user/project") == ("/home/user/project", None, None, None)
 
     def test_all_fields(self) -> None:
         topic = "cwd: /tmp | session: abc123 | prompt_hash: deadbeef"
-        assert _parse_channel_topic(topic) == ("/tmp", "abc123", "deadbeef")
+        assert _parse_channel_topic(topic) == ("/tmp", "abc123", "deadbeef", None)
 
     def test_roundtrip_cwd_only(self) -> None:
         topic = format_channel_topic("/home/user/project")
-        cwd, sid, ph = _parse_channel_topic(topic)
+        cwd, sid, ph, at = _parse_channel_topic(topic)
         assert cwd == "/home/user/project"
         assert sid is None
         assert ph is None
+        assert at is None
 
     def test_roundtrip_all_fields(self) -> None:
         topic = format_channel_topic("/tmp", session_id="sid-123", prompt_hash="abc123def456")
-        cwd, sid, ph = _parse_channel_topic(topic)
+        cwd, sid, ph, at = _parse_channel_topic(topic)
         assert cwd == "/tmp"
         assert sid == "sid-123"
         assert ph == "abc123def456"
+        assert at is None
 
     def test_unknown_keys_ignored(self) -> None:
         topic = "cwd: /tmp | unknown: value | session: sid"
-        cwd, sid, ph = _parse_channel_topic(topic)
+        cwd, sid, ph, at = _parse_channel_topic(topic)
         assert cwd == "/tmp"
         assert sid == "sid"
         assert ph is None
+        assert at is None
 
     def test_unstructured_topic(self) -> None:
         """Non-key-value topic like the master channel's."""
-        cwd, sid, ph = _parse_channel_topic("Axi master control channel")
+        cwd, sid, ph, at = _parse_channel_topic("Axi master control channel")
         assert cwd is None
         assert sid is None
         assert ph is None
+        assert at is None
 
 
 class TestParseRateLimitSeconds:
@@ -252,10 +256,11 @@ class TestChannelTopicRoundtrip:
     )
     def test_roundtrip(self, cwd: str, session_id: str | None, prompt_hash: str | None) -> None:
         topic = format_channel_topic(cwd, session_id=session_id, prompt_hash=prompt_hash)
-        parsed_cwd, parsed_sid, parsed_ph = _parse_channel_topic(topic)
+        parsed_cwd, parsed_sid, parsed_ph, parsed_at = _parse_channel_topic(topic)
         assert parsed_cwd == cwd
         assert parsed_sid == (session_id or None)
         assert parsed_ph == (prompt_hash or None)
+        assert parsed_at is None
 
 
 class TestSplitMessageProperties:

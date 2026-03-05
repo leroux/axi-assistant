@@ -96,7 +96,6 @@ class DiscordAgentState:
     question_data: dict[str, Any] | None = None
     question_message_id: int | None = None
     # Todo display
-    todo_message_id: int | None = None
     todo_items: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
     agent_log: logging.Logger | None = None
     last_failed_resume_id: str | None = None

@@ -1974,8 +1974,8 @@ async def sync_readme_channel() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _load_master_session_data() -> tuple[str | None, str | None, int | None]:
-    """Load master session_id, prompt_hash, and todo_message_id from disk."""
+def _load_master_session_data() -> tuple[str | None, str | None]:
+    """Load master session_id and prompt_hash from disk."""
     try:
         if os.path.isfile(config.MASTER_SESSION_PATH):
             with open(config.MASTER_SESSION_PATH) as f:
@@ -1985,20 +1985,18 @@ def _load_master_session_data() -> tuple[str | None, str | None, int | None]:
                     data = json.loads(raw)
                     resume_id = data.get("session_id")
                     prompt_hash = data.get("prompt_hash")
-                    todo_msg_id = data.get("todo_message_id")
                 else:
                     resume_id = raw
                     prompt_hash = None
-                    todo_msg_id = None
                 if resume_id:
                     log.info("Loaded master session_id from %s: %s (prompt_hash=%s)", config.MASTER_SESSION_PATH, resume_id[:8], prompt_hash)
-                return resume_id, prompt_hash, todo_msg_id
+                return resume_id, prompt_hash
     except (OSError, json.JSONDecodeError):
         log.warning("Failed to read master session data", exc_info=True)
-    return None, None, None
+    return None, None
 
 
-def _register_master_agent(resume_id: str | None, prompt_hash: str | None, todo_msg_id: int | None = None) -> AgentSession:
+def _register_master_agent(resume_id: str | None, prompt_hash: str | None) -> AgentSession:
     """Create and register the master AgentSession (sleeping)."""
     master_mcp: dict[str, Any] = {"axi": tools.axi_master_mcp_server}
     master_mcp["utils"] = tools.utils_mcp_server
@@ -2024,7 +2022,6 @@ def _register_master_agent(resume_id: str | None, prompt_hash: str | None, todo_
     )
     ds = discord_state(session)
     ds.todo_items = agents.load_todo_items(config.MASTER_AGENT_NAME)
-    ds.todo_message_id = todo_msg_id
     agents.agents[config.MASTER_AGENT_NAME] = session
     log.info("Master agent registered (sleeping, session_id=%s)", resume_id and resume_id[:8])
     return session
@@ -2233,8 +2230,8 @@ async def on_ready() -> None:
     agents.set_utils_mcp_server(tools.utils_mcp_server)
 
     with _tracer.start_as_current_span("on_ready.startup") as startup_span:
-        master_resume_id, master_old_prompt_hash, master_todo_msg = _load_master_session_data()
-        master_session = _register_master_agent(master_resume_id, master_old_prompt_hash, master_todo_msg)
+        master_resume_id, master_old_prompt_hash = _load_master_session_data()
+        master_session = _register_master_agent(master_resume_id, master_old_prompt_hash)
         await _setup_guild_infrastructure(master_session)
 
         _startup_t0 = time.monotonic()
