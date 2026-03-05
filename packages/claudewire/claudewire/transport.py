@@ -18,12 +18,20 @@ from typing import TYPE_CHECKING, Any
 from opentelemetry import trace
 from opentelemetry.propagate import inject
 
+from claudewire.schema import (
+    SchemaValidationError,
+    ValidationError,
+    validate_inbound_or_bare,
+    validate_outbound,
+)
 from claudewire.types import CommandResult, ExitEvent, StderrEvent, StdoutEvent
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from claudewire.types import ProcessConnection, ProcessEventQueue
+
+    ValidationCallback = Callable[[dict[str, Any], list[ValidationError]], Awaitable[None] | None]
 
 log = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
@@ -45,12 +53,14 @@ class BridgeTransport:
         reconnecting: bool = False,
         stderr_callback: Callable[[str], None] | None = None,
         stdio_logger: logging.Logger | None = None,
+        on_validation_error: ValidationCallback | None = None,
     ):
         self._name = name
         self._conn = conn
         self._reconnecting = reconnecting
         self._stderr_callback = stderr_callback
         self._stdio_logger = stdio_logger
+        self._on_validation_error = on_validation_error
         self._queue: ProcessEventQueue | None = None
         self._ready = False
         self._cli_exited = False
@@ -84,6 +94,22 @@ class BridgeTransport:
             raise RuntimeError(f"Subscribe failed for '{self._name}': {result}")
         return result
 
+    async def _handle_validation_errors(
+        self, msg: dict[str, Any], errors: list[ValidationError], direction: str
+    ) -> None:
+        """Log validation errors and invoke the callback if set."""
+        summary = "; ".join(str(e) for e in errors[:5])
+        log.warning("[%s][%s] schema validation %s: %s", direction, self._name, "errors" if errors else "ok", summary)
+        if SchemaValidationError is not None and any(e.level == "error" for e in errors):
+            from claudewire.schema import STRICT_MODE
+
+            if STRICT_MODE:
+                raise SchemaValidationError(errors, msg)
+        if self._on_validation_error:
+            result = self._on_validation_error(msg, errors)
+            if asyncio.iscoroutine(result):
+                await result
+
     async def write(self, data: str) -> None:
         """Write data to the CLI's stdin."""
         with _tracer.start_as_current_span(
@@ -114,6 +140,11 @@ class BridgeTransport:
                 self._reconnecting = False
                 return
 
+            # Validate outbound message
+            outbound_errors = validate_outbound(msg)
+            if outbound_errors:
+                await self._handle_validation_errors(msg, outbound_errors, "outbound")
+
             # Inject OTel trace context so downstream processes can link spans
             carrier: dict[str, str] = {}
             inject(carrier)
@@ -142,6 +173,10 @@ class BridgeTransport:
                 log.debug("[read][%s] yielding stdout type=%s", self._name, msg_type)
                 if self._stdio_logger:
                     self._stdio_logger.debug("<<< STDOUT %s", json.dumps(msg.data))
+                # Validate inbound message
+                inbound_errors = validate_inbound_or_bare(msg.data)
+                if inbound_errors:
+                    await self._handle_validation_errors(msg.data, inbound_errors, "inbound")
                 yield msg.data
             elif isinstance(msg, StderrEvent):
                 log.debug("[read][%s] stderr: %.200s", self._name, msg.text)

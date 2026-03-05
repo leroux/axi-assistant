@@ -30,6 +30,13 @@ from claudewire.permissions import (
     tool_allow_policy,
     tool_block_policy,
 )
+from claudewire.schema import (
+    SchemaValidationError,
+    ValidationError,
+    validate_inbound,
+    validate_inbound_or_bare,
+    validate_outbound,
+)
 from claudewire.session import disconnect_client, ensure_process_dead, get_subprocess_pid
 from claudewire.transport import BridgeTransport
 from claudewire.types import (
@@ -60,8 +67,10 @@ __all__ = [
     "ProcessEvent",
     "ProcessEventQueue",
     "RateLimitInfo",
+    "SchemaValidationError",
     "StderrEvent",
     "StdoutEvent",
+    "ValidationError",
     "allow_all",
     "as_stream",
     "build_cli_spawn_args",
@@ -76,4 +85,7 @@ __all__ = [
     "tool_allow_policy",
     "tool_block_policy",
     "update_activity",
+    "validate_inbound",
+    "validate_inbound_or_bare",
+    "validate_outbound",
 ]

@@ -1076,6 +1076,17 @@ def _reset_session_activity(session: AgentSession) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _schema_validation_callback(msg: dict[str, Any], errors: list[Any]) -> None:
+    """Report schema validation errors to #exceptions for visibility."""
+    error_strs = [str(e) for e in errors[:5]]
+    error_summary = "\n".join(error_strs)
+    preview = json.dumps(msg)[:400]
+    msg_type = msg.get("type", "?")
+    await send_to_exceptions(
+        f"\u26a0\ufe0f Schema validation ({msg_type}):\n{error_summary}\n```json\n{preview}\n```"
+    )
+
+
 async def create_transport(session: AgentSession, reconnecting: bool = False):
     """Create a transport for Claude Code agent (bridge or direct)."""
     if wire_conn and wire_conn.is_alive:
@@ -1085,6 +1096,7 @@ async def create_transport(session: AgentSession, reconnecting: bool = False):
             reconnecting=reconnecting,
             stderr_callback=make_stderr_callback(session),
             stdio_logger=get_stdio_logger(session.name, config.LOG_DIR),
+            on_validation_error=_schema_validation_callback,
         )
         await transport.connect()
         return transport
