@@ -298,6 +298,46 @@ async def axi_kill_agent(args: McpArgs) -> McpResult:
 
 
 @tool(
+    "axi_restart_agent",
+    "Restart a single agent's CLI process with a fresh system prompt. "
+    "Preserves session context (conversation history). The agent will pick up "
+    "any changes to SYSTEM_PROMPT.md, packs, or the core prompt on next wake.",
+    {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Name of the agent to restart"},
+        },
+        "required": ["name"],
+    },
+)
+async def axi_restart_agent(args: McpArgs) -> McpResult:
+    agent_name = args.get("name", "").strip()
+    set_agent_context(agent_name or "unknown")
+    set_trigger("mcp_tool", detail="axi_restart_agent")
+    _tracer.start_span("tool.axi_restart_agent", attributes={"agent.name": agent_name}).end()
+
+    if not agent_name:
+        return {"content": [{"type": "text", "text": "Error: 'name' is required."}], "is_error": True}
+    if agent_name == config.MASTER_AGENT_NAME:
+        return {
+            "content": [{"type": "text", "text": "Error: use axi_restart to restart the master agent."}],
+            "is_error": True,
+        }
+    if agent_name not in agents.agents:
+        return {"content": [{"type": "text", "text": f"Error: agent '{agent_name}' not found."}], "is_error": True}
+
+    session = await agents.restart_agent(agent_name)
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": f"Agent '{agent_name}' restarted. System prompt refreshed, session '{session.session_id or 'none'}' preserved.",
+            }
+        ]
+    }
+
+
+@tool(
     "axi_restart",
     "Restart the Axi bot. Waits for busy agents to finish first (graceful). "
     "Only use when the user explicitly asks you to restart.",
@@ -586,18 +626,18 @@ utils_mcp_server = create_sdk_mcp_server(
     tools=[get_date_and_time, discord_send_file],
 )
 
-# Spawned agents get spawn+kill only (no restart — they tell the parent to restart)
+# Spawned agents get spawn+kill+restart-agent (no bot restart — they tell the parent)
 axi_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent],
+    tools=[axi_spawn_agent, axi_kill_agent, axi_restart_agent],
 )
 
-# Master agent gets the full set including restart + send_message
+# Master agent gets the full set including bot restart + agent restart + send_message
 axi_master_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent, axi_restart, axi_send_message],
+    tools=[axi_spawn_agent, axi_kill_agent, axi_restart, axi_restart_agent, axi_send_message],
 )
 
 # Discord REST tools for cross-server messaging

@@ -1284,6 +1284,43 @@ async def reset_session(name: str, cwd: str | None = None) -> AgentSession:
     return new_session
 
 
+async def restart_agent(name: str) -> AgentSession:
+    """Restart an agent's CLI process with a fresh system prompt, preserving session context.
+
+    Sleeps the agent (disconnects the SDK client), rebuilds the system prompt
+    from scratch (picks up SYSTEM_PROMPT.md changes, pack changes, etc.), and
+    leaves the agent sleeping.  The next message will wake it with the new prompt
+    and the same session ID (conversation context preserved via resume).
+    """
+    session = agents.get(name)
+    if session is None:
+        raise ValueError(f"Agent '{name}' not found")
+
+    session_id = session.session_id
+
+    # Sleep the agent (disconnect CLI)
+    if is_awake(session):
+        await sleep_agent(session, force=True)
+
+    # Rebuild system prompt from scratch
+    agent_cfg = _load_agent_config(name)
+    saved_packs = agent_cfg.get("packs")
+    new_prompt = make_spawned_agent_system_prompt(
+        session.cwd, packs=saved_packs, compact_instructions=session.compact_instructions
+    )
+
+    # Update session in place — preserves channel mapping, MCP servers, queue, etc.
+    session.system_prompt = new_prompt
+    session.system_prompt_hash = compute_prompt_hash(new_prompt)
+    session.session_id = session_id  # ensure session ID preserved for resume
+
+    # Reset prompt-posted flag so the new prompt gets posted to Discord on next wake
+    discord_state(session).system_prompt_posted = False
+
+    log.info("Agent '%s' restarted (session=%s, new prompt hash=%s)", name, session_id, session.system_prompt_hash)
+    return session
+
+
 def get_master_session() -> AgentSession | None:
     """Get the axi-master session."""
     return agents.get(config.MASTER_AGENT_NAME)

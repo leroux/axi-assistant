@@ -16,6 +16,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 from typing import TYPE_CHECKING
 
 import discord
@@ -163,20 +164,34 @@ MASTER_SYSTEM_PROMPT: SystemPromptPreset = {
 _CWD_PROMPT_FILENAME = "SYSTEM_PROMPT.md"
 
 
-def _load_cwd_prompt(cwd: str) -> str | None:
-    """Load SYSTEM_PROMPT.md from the agent's working directory, if it exists."""
+_CWD_MODE_RE = re.compile(r"<!--\s*mode:\s*(overwrite|append)\s*-->")
+
+
+def _load_cwd_prompt(cwd: str) -> tuple[str, str] | None:
+    """Load SYSTEM_PROMPT.md from the agent's working directory, if it exists.
+
+    Returns (content, mode) where mode is "append" (default) or "overwrite".
+    Mode is detected from an HTML comment directive: ``<!-- mode: overwrite -->``.
+    The directive is stripped from the returned content.
+    """
     path = os.path.join(cwd, _CWD_PROMPT_FILENAME)
     try:
         with open(path, encoding="utf-8") as f:
             content = f.read().strip()
-        if content:
-            log.info("Loaded CWD system prompt from %s (%d chars)", path, len(content))
-            return content
+        if not content:
+            return None
+        mode = "append"
+        m = _CWD_MODE_RE.search(content)
+        if m:
+            mode = m.group(1)
+            content = (content[: m.start()] + content[m.end() :]).strip()
+        log.info("Loaded CWD system prompt from %s (%d chars, mode=%s)", path, len(content), mode)
+        return (content, mode)
     except FileNotFoundError:
-        pass
+        return None
     except Exception:
         log.exception("Failed to load CWD system prompt from %s", path)
-    return None
+        return None
 
 
 def make_spawned_agent_system_prompt(
@@ -191,7 +206,9 @@ def make_spawned_agent_system_prompt(
     compact_instructions: if provided, appended as a compaction guidance section.
 
     If SYSTEM_PROMPT.md exists in the agent's CWD, its contents are appended
-    after the base prompt and packs.
+    after the base prompt and packs (default). If the file contains
+    ``<!-- mode: overwrite -->``, it replaces the base prompt entirely
+    (compact_instructions are still appended).
     """
     if _is_axi_dev_cwd(cwd):
         # Admin agent — full soul + dev context
@@ -209,9 +226,15 @@ def make_spawned_agent_system_prompt(
         append += "\n\n" + packs_text
 
     # Auto-load SYSTEM_PROMPT.md from agent CWD
-    cwd_prompt = _load_cwd_prompt(cwd)
-    if cwd_prompt:
-        append += "\n\n" + cwd_prompt
+    cwd_result = _load_cwd_prompt(cwd)
+    if cwd_result:
+        cwd_prompt, cwd_mode = cwd_result
+        if cwd_mode == "overwrite":
+            # Overwrite mode: replaces soul/packs/dev-context entirely
+            append = cwd_prompt
+        else:
+            # Append mode (default): added after base prompt + packs
+            append += "\n\n" + cwd_prompt
 
     if compact_instructions:
         append += (

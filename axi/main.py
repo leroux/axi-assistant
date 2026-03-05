@@ -1068,6 +1068,42 @@ async def kill_agent(interaction: discord.Interaction, agent_name: str | None = 
         await interaction.followup.send(f"*System:* Agent **{agent_name}** moved to Killed.")
 
 
+@bot.tree.command(
+    name="restart-agent",
+    description="Restart an agent's CLI process with a fresh system prompt (preserves session context).",
+)
+@app_commands.autocomplete(agent_name=killable_agent_autocomplete)
+async def restart_agent_cmd(interaction: discord.Interaction, agent_name: str | None = None) -> None:
+    log.info("Slash command /restart-agent %s from %s", agent_name, interaction.user)
+
+    resolved = await _resolve_agent(interaction, agent_name)
+    if resolved is None:
+        return
+    agent_name, session = resolved
+
+    if agent_name == config.MASTER_AGENT_NAME:
+        await interaction.response.send_message(
+            "Cannot restart axi-master this way. Use `/restart` instead.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer()
+    _tracer.start_span("slash.restart_agent", attributes={"agent.name": agent_name}).end()
+
+    session = await agents.restart_agent(agent_name)
+
+    agent_ch = await agents.get_agent_channel(agent_name)
+    if agent_ch and agent_ch.id != interaction.channel_id:
+        await agents.send_system(
+            agent_ch,
+            f"Agent **{agent_name}** restarted with fresh system prompt. Session context preserved.",
+        )
+
+    await interaction.followup.send(
+        f"*System:* Agent **{agent_name}** restarted. System prompt refreshed, session `{session.session_id or 'none'}` preserved."
+    )
+
+
 @bot.tree.command(name="stop", description="Interrupt a running agent query (like Ctrl+C).")
 @app_commands.autocomplete(agent_name=agent_autocomplete)
 async def stop_agent(interaction: discord.Interaction, agent_name: str | None = None) -> None:
