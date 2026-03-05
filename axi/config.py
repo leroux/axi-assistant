@@ -304,7 +304,7 @@ def set_model(model: str) -> str:
 # ---------------------------------------------------------------------------
 
 MASTER_AGENT_NAME = "axi-master"
-MAX_AWAKE_AGENTS = int(os.environ.get("MAX_AWAKE_AGENTS", "4"))
+MAX_AWAKE_AGENTS = int(os.environ.get("MAX_AWAKE_AGENTS", "7"))
 IDLE_REMINDER_THRESHOLDS = [timedelta(minutes=30), timedelta(hours=3), timedelta(hours=48)]
 QUERY_TIMEOUT = 43200  # 12 hours
 INTERRUPT_TIMEOUT = 15  # seconds to wait after interrupt

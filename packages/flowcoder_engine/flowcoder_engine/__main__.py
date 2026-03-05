@@ -335,7 +335,6 @@ def _clean_env() -> dict[str, str]:
     env = dict(os.environ)
     env.pop("CLAUDECODE", None)
     env.setdefault("CLAUDE_CODE_ENTRYPOINT", "sdk-py")
-    env.setdefault("CLAUDE_AGENT_SDK_VERSION", "flowcoder-engine")
     return env
 
 
