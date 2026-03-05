@@ -160,6 +160,25 @@ MASTER_SYSTEM_PROMPT: SystemPromptPreset = {
 }
 
 
+_CWD_PROMPT_FILENAME = "SYSTEM_PROMPT.md"
+
+
+def _load_cwd_prompt(cwd: str) -> str | None:
+    """Load SYSTEM_PROMPT.md from the agent's working directory, if it exists."""
+    path = os.path.join(cwd, _CWD_PROMPT_FILENAME)
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = f.read().strip()
+        if content:
+            log.info("Loaded CWD system prompt from %s (%d chars)", path, len(content))
+            return content
+    except FileNotFoundError:
+        pass
+    except Exception:
+        log.exception("Failed to load CWD system prompt from %s", path)
+    return None
+
+
 def make_spawned_agent_system_prompt(
     cwd: str,
     packs: list[str] | None = None,
@@ -170,6 +189,9 @@ def make_spawned_agent_system_prompt(
     packs: explicit list of pack names to include, or None for DEFAULT_SPAWNED_PACKS.
            Pass [] to disable packs entirely.
     compact_instructions: if provided, appended as a compaction guidance section.
+
+    If SYSTEM_PROMPT.md exists in the agent's CWD, its contents are appended
+    after the base prompt and packs.
     """
     if _is_axi_dev_cwd(cwd):
         # Admin agent — full soul + dev context
@@ -185,6 +207,12 @@ def make_spawned_agent_system_prompt(
     packs_text = _pack_prompt_text(pack_names)
     if packs_text:
         append += "\n\n" + packs_text
+
+    # Auto-load SYSTEM_PROMPT.md from agent CWD
+    cwd_prompt = _load_cwd_prompt(cwd)
+    if cwd_prompt:
+        append += "\n\n" + cwd_prompt
+
     if compact_instructions:
         append += (
             "\n\n# Context Compaction Instructions\n"
