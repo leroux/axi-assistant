@@ -82,6 +82,11 @@ _tracer = trace.get_tracer(__name__)
                 "type": "string",
                 "description": "Instructions for what to preserve during context compaction (e.g. 'always preserve the bug description, current fix approach, and test results')",
             },
+            "mcp_servers": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional list of custom MCP server names (from mcp_servers.json) to attach to this agent (e.g. ['todoist']).",
+            },
         },
         "required": ["name", "prompt"],
     },
@@ -101,6 +106,10 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     agent_packs = args.get("packs")  # None = use defaults, [] = no packs
     no_worktree = args.get("no_worktree", False)
     compact_instructions = args.get("compact_instructions")
+    mcp_server_names: list[str] = args.get("mcp_servers") or []
+
+    # Resolve custom MCP servers from config
+    extra_mcp_servers = config.load_mcp_servers(mcp_server_names) if mcp_server_names else None
 
     # --- Validate name/agent before any side effects ---
     if not agent_name:
@@ -189,6 +198,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
                 command_args=fc_command_args,
                 packs=agent_packs,
                 compact_instructions=compact_instructions,
+                extra_mcp_servers=extra_mcp_servers,
             )
         except Exception:
             channels.bot_creating_channels.discard(agents.normalize_channel_name(agent_name))

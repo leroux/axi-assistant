@@ -34,6 +34,7 @@ __all__ = [
     "MASTER_AGENT_NAME",
     "MASTER_SESSION_PATH",
     "MAX_AWAKE_AGENTS",
+    "MCP_SERVERS_PATH",
     "QUERY_TIMEOUT",
     "RATE_LIMIT_HISTORY_PATH",
     "README_CONTENT_PATH",
@@ -48,6 +49,7 @@ __all__ = [
     "discord_client",
     "get_model",
     "intents",
+    "load_mcp_servers",
     "log",
     "set_model",
 ]
@@ -231,6 +233,7 @@ MASTER_SESSION_PATH = os.path.join(BOT_DIR, ".master_session_id")
 CONFIG_PATH = os.path.join(BOT_DIR, "config.json")
 RATE_LIMIT_HISTORY_PATH = os.path.join(LOG_DIR, "rate_limit_history.jsonl")
 USAGE_HISTORY_PATH = os.path.join(AXI_USER_DATA, "usage_history.jsonl")
+MCP_SERVERS_PATH = os.path.join(AXI_USER_DATA, "mcp_servers.json")
 
 # Directories agents are allowed to use as cwd (configurable via .env)
 _allowed_cwds_env = os.environ.get("ALLOWED_CWDS", "")
@@ -297,6 +300,38 @@ def set_model(model: str) -> str:
         config["model"] = model.lower()
         _save_config(config)
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Custom MCP server registry
+# ---------------------------------------------------------------------------
+
+
+def load_mcp_servers(names: list[str]) -> dict[str, dict[str, Any]]:
+    """Load named MCP server configs from mcp_servers.json.
+
+    Returns a dict of {name: McpStdioServerConfig-compatible dict} for each
+    requested name that exists in the config file.  Unknown names are logged
+    and skipped.
+    """
+    if not os.path.exists(MCP_SERVERS_PATH):
+        if names:
+            log.warning("mcp_servers.json not found at %s", MCP_SERVERS_PATH)
+        return {}
+    try:
+        with open(MCP_SERVERS_PATH) as f:
+            registry: dict[str, Any] = json.load(f)
+    except Exception as e:
+        log.error("Failed to load mcp_servers.json: %s", e)
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for name in names:
+        if name not in registry:
+            log.warning("MCP server '%s' not found in mcp_servers.json", name)
+            continue
+        result[name] = registry[name]
+    return result
 
 
 # ---------------------------------------------------------------------------

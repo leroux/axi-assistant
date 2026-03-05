@@ -188,13 +188,55 @@ def _next_stream_id(agent_name: str) -> str:
     return f"{agent_name}:S{_stream_counter}"
 
 
-def _build_mcp_servers(agent_name: str, cwd: str | None = None) -> dict[str, Any]:
-    """Build the standard MCP server dict for an agent."""
+def _build_mcp_servers(
+    agent_name: str,
+    cwd: str | None = None,
+    extra_mcp_servers: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the standard MCP server dict for an agent.
+
+    Args:
+        agent_name: The agent's name (used for schedule scoping).
+        cwd: The agent's working directory.
+        extra_mcp_servers: Additional MCP servers to merge in (e.g. from
+            mcp_servers.json).  These are McpStdioServerConfig-compatible
+            dicts keyed by name.
+    """
     servers: dict[str, Any] = {}
     if _utils_mcp_server is not None:
         servers["utils"] = _utils_mcp_server
     servers["schedule"] = make_schedule_mcp_server(agent_name, config.SCHEDULES_PATH, cwd)
+    if extra_mcp_servers:
+        servers.update(extra_mcp_servers)
     return servers
+
+
+def _save_agent_config(agent_name: str, mcp_server_names: list[str] | None) -> None:
+    """Persist per-agent config (MCP server selections) to disk."""
+    config_dir = os.path.join(config.AXI_USER_DATA, "agents", agent_name)
+    os.makedirs(config_dir, exist_ok=True)
+    config_path = os.path.join(config_dir, "agent_config.json")
+    data: dict[str, Any] = {}
+    if mcp_server_names:
+        data["mcp_servers"] = mcp_server_names
+    try:
+        with open(config_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        log.warning("Failed to save agent config for '%s'", agent_name, exc_info=True)
+
+
+def _load_agent_config(agent_name: str) -> dict[str, Any]:
+    """Load per-agent config from disk. Returns {} if not found."""
+    config_path = os.path.join(config.AXI_USER_DATA, "agents", agent_name, "agent_config.json")
+    if not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path) as f:
+            return json.load(f)
+    except Exception:
+        log.warning("Failed to load agent config for '%s'", agent_name, exc_info=True)
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1253,7 +1295,10 @@ async def reconstruct_agents_from_channels() -> int:
                 continue
 
             prompt = make_spawned_agent_system_prompt(cwd)
-            mcp_servers = _build_mcp_servers(agent_name, cwd)
+            agent_cfg = _load_agent_config(agent_name)
+            mcp_names = agent_cfg.get("mcp_servers") or None
+            extra_mcp = config.load_mcp_servers(mcp_names) if mcp_names else None
+            mcp_servers = _build_mcp_servers(agent_name, cwd, extra_mcp_servers=extra_mcp)
 
             session = AgentSession(
                 name=agent_name,
@@ -1264,6 +1309,7 @@ async def reconstruct_agents_from_channels() -> int:
                 system_prompt_hash=old_prompt_hash,
                 session_id=session_id,
                 mcp_servers=mcp_servers,
+                mcp_server_names=mcp_names,
             )
             ds = discord_state(session)
             ds.channel_id = ch.id
@@ -2388,6 +2434,7 @@ async def spawn_agent(
     command_args: str = "",
     packs: list[str] | None = None,
     compact_instructions: str | None = None,
+    extra_mcp_servers: dict[str, Any] | None = None,
 ) -> None:
     """Spawn a new agent session and run its initial prompt in the background."""
     with _tracer.start_as_current_span(
@@ -2418,7 +2465,9 @@ async def spawn_agent(
             await send_system(channel, f"Spawning **{agent_label}** agent **{name}** in `{cwd}`...")
 
         prompt = make_spawned_agent_system_prompt(cwd, packs=packs, compact_instructions=compact_instructions)
-        mcp_servers = _build_mcp_servers(name, cwd)
+        mcp_servers = _build_mcp_servers(name, cwd, extra_mcp_servers=extra_mcp_servers)
+
+        mcp_names = list(extra_mcp_servers.keys()) if extra_mcp_servers else None
 
         session = AgentSession(
             name=name,
@@ -2429,9 +2478,14 @@ async def spawn_agent(
             client=None,
             session_id=resume,
             mcp_servers=mcp_servers,
+            mcp_server_names=mcp_names,
             compact_instructions=compact_instructions,
         )
         discord_state(session).channel_id = channel.id
+
+        # Persist custom MCP server selections for restart reconstruction
+        if mcp_names:
+            _save_agent_config(name, mcp_names)
 
         agents[name] = session
         channel_to_agent[channel.id] = name

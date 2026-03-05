@@ -31,6 +31,7 @@ To spawn an agent, use the axi_spawn_agent MCP tool with these parameters:
 - resume (string, optional): session ID from a previously killed agent to resume with full conversation context
 - packs (list of strings, optional): pack names to load into the agent's system prompt. Defaults to the standard set. Pass [] to disable packs. Available packs are in the packs/ directory.
 - compact_instructions (string, optional): custom instructions for context compaction. When set, these guide what to preserve when the context window is compacted (e.g. "preserve bug description and test results").
+- mcp_servers (list of strings, optional): names of custom MCP servers (from mcp_servers.json) to attach to this agent (e.g. ["todoist"]).
 
 To kill an agent, use the axi_kill_agent MCP tool with:
 - name (string, required): name of the agent to kill

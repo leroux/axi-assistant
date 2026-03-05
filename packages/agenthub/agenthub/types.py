@@ -50,6 +50,7 @@ class AgentSession:
     system_prompt: Any = None  # SystemPromptPreset | str — opaque
     system_prompt_hash: str | None = None  # Hash for prompt change detection across restarts
     mcp_servers: dict[str, Any] | None = None
+    mcp_server_names: list[str] | None = None  # Custom MCP server names from mcp_servers.json (for topic persistence)
     reconnecting: bool = False  # True during bridge reconnect
     bridge_busy: bool = False  # True when reconnected to a mid-task CLI
     activity: ActivityState = field(default_factory=ActivityState)
