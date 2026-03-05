@@ -249,6 +249,14 @@ CLI asks the host to do something. Host must respond with `control_response`.
 | `initialize` | Session init handshake | _(minimal)_ |
 | `interrupt` | Interrupt signal | _(minimal)_ |
 
+**Interactive tools via `can_use_tool`:** Some Claude Code tools require user interaction through the permission system. The CLI sends `can_use_tool` and blocks until the host responds with allow/deny. The SDK provides no built-in support for these — the host must implement the interactive flow in its `can_use_tool` callback:
+
+| Tool Name | `input` Fields | Expected Host Behavior |
+|-----------|---------------|----------------------|
+| `EnterPlanMode` | _(empty)_ | Auto-allow. Switches the agent to plan mode. |
+| `ExitPlanMode` | `allowedPrompts[]?` | Present the agent's plan to the user (read from `~/.claude/plans/*.md` or CWD `PLAN.md`). Wait for user approval. Allow = proceed with implementation, Deny = revise the plan (include feedback in deny message). |
+| `AskUserQuestion` | `questions[]: {question, header, options[], multiSelect}` | Display each question with options to the user. Collect answers. Return them in the allow response's `updatedInput.answers` dict, keyed by question text. |
+
 ### `control_response`
 
 Response to a `control_request` from the host (inbound only in rare cases like init handshake).

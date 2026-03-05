@@ -2,11 +2,22 @@
 
 Claude CLI stream-json protocol wrapper. Backend-agnostic — no dependency on procmux or any specific process transport.
 
+## Why claudewire exists
+
+The `claude-agent-sdk` provides a `Transport` ABC and a built-in `SubprocessCLITransport`, but it has significant gaps for production use:
+
+- **No process reuse.** The SDK always spawns a new CLI process. There's no way to reconnect to an existing process after a host restart — claudewire's `BridgeTransport` handles reconnection by intercepting the initialize handshake and faking a success response.
+- **No pluggable process backends.** The SDK's transport is hardcoded to local subprocesses. claudewire defines a `ProcessConnection` protocol that any backend can implement (local PTY, procmux over Unix socket, SSH, etc.).
+- **`rate_limit_event` not parsed.** The SDK's message parser throws `MessageParseError` on `rate_limit_event` messages — it only recognizes `user`, `assistant`, `system`, `result`, and `stream_event`. claudewire parses rate limit events and provides typed `RateLimitInfo` objects.
+- **No wire-level validation.** The SDK trusts CLI output completely. claudewire validates every message against pydantic models so protocol changes are detected immediately via warnings in logs.
+- **No stderr as a transport concept.** The SDK exposes stderr via a callback on `ClaudeAgentOptions`, but the `Transport` ABC has no stderr support. claudewire's `BridgeTransport` reads stderr as `StderrEvent` alongside stdout, making it a first-class part of the transport (important for the `autocompact:` debug line that provides context token counts).
+- **Interactive tools require custom handling.** Claude Code tools like `EnterPlanMode`, `ExitPlanMode`, and `AskUserQuestion` arrive as `control_request.can_use_tool` permission checks — the SDK calls your `can_use_tool` callback with the tool name and input, and you must return allow/deny. But the SDK provides no built-in support for the interactive flow these tools require (posting a plan to the user, waiting for approval, collecting multi-choice answers). If you're building a non-terminal UI (Discord bot, web app, Slack), you need to implement this yourself in the permission callback. See `PROTOCOL.md` for the message flow and the `can_use_tool` section below for composable permission policies.
+
 ## Purpose
 
 Wraps the Claude Code CLI's `--output-format stream-json` protocol into a clean `ProcessConnection` abstraction. Any process backend (local PTY, procmux, SSH, etc.) can implement `ProcessConnection` and get a working SDK Transport for free.
 
-Also provides stateless permission policies for restricting tool access, and rate limit event parsing from the Claude API stream.
+Also provides stateless permission policies for restricting tool access, rate limit event parsing from the Claude API stream, and schema validation against the full protocol.
 
 ## Architecture
 
