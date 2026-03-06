@@ -2603,6 +2603,40 @@ async def process_message(session: AgentSession, content: MessageContent, channe
                 await stream_with_retry(session, channel)
                 # Axi-owned auto-compact: trigger after response if context is near full
                 await _maybe_compact(session, channel)
+                # Auto-resume after compaction: if compact_boundary was seen
+                # during this turn (CLI-triggered or Axi-triggered), the agent
+                # may have lost its place.  Send a continuation nudge so it
+                # picks up where it left off.  Limited to one resume per
+                # process_message call to prevent infinite loops.
+                pending_resume = _pending_compact.pop(session.name, None)
+                if pending_resume is not None:
+                    log.info("Auto-resuming agent '%s' after compaction", session.name)
+                    _reset_session_activity(session)
+                    resume_msg = "Continue from where you left off."
+                    get_stdio_logger(session.name, config.LOG_DIR).debug(
+                        ">>> STDIN  %s", json.dumps({"type": "auto_resume", "content": resume_msg})
+                    )
+                    await session.client.query(as_stream(resume_msg))
+                    await asyncio.sleep(0.3)
+                    # Show compact stats with fresh post_tokens from stderr
+                    post_tokens = session.context_tokens
+                    pre_tokens = int(pending_resume["pre_tokens"])
+                    elapsed = time.monotonic() - float(pending_resume["start_time"])
+                    if post_tokens > 0 and post_tokens != pre_tokens:
+                        saved = int(pre_tokens - post_tokens)
+                        pct = post_tokens / session.context_window if session.context_window else 0
+                        await channel.send(
+                            f"\U0001f504 Compacted in {elapsed:.1f}s: {pre_tokens:,} \u2192 {post_tokens:,} tokens "
+                            f"({saved:,} freed, {pct:.0%} used) \u2014 resuming"
+                        )
+                    else:
+                        await channel.send(
+                            f"\U0001f504 Compacted in {elapsed:.1f}s ({pre_tokens:,} tokens) \u2014 resuming"
+                        )
+                    await stream_with_retry(session, channel)
+                    # Safety: compact again if the resume filled context, but
+                    # don't auto-resume a second time.
+                    await _maybe_compact(session, channel)
         except TimeoutError:
             await handle_query_timeout(session, channel)
         except Exception:
