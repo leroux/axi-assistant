@@ -2123,6 +2123,7 @@ async def _send_startup_notification(
     rollback_info: dict[str, Any] | None,
     crash_info: dict[str, Any] | None,
     startup_elapsed: float = 0.0,
+    trace_tag: str = "",
 ) -> None:
     """Send startup/rollback/crash notification to master channel."""
     if rollback_info:
@@ -2159,7 +2160,7 @@ async def _send_startup_notification(
         if config.ENABLE_CRASH_HANDLER:
             crash_msg += "\nSpawning crash analysis agent..."
         await master_ch.send(crash_msg)
-    await master_ch.send(f"*System:* Axi ready. ({startup_elapsed:.1f}s)")
+    await master_ch.send(f"*System:* Axi ready. ({startup_elapsed:.1f}s){trace_tag}")
     log.info("Sent restart notification to master channel")
 
 
@@ -2269,6 +2270,11 @@ async def on_ready() -> None:
     agents.set_utils_mcp_server(tools.utils_mcp_server)
 
     with _tracer.start_as_current_span("on_ready.startup") as startup_span:
+        _span_ctx = startup_span.get_span_context()
+        _trace_tag = ""
+        if _span_ctx and _span_ctx.trace_id:
+            _trace_tag = f" [trace={format(_span_ctx.trace_id, '032x')[:16]}]"
+
         master_resume_id, master_old_prompt_hash = _load_master_session_data()
         master_session = _register_master_agent(master_resume_id, master_old_prompt_hash)
         await _setup_guild_infrastructure(master_session)
@@ -2276,7 +2282,7 @@ async def on_ready() -> None:
         _startup_t0 = time.monotonic()
         master_ch = await agents.get_master_channel()
         if master_ch:
-            await master_ch.send("*System:* Axi starting up...")
+            await master_ch.send(f"*System:* Axi starting up...{_trace_tag}")
 
         await agents.connect_procmux()
         agents.init_shutdown_coordinator()
@@ -2297,7 +2303,7 @@ async def on_ready() -> None:
         startup_span.set_attribute("startup.elapsed_s", _startup_elapsed)
         master_ch = await agents.get_master_channel()
         if master_ch:
-            await _send_startup_notification(master_ch, rollback_info, crash_info, _startup_elapsed)
+            await _send_startup_notification(master_ch, rollback_info, crash_info, _startup_elapsed, _trace_tag)
 
     if not config.ENABLE_CRASH_HANDLER:
         if rollback_info or crash_info:

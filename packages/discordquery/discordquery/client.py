@@ -296,6 +296,10 @@ class AsyncDiscordClient:
         )
         return resp.json()
 
+    async def delete_message(self, channel_id: str | int, message_id: str | int) -> None:
+        """Delete a message."""
+        await self.request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
+
     # -- High-level methods: Reactions --------------------------------------
 
     async def add_reaction(self, channel_id: str | int, message_id: str | int, emoji: str) -> None:

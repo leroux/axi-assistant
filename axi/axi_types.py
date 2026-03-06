@@ -99,6 +99,9 @@ class DiscordAgentState:
     todo_items: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
     agent_log: logging.Logger | None = None
     last_failed_resume_id: str | None = None
+    # Typing indicator (discord.abc.Typing object) — stored so permission
+    # callbacks can cancel/restart it while waiting for user input.
+    typing_obj: Any = None
 
 
 def discord_state(session: AgentSession) -> DiscordAgentState:

@@ -190,6 +190,7 @@ class MessageInner(_Strict):
     stop_sequence: Any = None
     usage: Usage | None = None
     context_management: Any = None
+    container: Any = None
 
 
 class MessageStartEvent(_Strict):
@@ -267,6 +268,7 @@ class AssistantMessageInner(_Strict):
     stop_sequence: Any = None
     usage: Usage | None = None
     context_management: Any = None
+    container: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +424,7 @@ _outbound_adapter: TypeAdapter[OutboundMsg] = TypeAdapter(OutboundMsg)
 
 
 # ---------------------------------------------------------------------------
-# Bare stream event types (procmux replay emits without wrapper)
+# Bare stream event types (CLI emits these without the stream_event wrapper)
 # ---------------------------------------------------------------------------
 
 _BARE_STREAM_TYPES = frozenset(_stream_event_adapter.core_schema.get("choices", {}).keys()) if False else frozenset({
@@ -520,8 +522,9 @@ def validate_outbound(msg: dict[str, Any]) -> ValidationResult:
 def validate_inbound_or_bare(msg: dict[str, Any]) -> ValidationResult:
     """Like validate_inbound, but also accepts bare Anthropic stream events.
 
-    Some code paths (procmux replay) emit content_block_delta, message_start,
-    etc. as top-level messages without the stream_event wrapper.
+    The CLI emits every stream event twice: once wrapped in stream_event and
+    once bare (e.g. content_block_delta as a top-level message).  This function
+    validates both forms.
     """
     msg_type = msg.get("type")
     if msg_type in _BARE_STREAM_TYPES:

@@ -19,6 +19,7 @@ from opentelemetry import trace
 from opentelemetry.propagate import inject
 
 from claudewire.schema import (
+    _BARE_STREAM_TYPES,
     SchemaValidationError,
     ValidationError,
     validate_inbound_or_bare,
@@ -170,6 +171,13 @@ class BridgeTransport:
                 raise ConnectionError("Process connection lost during read")
             if isinstance(msg, StdoutEvent):
                 msg_type = msg.data.get("type", "?")
+                # The CLI emits every stream event twice: once wrapped in
+                # stream_event and once bare.  The bare duplicate carries no
+                # extra information and the SDK can't parse it anyway
+                # (MessageParseError), so we drop it here.
+                if msg_type in _BARE_STREAM_TYPES:
+                    log.debug("[read][%s] dropping bare duplicate type=%s", self._name, msg_type)
+                    continue
                 log.debug("[read][%s] yielding stdout type=%s", self._name, msg_type)
                 if self._stdio_logger:
                     self._stdio_logger.debug("<<< STDOUT %s", json.dumps(msg.data))

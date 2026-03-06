@@ -47,6 +47,7 @@ from axi.axi_types import (
     AgentSession,
     ConcurrencyLimitError,
     ContentBlock,
+    DiscordAgentState,
     MessageContent,
     discord_state,
 )
@@ -91,7 +92,7 @@ from axi.schedule_tools import make_schedule_mcp_server
 from axi.shutdown import ShutdownCoordinator, exit_for_restart, kill_supervisor
 from axi.tracing import shutdown_tracing
 from claudewire import BridgeTransport
-from claudewire.events import as_stream, update_activity
+from claudewire.events import as_stream, tool_display, update_activity
 from claudewire.session import disconnect_client, get_stdio_logger
 from procmux import ensure_running as ensure_bridge
 
@@ -692,22 +693,25 @@ async def _handle_exit_plan_mode(
         # Pre-react with approval/rejection emojis so the user can click them
         for emoji in ("\u2705", "\u274c"):
             await config.discord_client.add_reaction(channel_id, approval_msg_id, emoji)
-        discord_state(session).plan_approval_message_id = int(approval_msg_id)
+        ds.plan_approval_message_id = int(approval_msg_id)
     except Exception:
         log.exception("_handle_exit_plan_mode: failed to post plan to Discord \u2014 denying")
         return PermissionResultDeny(message="Could not post plan to Discord for approval. Try again.")
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
-    discord_state(session).plan_approval_future = future  # type: ignore[assignment]
+    ds.plan_approval_future = future  # type: ignore[assignment]
 
     log.info("Agent '%s' paused waiting for plan approval", session.name)
+
+    # Stop the typing indicator while waiting for the user's decision
+    _cancel_typing(ds)
 
     try:
         result = await future
     finally:
-        discord_state(session).plan_approval_future = None
-        discord_state(session).plan_approval_message_id = None
+        ds.plan_approval_future = None
+        ds.plan_approval_message_id = None
 
     # Remove the unchosen reaction so the result is visually clear
     remove_emoji = "\u274c" if result.get("approved") else "\u2705"
@@ -877,6 +881,9 @@ async def _handle_ask_user_question(
         discord_state(session).question_future = future
 
         log.info("Agent '%s' waiting for answer to question %d/%d", session.name, i + 1, len(questions))
+
+        # Stop the typing indicator while waiting for the user's answer
+        _cancel_typing(ds)
 
         try:
             answer = await future
@@ -1610,6 +1617,9 @@ class _StreamCtx:
         "text_buffer",
         "thinking_message",
         "tool_input_json",
+        "tool_msg_ids_to_delete",
+        "tool_progress_channel_id",
+        "tool_progress_msg_id",
         "typing_stopped",
     )
 
@@ -1629,6 +1639,10 @@ class _StreamCtx:
         self.last_flushed_channel_id: int | None = None
         self.last_flushed_content: str = ""  # Content of the last flushed message
         self.deferred_msg: str = ""  # Non-streaming: holds back the last message for timing append
+        # Clean tool messages: temporary progress indicator
+        self.tool_progress_msg_id: str | None = None  # Current progress message Discord ID
+        self.tool_progress_channel_id: int | None = None
+        self.tool_msg_ids_to_delete: list[str] = []  # Message IDs to delete at end of turn
 
 
 async def _flush_text(ctx: _StreamCtx, session: AgentSession, channel: TextChannel, reason: str = "?") -> None:
@@ -1819,12 +1833,90 @@ async def _hide_thinking(ctx: _StreamCtx) -> None:
             log.debug("Failed to delete thinking indicator", exc_info=True)
 
 
-def _stop_typing(ctx: _StreamCtx, typing_ctx: Any) -> None:
-    """Cancel the typing indicator."""
-    if not ctx.typing_stopped and typing_ctx and typing_ctx.task:
-        typing_ctx.task.cancel()
-        ctx.typing_stopped = True
+def _cancel_typing(ds: DiscordAgentState) -> None:
+    """Cancel the typing indicator on a DiscordAgentState.
 
+    Used by permission callbacks (AskUserQuestion, ExitPlanMode) to stop
+    the typing indicator while waiting for user input.  The streaming loop
+    will restart typing when the next stream event arrives.
+    """
+    typing_obj = ds.typing_obj
+    if typing_obj and hasattr(typing_obj, "task"):
+        typing_obj.task.cancel()
+
+
+def _stop_typing(ctx: _StreamCtx, session: AgentSession) -> None:
+    """Cancel the typing indicator stored on the session's DiscordAgentState."""
+    if ctx.typing_stopped:
+        return
+    ds = discord_state(session)
+    _cancel_typing(ds)
+    ctx.typing_stopped = True
+
+
+
+# ---------------------------------------------------------------------------
+# Clean tool messages: temporary progress indicator
+# ---------------------------------------------------------------------------
+
+# Tools whose messages should NOT be deleted (they produce persistent user-facing output)
+_PERSISTENT_TOOLS = {"EnterPlanMode", "ExitPlanMode", "AskUserQuestion", "TodoWrite"}
+
+
+async def _show_tool_progress(
+    ctx: _StreamCtx, session: AgentSession, channel: TextChannel
+) -> None:
+    """Post or update a temporary tool progress message in Discord.
+
+    Called when CLEAN_TOOL_MESSAGES is enabled and a non-persistent tool starts executing.
+    Reuses the same message for successive tools (edit in-place).
+    """
+    tool = session.activity.tool_name
+    if not tool or tool in _PERSISTENT_TOOLS:
+        return
+
+    display = tool_display(tool)
+    preview = extract_tool_preview(tool, session.activity.tool_input_preview)
+    if preview:
+        text = f"\u2699 *{display}:* `{preview[:120]}`"
+    else:
+        text = f"\u2699 *{display}...*"
+
+    channel_id = discord_state(session).channel_id or channel.id
+    try:
+        if ctx.tool_progress_msg_id is not None and ctx.tool_progress_channel_id is not None:
+            # Edit existing progress message in-place
+            log.info("TOOL_PROGRESS[%s] edit tool=%s text=%r", session.name, tool, text[:80])
+            await config.discord_client.edit_message(
+                ctx.tool_progress_channel_id, ctx.tool_progress_msg_id, text
+            )
+        else:
+            # Post a new progress message
+            log.info("TOOL_PROGRESS[%s] post tool=%s text=%r", session.name, tool, text[:80])
+            resp = await config.discord_client.send_message(channel_id, text)
+            msg_id: str = resp["id"]
+            ctx.tool_progress_msg_id = msg_id
+            ctx.tool_progress_channel_id = channel_id
+            if msg_id not in ctx.tool_msg_ids_to_delete:
+                ctx.tool_msg_ids_to_delete.append(msg_id)
+    except Exception:
+        log.warning("Failed to post/edit tool progress for '%s'", session.name, exc_info=True)
+
+
+async def _delete_tool_progress_messages(ctx: _StreamCtx) -> None:
+    """Delete all temporary tool progress messages. Best-effort."""
+    log.info("TOOL_CLEANUP deleting %d progress message(s)", len(ctx.tool_msg_ids_to_delete))
+    for msg_id in ctx.tool_msg_ids_to_delete:
+        try:
+            if ctx.tool_progress_channel_id is not None:
+                await config.discord_client.delete_message(
+                    ctx.tool_progress_channel_id, msg_id
+                )
+                log.debug("TOOL_CLEANUP deleted msg_id=%s", msg_id)
+        except Exception:
+            log.warning("Failed to delete tool progress message %s", msg_id, exc_info=True)
+    ctx.tool_msg_ids_to_delete.clear()
+    ctx.tool_progress_msg_id = None
 
 
 # ---------------------------------------------------------------------------
@@ -1833,7 +1925,7 @@ def _stop_typing(ctx: _StreamCtx, typing_ctx: Any) -> None:
 
 
 async def _handle_stream_event(
-    ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: StreamEvent, typing_ctx: Any
+    ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: StreamEvent,
 ) -> None:
     """Handle a StreamEvent during response streaming."""
     event = msg.event
@@ -1874,7 +1966,18 @@ async def _handle_stream_event(
                 log.exception("Failed to parse/post TodoWrite for '%s'", session.name)
         ctx.tool_input_json = ""
 
-    # Debug output
+    # Clean tool messages: show temporary progress indicator
+    if config.CLEAN_TOOL_MESSAGES and event_type == "content_block_stop":
+        if session.activity.phase == "waiting" and session.activity.tool_name:
+            await _show_tool_progress(ctx, session, channel)
+
+    # When text starts, reset tool progress pointer (text supersedes progress)
+    if config.CLEAN_TOOL_MESSAGES and event_type == "content_block_start":
+        block = event.get("content_block", {})
+        if block.get("type") == "text":
+            ctx.tool_progress_msg_id = None
+
+    # Debug output (suppressed for tool calls when CLEAN_TOOL_MESSAGES handles them)
     if discord_state(session).debug and event_type == "content_block_stop":
         if session.activity.phase == "thinking" and session.activity.thinking_text:
             thinking = session.activity.thinking_text.strip()
@@ -1883,12 +1986,13 @@ async def _handle_stream_event(
                 await channel.send("\U0001f4ad", file=file)
                 session.activity.thinking_text = ""
         elif session.activity.phase == "waiting" and session.activity.tool_name:
-            tool = session.activity.tool_name
-            preview = extract_tool_preview(tool, session.activity.tool_input_preview)
-            if preview:
-                await channel.send(f"`\U0001f527 {tool}: {preview[:120]}`")
-            else:
-                await channel.send(f"`\U0001f527 {tool}`")
+            if not config.CLEAN_TOOL_MESSAGES:
+                tool = session.activity.tool_name
+                preview = extract_tool_preview(tool, session.activity.tool_input_preview)
+                if preview:
+                    await channel.send(f"`\U0001f527 {tool}: {preview[:120]}`")
+                else:
+                    await channel.send(f"`\U0001f527 {tool}`")
 
     # Log stream events
     if session.agent_log:
@@ -1938,7 +2042,7 @@ def _log_stream_event(session: AgentSession, event_type: str, event: dict[str, A
 
 
 async def _handle_assistant_message(
-    ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: AssistantMessage, typing_ctx: Any
+    ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: AssistantMessage,
 ) -> None:
     """Handle an AssistantMessage during response streaming."""
     if msg.error in ("rate_limit", "billing_error"):
@@ -1948,7 +2052,7 @@ async def _handle_assistant_message(
                 error_text += " " + cast("str", getattr(block, "text", ""))
         log.warning("Agent '%s' hit %s error: %s", session.name, msg.error, error_text[:200])
         await _hide_thinking(ctx)
-        _stop_typing(ctx, typing_ctx)
+        _stop_typing(ctx, session)
         await _handle_rate_limit(error_text, session, channel)
         ctx.text_buffer = ""
         ctx.hit_rate_limit = True
@@ -1959,7 +2063,7 @@ async def _handle_assistant_message(
                 error_text += " " + cast("str", getattr(block, "text", ""))
         log.warning("Agent '%s' hit API error (%s): %s", session.name, msg.error, error_text[:200])
         await _hide_thinking(ctx)
-        _stop_typing(ctx, typing_ctx)
+        _stop_typing(ctx, session)
         await _flush_text(ctx, session, channel, "assistant_error")
         ctx.text_buffer = ""
         ctx.hit_transient_error = msg.error
@@ -1989,12 +2093,12 @@ async def _handle_assistant_message(
 
 
 async def _handle_result_message(
-    ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: ResultMessage, typing_ctx: Any
+    ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: ResultMessage,
 ) -> None:
     """Handle a ResultMessage during response streaming."""
     ctx.got_result = True
     await _hide_thinking(ctx)
-    _stop_typing(ctx, typing_ctx)
+    _stop_typing(ctx, session)
     if not ctx.hit_rate_limit:
         await _flush_text(ctx, session, channel, "result_msg")
     ctx.text_buffer = ""
@@ -2124,8 +2228,27 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
     live_edit = _LiveEditState(channel.id) if config.STREAMING_DISCORD else None
     ctx = _StreamCtx(live_edit=live_edit)
 
-    async with channel.typing() as typing_ctx:
+    # Manage the typing indicator manually so permission callbacks
+    # (AskUserQuestion, ExitPlanMode) can cancel it while waiting for
+    # user input and restart it once the user answers.
+    typing_obj = channel.typing()
+    await typing_obj.__aenter__()
+    ds = discord_state(session)
+    ds.typing_obj = typing_obj
+    try:
         async for msg in _receive_response_safe(session):
+            # Restart typing if it was externally cancelled (e.g. question/plan wait resolved)
+            if (
+                not ctx.typing_stopped
+                and not ctx.got_result
+                and ds.typing_obj is not None
+                and hasattr(ds.typing_obj, "task")
+                and ds.typing_obj.task.done()
+            ):
+                typing_obj = channel.typing()
+                await typing_obj.__aenter__()
+                ds.typing_obj = typing_obj
+
             if t_first_event is None:
                 t_first_event = time.monotonic()
             ctx.msg_total += 1
@@ -2139,11 +2262,11 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                 )
 
             if isinstance(msg, StreamEvent):
-                await _handle_stream_event(ctx, session, channel, msg, typing_ctx)
+                await _handle_stream_event(ctx, session, channel, msg)
             elif isinstance(msg, AssistantMessage):
-                await _handle_assistant_message(ctx, session, channel, msg, typing_ctx)
+                await _handle_assistant_message(ctx, session, channel, msg)
             elif isinstance(msg, ResultMessage):
-                await _handle_result_message(ctx, session, channel, msg, typing_ctx)
+                await _handle_result_message(ctx, session, channel, msg)
             elif isinstance(msg, SystemMessage):
                 if msg.subtype == "flowchart_start":
                     ctx.in_flowchart = True
@@ -2162,6 +2285,17 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                 ctx.text_buffer = ctx.text_buffer[:split_at]
                 await _flush_text(ctx, session, channel, "mid_turn_split")
                 ctx.text_buffer = remainder
+    finally:
+        # Always cancel the typing indicator on exit (ds.typing_obj may have been
+        # replaced by a restart, so cancel whatever is current)
+        current_typing = ds.typing_obj
+        if current_typing and hasattr(current_typing, "task"):
+            current_typing.task.cancel()
+        ds.typing_obj = None
+
+    # Clean up temporary tool progress messages
+    if config.CLEAN_TOOL_MESSAGES and ctx.tool_msg_ids_to_delete:
+        await _delete_tool_progress_messages(ctx)
 
     if ctx.hit_rate_limit:
         # Finalize any in-flight streaming message (remove cursor)
@@ -2209,7 +2343,9 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
     # Append response timing inline to the last message
     if session.activity.query_started and (ctx.flush_count > 0 or ctx.text_buffer.strip()):
         elapsed = (datetime.now(UTC) - session.activity.query_started).total_seconds()
-        timing_suffix = f"\n-# {elapsed:.1f}s"
+        _sc = span.get_span_context()
+        _trace_tag = f" [trace={format(_sc.trace_id, '032x')[:16]}]" if _sc and _sc.trace_id else ""
+        timing_suffix = f"\n-# {elapsed:.1f}s{_trace_tag}"
 
         if ctx.deferred_msg:
             # Non-streaming: deferred message waiting — append timing and send (no edit needed)
@@ -2228,7 +2364,7 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                 )
             except Exception:
                 log.warning("Failed to edit last message to append timing", exc_info=True)
-                await channel.send(f"-# {elapsed:.1f}s")
+                await channel.send(f"-# {elapsed:.1f}s{_trace_tag}")
     else:
         # No timing — send any deferred message as-is
         if ctx.deferred_msg:
