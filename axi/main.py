@@ -584,7 +584,17 @@ async def before_check_schedules() -> None:
 
 
 async def _interrupt_agent(session: AgentSession) -> None:
-    """Send interrupt signal to an agent via SDK and/or procmux bridge."""
+    """Gracefully interrupt an agent's current turn, falling back to process kill.
+
+    Sends a control_request.interrupt to the CLI, which aborts the current API
+    call and emits a result message.  The CLI stays alive with context preserved
+    — no session rebuild needed.  Falls back to destructive interrupt_session()
+    only if the graceful interrupt fails (timeout/error).
+    """
+    if await agents.graceful_interrupt(session):
+        return
+    # Graceful interrupt failed — fall back to killing the CLI process
+    log.warning("Graceful interrupt failed for '%s', falling back to process kill", session.name)
     await agents.interrupt_session(session)
 
 
