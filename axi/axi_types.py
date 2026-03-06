@@ -102,6 +102,9 @@ class DiscordAgentState:
     # Typing indicator (discord.abc.Typing object) — stored so permission
     # callbacks can cancel/restart it while waiting for user input.
     typing_obj: Any = None
+    # Channel status tracking
+    task_done: bool = False
+    task_error: bool = False
 
 
 def discord_state(session: AgentSession) -> DiscordAgentState:

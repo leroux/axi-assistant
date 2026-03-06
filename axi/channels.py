@@ -21,7 +21,7 @@ from discord import CategoryChannel, TextChannel
 from opentelemetry import trace
 
 from axi import config
-from axi.axi_types import discord_state
+from axi.axi_types import AgentSession, discord_state
 
 if TYPE_CHECKING:
     from discord.ext.commands import Bot
@@ -110,6 +110,51 @@ def parse_channel_topic(
         elif key == "type":
             agent_type = value.strip()
     return cwd, session_id, prompt_hash, agent_type
+
+
+# ---------------------------------------------------------------------------
+# Channel status prefixes
+# ---------------------------------------------------------------------------
+
+STATUS_PREFIXES: dict[str, str] = {
+    "working": "\u26a1",
+    "plan_review": "\U0001f4cb",
+    "question": "\u2753",
+    "done": "\u2705",
+    "idle": "\U0001f4a4",
+    "error": "\u26a0\ufe0f",
+    "custom": "\U0001f527",
+}
+
+# Precomputed set of all emoji prefixes with trailing dash for fast stripping
+_STATUS_PREFIX_STRINGS: set[str] = set()
+
+
+def _rebuild_prefix_strings() -> None:
+    """Rebuild the prefix lookup set from STATUS_PREFIXES."""
+    _STATUS_PREFIX_STRINGS.clear()
+    for emoji in STATUS_PREFIXES.values():
+        _STATUS_PREFIX_STRINGS.add(f"{emoji}-")
+
+
+_rebuild_prefix_strings()
+
+
+def strip_status_prefix(name: str) -> str:
+    """Remove status emoji prefix from a channel name for matching."""
+    for prefix in _STATUS_PREFIX_STRINGS:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def _match_channel_name(ch_name: str, normalized: str) -> bool:
+    """Check if a channel name matches a normalized agent name, ignoring status prefix."""
+    if ch_name == normalized:
+        return True
+    if config.CHANNEL_STATUS_ENABLED:
+        return strip_status_prefix(ch_name) == normalized
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +306,7 @@ async def ensure_agent_channel(agent_name: str, cwd: str | None = None) -> TextC
         if cat is None:
             continue
         for ch in cat.text_channels:
-            if ch.name == normalized:
+            if _match_channel_name(ch.name, normalized):
                 # Move to correct category if it's in the wrong one
                 if target_category and ch.category_id != target_category.id:
                     try:
@@ -278,7 +323,7 @@ async def ensure_agent_channel(agent_name: str, cwd: str | None = None) -> TextC
     # Search Killed category
     if killed_category:
         for ch in killed_category.text_channels:
-            if ch.name == normalized:
+            if _match_channel_name(ch.name, normalized):
                 target_name = target_category.name if target_category else "?"
                 try:
                     await ch.move(category=target_category, beginning=True, sync_permissions=True)
@@ -294,7 +339,7 @@ async def ensure_agent_channel(agent_name: str, cwd: str | None = None) -> TextC
     # Search uncategorized guild channels (e.g., master pinned to server top)
     if target_guild is not None:
         for ch in target_guild.text_channels:
-            if ch.name == normalized and ch.category is None:
+            if _match_channel_name(ch.name, normalized) and ch.category is None:
                 _channel_to_agent[ch.id] = agent_name
                 return ch
 
@@ -328,8 +373,11 @@ async def move_channel_to_killed(agent_name: str) -> None:
         if cat is None:
             continue
         for ch in cat.text_channels:
-            if ch.name == normalized:
+            if _match_channel_name(ch.name, normalized):
                 try:
+                    # Strip status prefix when moving to Killed
+                    if config.CHANNEL_STATUS_ENABLED and ch.name != normalized:
+                        await ch.edit(name=normalized)
                     await ch.move(category=killed_category, end=True, sync_permissions=True)
                     log.info("Moved channel #%s to Killed category", normalized)
                 except discord.HTTPException as e:
@@ -354,7 +402,7 @@ async def get_agent_channel(agent_name: str) -> TextChannel | None:
         if cat is None:
             continue
         for ch in cat.text_channels:
-            if ch.name == normalized:
+            if _match_channel_name(ch.name, normalized):
                 return ch
     return None
 
@@ -371,13 +419,13 @@ async def deduplicate_master_channel() -> None:
         if cat is None:
             continue
         for ch in cat.text_channels:
-            if ch.name == normalized and ch.id not in seen_ids:
+            if _match_channel_name(ch.name, normalized) and ch.id not in seen_ids:
                 master_channels.append(ch)
                 seen_ids.add(ch.id)
     # Also check uncategorized channels (master pinned to server top)
     if target_guild is not None:
         for ch in target_guild.text_channels:
-            if ch.name == normalized and ch.category is None and ch.id not in seen_ids:
+            if _match_channel_name(ch.name, normalized) and ch.category is None and ch.id not in seen_ids:
                 master_channels.append(ch)
                 seen_ids.add(ch.id)
 
@@ -428,7 +476,7 @@ async def ensure_master_channel_position() -> None:
     normalized = normalize_channel_name(config.MASTER_AGENT_NAME)
     master_ch: TextChannel | None = None
     for ch in target_guild.text_channels:
-        if ch.name == normalized:
+        if _match_channel_name(ch.name, normalized):
             master_ch = ch
             break
 
@@ -518,7 +566,7 @@ async def _do_reorder() -> None:
         # Sort by activity (most recent first), channels without activity go to the end
         def _sort_key(ch: TextChannel) -> tuple[int, float]:
             # axi-master always first (priority 0), others priority 1
-            is_master = 0 if ch.name == master_normalized else 1
+            is_master = 0 if _match_channel_name(ch.name, master_normalized) else 1
             # Negate timestamp so higher (more recent) sorts first
             activity = -_channel_activity.get(ch.id, 0.0)
             return (is_master, activity)
@@ -547,3 +595,157 @@ async def _do_reorder() -> None:
             )
         except discord.HTTPException as e:
             log.warning("Failed to reorder channels in '%s': %s", category.name, e)
+
+
+# ---------------------------------------------------------------------------
+# Channel status prefix management
+# ---------------------------------------------------------------------------
+
+# agent_name → custom status string (set via MCP tool)
+_status_overrides: dict[str, str] = {}
+
+# channel_id → monotonic timestamp of last rename (rate limit tracking)
+_last_rename: dict[int, float] = {}
+
+_RENAME_COOLDOWN = 300.0  # 5 minutes — Discord allows 2 name changes per 10 min
+_RENAME_DEBOUNCE = 60.0   # seconds between batch runs
+_rename_task: asyncio.Task[None] | None = None
+_rename_lock = asyncio.Lock()
+
+
+def compute_agent_status(session: AgentSession) -> str:
+    """Auto-detect the current status of an agent from its session state."""
+    ds = discord_state(session)
+
+    # Explicit override takes priority
+    if session.name in _status_overrides:
+        return "custom"
+
+    # Error state
+    if ds.task_error:
+        return "error"
+
+    # Waiting on user (plan review or question)
+    if ds.plan_approval_future is not None:
+        return "plan_review"
+    if ds.question_future is not None:
+        return "question"
+
+    # Done (initial task completed)
+    if ds.task_done:
+        return "done"
+
+    # Working (awake + busy)
+    if session.client is not None and session.query_lock.locked():
+        return "working"
+
+    # Idle (sleeping or awake-idle)
+    return "idle"
+
+
+def _build_status_channel_name(agent_name: str, status: str) -> str:
+    """Build a channel name with status emoji prefix."""
+    base = normalize_channel_name(agent_name)
+    emoji = STATUS_PREFIXES.get(status)
+    if emoji:
+        return f"{emoji}-{base}"
+    return base
+
+
+def set_status_override(agent_name: str, status: str | None) -> None:
+    """Set or clear an explicit status override for an agent."""
+    if status is None:
+        _status_overrides.pop(agent_name, None)
+    else:
+        _status_overrides[agent_name] = status
+
+
+def get_status_override(agent_name: str) -> str | None:
+    """Get the current explicit status override for an agent, if any."""
+    return _status_overrides.get(agent_name)
+
+
+def schedule_status_update() -> None:
+    """Schedule a debounced channel status rename batch.
+
+    Called whenever agent status might have changed (query start/end,
+    plan review, question asked, etc).
+    """
+    if not config.CHANNEL_STATUS_ENABLED:
+        return
+    global _rename_task
+    if _rename_task is not None and not _rename_task.done():
+        _rename_task.cancel()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _rename_task = loop.create_task(_debounced_rename())
+
+
+async def _debounced_rename() -> None:
+    """Wait for the debounce period, then run the rename batch."""
+    try:
+        await asyncio.sleep(_RENAME_DEBOUNCE)
+    except asyncio.CancelledError:
+        return
+    await _do_rename_batch()
+
+
+async def _do_rename_batch() -> None:
+    """Rename channels to reflect current agent statuses.
+
+    Respects the per-channel rename cooldown (2 per 10 min Discord rate limit).
+    """
+    if not config.CHANNEL_STATUS_ENABLED:
+        return
+    if _rename_lock.locked():
+        return  # Already running; next schedule_status_update will catch up
+    async with _rename_lock:
+        if _agents_dict is None:
+            return
+
+        now = time.monotonic()
+        renamed = 0
+
+        for agent_name, session in list(_agents_dict.items()):
+            # Skip master — it's pinned at the top, no status prefix
+            if agent_name == config.MASTER_AGENT_NAME:
+                continue
+
+            ds = discord_state(session)
+            if not ds.channel_id:
+                continue
+
+            # Only rename channels in live categories (not Killed)
+            channel = _bot.get_channel(ds.channel_id) if _bot else None
+            if not isinstance(channel, TextChannel):
+                continue
+            if killed_category and channel.category_id == killed_category.id:
+                continue
+
+            status = compute_agent_status(session)
+            desired_name = _build_status_channel_name(agent_name, status)
+
+            if channel.name == desired_name:
+                continue  # Already correct
+
+            # Rate limit: skip if renamed too recently
+            last = _last_rename.get(channel.id, 0.0)
+            if (now - last) < _RENAME_COOLDOWN:
+                log.debug(
+                    "Skipping rename of #%s (cooldown, %.0fs remaining)",
+                    channel.name, _RENAME_COOLDOWN - (now - last),
+                )
+                continue
+
+            try:
+                await channel.edit(name=desired_name)
+                _last_rename[channel.id] = time.monotonic()
+                renamed += 1
+                log.info("Status rename: #%s → #%s", channel.name, desired_name)
+            except discord.HTTPException as e:
+                log.warning("Failed to rename #%s → #%s: %s", channel.name, desired_name, e)
+
+        if renamed > 0:
+            log.info("Status rename batch: %d channels updated", renamed)

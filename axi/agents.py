@@ -60,6 +60,7 @@ from axi.channels import (
     mark_channel_active,
     move_channel_to_killed,
     normalize_channel_name,
+    schedule_status_update,
 )
 from axi.channels import (
     parse_channel_topic as _parse_channel_topic,
@@ -710,6 +711,7 @@ async def _handle_exit_plan_mode(
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
     ds.plan_approval_future = future  # type: ignore[assignment]
+    schedule_status_update()
 
     log.info("Agent '%s' paused waiting for plan approval", session.name)
 
@@ -721,6 +723,7 @@ async def _handle_exit_plan_mode(
     finally:
         ds.plan_approval_future = None
         ds.plan_approval_message_id = None
+        schedule_status_update()
 
     # Remove the unchosen reaction so the result is visually clear
     remove_emoji = "\u274c" if result.get("approved") else "\u2705"
@@ -888,6 +891,7 @@ async def _handle_ask_user_question(
 
         future: asyncio.Future[str] = loop.create_future()
         discord_state(session).question_future = future
+        schedule_status_update()
 
         log.info("Agent '%s' waiting for answer to question %d/%d", session.name, i + 1, len(questions))
 
@@ -900,6 +904,7 @@ async def _handle_ask_user_question(
             discord_state(session).question_future = None
             discord_state(session).question_message_id = None
             discord_state(session).question_data = None
+            schedule_status_update()
 
         # Empty answer means interrupted (e.g. /stop)
         if not answer:
@@ -1082,9 +1087,13 @@ def is_processing(session: AgentSession) -> bool:
 def _reset_session_activity(session: AgentSession) -> None:
     """Reset idle tracking and activity state for the start of a new query."""
     session.last_activity = datetime.now(UTC)
-    discord_state(session).last_idle_notified = None
+    ds = discord_state(session)
+    ds.last_idle_notified = None
+    ds.task_done = False
+    ds.task_error = False
     session.idle_reminder_count = 0
     session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
+    schedule_status_update()
 
 
 # ---------------------------------------------------------------------------
@@ -1149,6 +1158,7 @@ async def sleep_agent(session: AgentSession, *, force: bool = False) -> None:
 
     assert hub is not None
     await lifecycle.sleep_agent(hub, session, force=force)
+    schedule_status_update()
 
 
 async def wake_agent(session: AgentSession) -> None:
@@ -1202,6 +1212,7 @@ async def wake_agent(session: AgentSession) -> None:
                 )
 
     await _post_model_warning(session)
+    schedule_status_update()
 
 
 async def wake_or_queue(
@@ -1363,7 +1374,7 @@ async def reconstruct_agents_from_channels() -> int:
 
     for cat in categories:
         for ch in cat.text_channels:
-            agent_name = ch.name
+            agent_name = _channels_mod.strip_status_prefix(ch.name) if config.CHANNEL_STATUS_ENABLED else ch.name
 
             if agent_name == normalize_channel_name(config.MASTER_AGENT_NAME):
                 channel_to_agent[ch.id] = config.MASTER_AGENT_NAME
@@ -2880,10 +2891,14 @@ async def run_initial_prompt(session: AgentSession, prompt: MessageContent, chan
                     session.activity = ActivityState(phase="idle")
 
             log.debug("Initial prompt completed for '%s'", session.name)
+            discord_state(session).task_done = True
+            schedule_status_update()
             await send_system(channel, f"Agent **{session.name}** finished initial task. {_user_mentions()}")
 
         except Exception:
             log.exception("Error running initial prompt for agent '%s'", session.name)
+            discord_state(session).task_error = True
+            schedule_status_update()
             await send_system(
                 channel, f"Agent **{session.name}** encountered an error during initial task. {_user_mentions()}"
             )
@@ -2972,6 +2987,7 @@ async def process_message_queue(session: AgentSession) -> None:
                 )
             finally:
                 session.activity = ActivityState(phase="idle")
+                schedule_status_update()
 
 
 # ---------------------------------------------------------------------------
@@ -3083,6 +3099,7 @@ async def _process_inter_agent_prompt(
                 )
             finally:
                 session.activity = ActivityState(phase="idle")
+                schedule_status_update()
 
         if scheduler.should_yield(session.name):
             log.info("Scheduler yield: '%s' sleeping after inter-agent message", session.name)

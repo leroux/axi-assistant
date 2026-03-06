@@ -616,6 +616,72 @@ async def discord_send_message(args: McpArgs) -> McpResult:
 
 
 # ---------------------------------------------------------------------------
+# Channel status tools (available to all agents)
+# ---------------------------------------------------------------------------
+
+
+@tool(
+    "set_agent_status",
+    "Set a custom status on your agent's Discord channel (shown as an emoji prefix). "
+    "Use this to signal what you're doing (e.g. 'testing', 'deploying', 'waiting for CI'). "
+    "Call clear_agent_status to revert to auto-detected status.",
+    {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "description": "Short status label (e.g. 'testing', 'deploying', 'blocked')",
+            },
+        },
+        "required": ["status"],
+    },
+)
+async def set_agent_status(args: McpArgs) -> McpResult:
+    status = args.get("status", "").strip()
+    _tracer.start_span("tool.set_agent_status", attributes={"status": status}).end()
+    if not status:
+        return {"content": [{"type": "text", "text": "Error: status is required."}], "is_error": True}
+    if not config.CHANNEL_STATUS_ENABLED:
+        return {"content": [{"type": "text", "text": "Channel status prefixes are not enabled."}]}
+
+    # Find calling agent by checking which agent is currently processing
+    caller: str | None = None
+    for name, session in agents.agents.items():
+        if session.client is not None and session.query_lock.locked():
+            caller = name
+            break
+    if not caller:
+        return {"content": [{"type": "text", "text": "Error: could not determine calling agent."}], "is_error": True}
+
+    channels.set_status_override(caller, status)
+    channels.schedule_status_update()
+    return {"content": [{"type": "text", "text": f"Status set to '{status}'. Channel will update shortly."}]}
+
+
+@tool(
+    "clear_agent_status",
+    "Clear your custom channel status and revert to auto-detected status.",
+    {"type": "object", "properties": {}, "required": []},
+)
+async def clear_agent_status(args: McpArgs) -> McpResult:
+    _tracer.start_span("tool.clear_agent_status").end()
+    if not config.CHANNEL_STATUS_ENABLED:
+        return {"content": [{"type": "text", "text": "Channel status prefixes are not enabled."}]}
+
+    caller: str | None = None
+    for name, session in agents.agents.items():
+        if session.client is not None and session.query_lock.locked():
+            caller = name
+            break
+    if not caller:
+        return {"content": [{"type": "text", "text": "Error: could not determine calling agent."}], "is_error": True}
+
+    channels.set_status_override(caller, None)
+    channels.schedule_status_update()
+    return {"content": [{"type": "text", "text": "Custom status cleared. Channel will revert to auto-detected status."}]}
+
+
+# ---------------------------------------------------------------------------
 # MCP server assembly
 # ---------------------------------------------------------------------------
 
@@ -623,7 +689,7 @@ async def discord_send_message(args: McpArgs) -> McpResult:
 utils_mcp_server = create_sdk_mcp_server(
     name="utils",
     version="1.0.0",
-    tools=[get_date_and_time, discord_send_file],
+    tools=[get_date_and_time, discord_send_file, set_agent_status, clear_agent_status],
 )
 
 # Spawned agents get spawn+kill+restart-agent (no bot restart — they tell the parent)

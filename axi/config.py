@@ -18,6 +18,7 @@ __all__ = [
     "BOT_DIR",
     "BOT_WORKTREES_DIR",
     "BRIDGE_SOCKET_PATH",
+    "CHANNEL_STATUS_ENABLED",
     "CLEAN_TOOL_MESSAGES",
     "CONFIG_PATH",
     "CRASH_ANALYSIS_MARKER_PATH",
@@ -133,6 +134,7 @@ log.addHandler(_file_handler)
 
 FLOWCODER_ENABLED = os.environ.get("FLOWCODER_ENABLED", "1").lower() in ("1", "true", "yes")
 STREAMING_DISCORD = os.environ.get("STREAMING_DISCORD", "").lower() in ("1", "true", "yes")
+CHANNEL_STATUS_ENABLED = os.environ.get("CHANNEL_STATUS_ENABLED", "").lower() in ("1", "true", "yes")
 CLEAN_TOOL_MESSAGES = os.environ.get("CLEAN_TOOL_MESSAGES", "").lower() in ("1", "true", "yes")
 
 # Context compaction threshold — fraction of context window that triggers auto-compact.
