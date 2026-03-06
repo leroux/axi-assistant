@@ -496,11 +496,10 @@ async def discord_send_file(args: McpArgs) -> McpResult:
     content = args.get("content", "")
     channel_id = args.get("channel_id")
     if not channel_id:
-        # Auto-resolve: find calling agent's channel
+        # Auto-resolve: find calling agent's channel via query_lock
         for ch_id, name in agents.channel_to_agent.items():
             session = agents.agents.get(name)
-            if session and session.client is not None:
-                # Heuristic: the agent currently awake and calling this tool
+            if session and session.client is not None and session.query_lock.locked():
                 channel_id = str(ch_id)
                 break
     if not channel_id:
