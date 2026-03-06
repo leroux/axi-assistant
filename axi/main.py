@@ -1119,7 +1119,11 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
         return
 
     await interaction.response.defer()
-    _tracer.start_span("slash.stop_agent", attributes={"agent.name": agent_name}).end()
+    trace_tag = agents.get_active_trace_tag(agent_name)
+    _tracer.start_span(
+        "slash.stop_agent",
+        attributes={"agent.name": agent_name, "interrupted.trace_tag": trace_tag},
+    ).end()
 
     try:
         await _interrupt_agent(session)
@@ -1153,6 +1157,8 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
             parts.append(f"Cleared {cleared} queued message{'s' if cleared != 1 else ''}.")
         if plan_was_active:
             parts.append("Plan mode deactivated.")
+        if trace_tag:
+            parts.append(f"\n-# Interrupted turn {trace_tag}")
         await interaction.followup.send(" ".join(parts))
     except Exception as e:
         log.exception("Failed to interrupt agent '%s'", agent_name)
@@ -1174,18 +1180,25 @@ async def skip_agent(interaction: discord.Interaction, agent_name: str | None = 
         return
 
     await interaction.response.defer()
+    trace_tag = agents.get_active_trace_tag(agent_name)
+    _tracer.start_span(
+        "slash.skip_agent",
+        attributes={"agent.name": agent_name, "interrupted.trace_tag": trace_tag},
+    ).end()
 
     queued = len(session.message_queue)
     try:
         await _interrupt_agent(session)
         if queued:
-            await interaction.followup.send(
-                f"*System:* Skipped current query for **{agent_name}**. {queued} queued message{'s' if queued != 1 else ''} will continue processing."
+            msg = (
+                f"*System:* Skipped current query for **{agent_name}**. "
+                f"{queued} queued message{'s' if queued != 1 else ''} will continue processing."
             )
         else:
-            await interaction.followup.send(
-                f"*System:* Skipped current query for **{agent_name}**. No queued messages."
-            )
+            msg = f"*System:* Skipped current query for **{agent_name}**. No queued messages."
+        if trace_tag:
+            msg += f"\n-# Skipped turn {trace_tag}"
+        await interaction.followup.send(msg)
     except Exception as e:
         log.exception("Failed to interrupt agent '%s'", agent_name)
         await interaction.followup.send(f"Failed to skip **{agent_name}**: {e}")

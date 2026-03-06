@@ -145,6 +145,15 @@ schedule_last_fired: dict[str, datetime] = {}
 # Stream tracing
 _stream_counter = 0
 
+# Active trace IDs — maps agent name → trace tag string (e.g. "[trace=abc123...]")
+# Set when process_message starts its span, cleared when done.
+_active_trace_ids: dict[str, str] = {}
+
+
+def get_active_trace_tag(agent_name: str) -> str:
+    """Return the trace tag for the agent's in-flight turn, or empty string."""
+    return _active_trace_ids.get(agent_name, "")
+
 # MCP server injection (set by bot.py after tools.py creates them)
 _utils_mcp_server: Any = None
 
@@ -2403,6 +2412,15 @@ async def interrupt_session(session: AgentSession) -> None:
     For direct-subprocess agents (claude_code): uses the SDK interrupt with
     a short timeout.
     """
+    trace_tag = get_active_trace_tag(session.name)
+    _tracer.start_span(
+        "interrupt_session",
+        attributes={
+            "agent.name": session.name,
+            "interrupt.trace_tag": trace_tag,
+        },
+    ).end()
+
     # Flowcoder agents: use transport.stop() for instant termination
     if session.transport is not None:
         await session.transport.stop()
@@ -2576,7 +2594,11 @@ async def process_message(session: AgentSession, content: MessageContent, channe
             "message.length": len(content) if isinstance(content, str) else -1,
             "discord.channel": getattr(channel, "name", "?"),
         },
-    ):
+    ) as pm_span:
+        # Store trace ID so /stop and /skip can reference the interrupted turn
+        _sc = pm_span.get_span_context()
+        if _sc and _sc.trace_id:
+            _active_trace_ids[session.name] = f"[trace={format(_sc.trace_id, '032x')[:16]}]"
         try:
             async with asyncio.timeout(config.QUERY_TIMEOUT):
                 await session.client.query(as_stream(content))
@@ -2642,6 +2664,8 @@ async def process_message(session: AgentSession, content: MessageContent, channe
         except Exception:
             log.exception("Error querying Claude Code agent '%s'", session.name)
             raise RuntimeError(f"Query failed for agent '{session.name}'") from None
+        finally:
+            _active_trace_ids.pop(session.name, None)
 
 
 # ---------------------------------------------------------------------------
@@ -3248,6 +3272,7 @@ __all__ = [
     "format_channel_topic",
     "format_time_remaining",
     "format_todo_list",
+    "get_active_trace_tag",
     "get_agent_channel",
     "get_master_channel",
     "get_master_session",

@@ -209,7 +209,18 @@ class ShutdownCoordinator:
 
         In bridge mode, agents are NOT slept — they keep running in the bridge
         process and will be reconnected after restart.
+
+        Note: spans are fire-and-forget here because os._exit() prevents normal
+        cleanup. shutdown_tracing() is called inside _close_bot_fn to flush
+        pending spans before exit.
         """
+        _tracer.start_span(
+            "shutdown.execute_exit",
+            attributes={
+                "shutdown.bridge_mode": self._bridge_mode,
+                "shutdown.skip_agent": skip_agent or "",
+            },
+        ).end()
         _start_deadline_thread(self._deadline_timeout)
 
         if self._goodbye_fn is not None:
@@ -250,7 +261,16 @@ class ShutdownCoordinator:
             log.info("Graceful shutdown already in progress (ignoring duplicate from %s)", source)
             return
         self._requested = True
-        _tracer.start_span("shutdown.graceful", attributes={"shutdown.source": source}).end()
+        busy = self.get_busy_agents(skip=skip_agent)
+        _tracer.start_span(
+            "shutdown.graceful",
+            attributes={
+                "shutdown.source": source,
+                "shutdown.bridge_mode": self._bridge_mode,
+                "shutdown.busy_agents": list(busy.keys()),
+                "shutdown.skip_agent": skip_agent or "",
+            },
+        ).end()
         log.info("Graceful shutdown initiated from %s", source)
 
         # In bridge mode, agents keep running — no need to wait or sleep
@@ -258,8 +278,6 @@ class ShutdownCoordinator:
             log.info("Bridge mode — skipping agent wait, agents keep running")
             await self._execute_exit(skip_agent=skip_agent)
             return  # unreachable (os._exit) but makes intent clear
-
-        busy = self.get_busy_agents(skip=skip_agent)
 
         if not busy:
             log.info("No agents busy — exiting immediately")
@@ -306,6 +324,13 @@ class ShutdownCoordinator:
         if self._requested:
             log.info("Shutdown already in progress — escalating to force (from %s)", source)
         self._requested = True
-        _tracer.start_span("shutdown.force", attributes={"shutdown.source": source}).end()
+        busy = self.get_busy_agents()
+        _tracer.start_span(
+            "shutdown.force",
+            attributes={
+                "shutdown.source": source,
+                "shutdown.busy_agents": list(busy.keys()),
+            },
+        ).end()
         log.info("Force shutdown initiated from %s", source)
         await self._execute_exit(skip_agent=None)
