@@ -503,6 +503,7 @@ wire format.
 | Bare event filtering | `transport.py` | `BridgeTransport.read_messages()` drops bare stream events (the CLI's duplicate emission), halving message volume. Only wrapped `stream_event` forms are yielded to consumers. |
 | Bridge-stdio logging | `transport.py` | Optional `stdio_logger` logs all stdin/stdout traffic for debugging. The `bridge-stdio-*.log` files that informed this document are produced by this logger. |
 | procmux buffer replay | `procmux/` | When the bot reconnects after a restart, procmux replays buffered stdout messages. These replayed messages are identical to the originals — procmux adds nothing to the payload. |
+| Early message injection (interrupt-and-inject) | `axi/agents.py`, `axi/main.py` | When a user sends a message while an agent is busy, the host sends `control_request.interrupt` to abort the current turn, then processes the queued message as the next query. This uses the SDK's `client.interrupt()` which is a graceful abort — the CLI keeps its session and conversation context. See "Early Message Injection" section below. |
 
 ### Summary
 
@@ -534,3 +535,78 @@ wire format.
 │  Filters: bare stream event duplicates (CLI dual emit) │
 └──────────────────────────────────────────────────────┘
 ```
+
+## Early Message Injection
+
+When a user sends a message while an agent is actively processing a query, the host
+uses the `control_request.interrupt` mechanism to abort the current turn and process
+the new message immediately, rather than waiting for the full turn to complete.
+
+### Mechanism
+
+The CLI's stdin processing loop runs concurrently with query execution. It handles
+`control_request.interrupt` by aborting the current API call and emitting a `result`
+message. The session and conversation context are preserved.
+
+### Flow
+
+```
+  User sends message while agent is busy
+       │
+       ▼
+  Host queues message in session.message_queue
+       │
+       ▼
+  Host sends control_request.interrupt via client.interrupt()
+       │
+       ▼
+  CLI aborts current API call
+       │
+       ▼
+  CLI emits result (partial turn preserved in context)
+       │
+       ▼
+  Host streaming loop sees result, exits normally
+       │
+       ▼
+  Host drains message queue (process_message_queue)
+       │
+       ▼
+  Queued message sent as next query via client.query()
+```
+
+### Wire-level detail
+
+```
+# Agent is mid-turn (streaming response)...
+
+# User sends new message → host interrupts:
+OUT  control_request  {"request_id": "...", "request": {"subtype": "interrupt"}}
+IN   control_response {"response": {"subtype": "success", "request_id": "..."}}
+IN   result           {"subtype": "success", ...}   # current turn ends
+
+# Host sends queued message as new query:
+OUT  user             {"message": {"role": "user", "content": "..."}}
+IN   system.init      # re-emitted
+IN   stream_event.*   # new turn begins
+...
+IN   result           # new turn completes
+```
+
+### Key properties
+
+- **Graceful**: Uses `client.interrupt()` (SDK control protocol), not process kill.
+  The CLI stays alive with full conversation context.
+- **Context preserved**: The interrupted turn's partial output remains in the
+  conversation history. The agent can see what it was doing when interrupted.
+- **Degradation**: If the interrupt fails or times out (5s), the message stays
+  queued and processes after the current turn completes (original behavior).
+- **Multiple messages**: Rapid messages all queue up. The first triggers the
+  interrupt. After the turn ends, `process_message_queue` drains them sequentially.
+
+### vs interrupt_session (destructive)
+
+`interrupt_session()` kills the CLI process via `transport.stop()`, which injects
+an `ExitEvent` and terminates the process. The session is lost and must be
+reconstructed. `graceful_interrupt()` only aborts the current API turn — the CLI
+process and session continue normally.

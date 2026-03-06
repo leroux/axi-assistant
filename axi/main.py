@@ -315,16 +315,23 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
-    # 2. Agent busy: queue messages for later
+    # 2. Agent busy: queue message and interrupt current turn
     if agents.is_processing(session):
         session.message_queue.append((content, channel, message))
         position = len(session.message_queue)
         log.debug("Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position)
         await agents.add_reaction(message, "📨")
-        await agents.send_system(
-            channel,
-            f"Agent **{agent_name}** is busy — message queued (position {position}). Will process after current turn.",
-        )
+        interrupted = await agents.graceful_interrupt(session)
+        if interrupted:
+            await agents.send_system(
+                channel,
+                f"Agent **{agent_name}** is busy — message queued (position {position}). Interrupting current task.",
+            )
+        else:
+            await agents.send_system(
+                channel,
+                f"Agent **{agent_name}** is busy — message queued (position {position}). Will process after current turn.",
+            )
         return
 
     # --- Normal processing path ---

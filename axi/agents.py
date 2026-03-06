@@ -2443,6 +2443,34 @@ async def interrupt_session(session: AgentSession) -> None:
             pass
 
 
+async def graceful_interrupt(session: AgentSession) -> bool:
+    """Gracefully interrupt the current turn without killing the CLI process.
+
+    Sends a control_request.interrupt to the CLI, which aborts the current
+    API call and emits a result.  The CLI stays alive with full conversation
+    context -- ready for the next user message.
+
+    Returns True if the interrupt was sent successfully, False otherwise.
+    On failure the queued message will process after the current turn finishes
+    (graceful degradation -- same as the old behavior).
+    """
+    if session.client is None:
+        log.debug("graceful_interrupt: no client for '%s'", session.name)
+        return False
+
+    try:
+        async with asyncio.timeout(5):
+            await session.client.interrupt()
+        log.info("INTERRUPT[%s] graceful interrupt sent", session.name)
+        return True
+    except TimeoutError:
+        log.warning("INTERRUPT[%s] graceful interrupt timed out", session.name)
+        return False
+    except Exception:
+        log.warning("INTERRUPT[%s] graceful interrupt failed", session.name, exc_info=True)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Retry / timeout
 # ---------------------------------------------------------------------------
@@ -2986,11 +3014,10 @@ async def deliver_inter_agent_message(
             sender_name,
             target_session.name,
         )
-        try:
-            await interrupt_session(target_session)
-        except Exception:
-            log.exception(
-                "Failed to interrupt '%s' for inter-agent message (message still queued)",
+        interrupted = await graceful_interrupt(target_session)
+        if not interrupted:
+            log.warning(
+                "Graceful interrupt failed for '%s' inter-agent message (message still queued)",
                 target_session.name,
             )
         return f"delivered to busy agent '{target_session.name}' (interrupted, will process next)"
@@ -3276,6 +3303,7 @@ __all__ = [
     "get_agent_channel",
     "get_master_channel",
     "get_master_session",
+    "graceful_interrupt",
     "handle_query_timeout",
     "init",
     "init_shutdown_coordinator",
