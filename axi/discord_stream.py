@@ -928,11 +928,14 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
 
 
 async def interrupt_session(session: AgentSession) -> None:
-    """Kill the CLI process for an agent session.
+    """Interrupt the current turn for an agent session.
 
     For bridge-managed agents (flowcoder): calls transport.stop() which
     immediately terminates the streaming loop by injecting an ExitEvent,
     then kills the process in the background.  Returns instantly.
+
+    For procmux-managed agents: sends "interrupt" (SIGINT) so the CLI
+    stays alive with conversation context preserved.
 
     For direct-subprocess agents (claude_code): uses the SDK interrupt with
     a short timeout.
@@ -942,13 +945,13 @@ async def interrupt_session(session: AgentSession) -> None:
         await session.transport.stop()
         return
 
-    # Fallback: try procmux kill directly (e.g. transport lost but procmux alive)
+    # Fallback: try procmux interrupt directly (e.g. transport lost but procmux alive)
     assert _get_procmux_conn is not None
     procmux_conn = _get_procmux_conn()
     if procmux_conn and procmux_conn.is_alive:
-        result = await procmux_conn.send_command("kill", name=session.name)
+        result = await procmux_conn.send_command("interrupt", name=session.name)
         if not result.ok:
-            log.warning("Bridge kill for '%s' failed: %s", session.name, result.error)
+            log.warning("Bridge interrupt for '%s' failed: %s", session.name, result.error)
         else:
             return
 

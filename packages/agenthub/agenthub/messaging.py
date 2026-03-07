@@ -61,20 +61,21 @@ class ReceiveResult:
 
 
 async def interrupt_session(hub: AgentHub, session: AgentSession) -> None:
-    """Kill the CLI process for an agent session.
+    """Gracefully interrupt the current turn for an agent session.
 
-    Uses the bridge "kill" command if connected, otherwise falls back to
-    the SDK's interrupt method.
+    Sends SIGINT via procmux "interrupt" command if connected, otherwise
+    falls back to the SDK's interrupt method.  The CLI process stays alive
+    with conversation context preserved.
     """
     if hub.process_conn is not None:
         try:
-            result = await hub.process_conn.send_command("kill", name=session.name)
+            result = await hub.process_conn.send_command("interrupt", name=session.name)
             if not result.ok:
                 log.warning(
-                    "Bridge kill for '%s' failed: %s", session.name, result.error
+                    "Bridge interrupt for '%s' failed: %s", session.name, result.error
                 )
         except Exception:
-            log.exception("Bridge kill for '%s' raised", session.name)
+            log.exception("Bridge interrupt for '%s' raised", session.name)
         return
 
     # Fallback: SDK interrupt
