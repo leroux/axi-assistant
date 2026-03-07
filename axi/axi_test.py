@@ -331,7 +331,13 @@ def _make_slot(guild_name: str, config: dict[str, Any], worktree: str, mode: str
     }
 
 
-def _write_env(guild_name: str, config: dict[str, Any], instance_path: str, data_path: str) -> None:
+def _write_env(
+    guild_name: str,
+    config: dict[str, Any],
+    instance_path: str,
+    data_path: str,
+    rs_binary: str | None = None,
+) -> None:
     """Generate .env and data dir from reservation data.
 
     The .env contains non-sensitive config only. The bot token is NOT written
@@ -352,6 +358,8 @@ def _write_env(guild_name: str, config: dict[str, Any], instance_path: str, data
         f"SHOW_AWAITING_INPUT=true\n"
         f"AXI_MODEL=haiku\n"
     )
+    if rs_binary:
+        env_content += f"AXI_RS_BINARY={rs_binary}\n"
     with open(os.path.join(instance_path, ".env"), "w") as f:
         f.write(env_content)
 
@@ -688,8 +696,11 @@ def cmd_up(args: argparse.Namespace) -> None:
     instance_path = os.path.join(TESTS_DIR, name)
     data_path = os.path.join(TESTS_DIR, f"{name}-data")
 
+    rs_binary = None
     if mode == "rs":
         _install_rs_units()
+        profile = "release" if args.release else "debug"
+        rs_binary = os.path.join(instance_path, "axi-rs", "target", profile, "axi")
 
     guild_name = _try_reserve(config, name, instance_path, args.guild, mode)
 
@@ -711,12 +722,14 @@ def cmd_up(args: argparse.Namespace) -> None:
             sys.exit(1)
 
     # Write .env and create data dir (outside lock — derived from reservation)
-    _write_env(guild_name, config, instance_path, data_path)
+    _write_env(guild_name, config, instance_path, data_path, rs_binary)
 
     guild_id = config["guilds"][guild_name]["guild_id"]
     print(f"Reserved guild '{guild_name}' ({guild_id}) for instance '{name}' (mode: {mode})")
     print(f"  .env:  {instance_path}/.env")
     print(f"  Data:  {data_path}")
+    if rs_binary:
+        print(f"  Binary: {rs_binary}")
 
 
 def cmd_down(args: argparse.Namespace) -> None:
@@ -1287,7 +1300,8 @@ def main():
     p_up.add_argument("--guild", help="Guild name from config (default: auto-pick)")
     p_up.add_argument("--wait", action="store_true", help="Wait for a bot token slot if all are in use")
     p_up.add_argument("--wait-timeout", type=int, default=7200, help="Max seconds to wait for a slot (default: 7200)")
-    p_up.add_argument("--rs", action="store_true", help="Use Rust bot (2 services: procmux + bot)")
+    p_up.add_argument("--rs", action="store_true", help="Use Rust bot (debug build by default)")
+    p_up.add_argument("--release", action="store_true", help="Use release build (requires --rs)")
     p_up.set_defaults(func=cmd_up)
 
     # down
