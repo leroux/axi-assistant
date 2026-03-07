@@ -1201,6 +1201,7 @@ name = "procmux"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "nix",
  "serde",
  "serde_json",
