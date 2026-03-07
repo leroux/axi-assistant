@@ -691,6 +691,8 @@ async def _handle_system_message(
     if session.agent_log:
         session.agent_log.debug("SYSTEM_MSG: subtype=%s data=%s", msg.subtype, json.dumps(msg.data)[:500])
     if msg.subtype == "status" and msg.data.get("status") == "compacting":
+        # Set compacting flag — prevents interrupts during compaction
+        session.compacting = True
         # CLI signals compaction is starting — only notify if we didn't trigger it ourselves
         if session.name not in _self_compacting:
             token_info = f" ({session.context_tokens:,} tokens)" if session.context_tokens else ""
@@ -698,6 +700,8 @@ async def _handle_system_message(
             await channel.send(f"\U0001f504 Compacting{token_info}...")
 
     elif msg.subtype == "compact_boundary":
+        # Clear compacting flag — compaction is done
+        session.compacting = False
         metadata = msg.data.get("compact_metadata", {})
         trigger = metadata.get("trigger", "unknown")
         pre_tokens = metadata.get("pre_tokens")

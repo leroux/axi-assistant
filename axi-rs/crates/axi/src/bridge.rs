@@ -565,6 +565,13 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                     .unwrap_or("");
                 match subtype {
                     "compacting" => {
+                        // Set compacting flag — prevents interrupts during compaction
+                        {
+                            let mut sessions = state.sessions.lock().await;
+                            if let Some(session) = sessions.get_mut(agent_name) {
+                                session.compacting = true;
+                            }
+                        }
                         if let Some(ch_id) = ctx.live_edit.as_ref().map(|le| le.channel_id) {
                             let _ = state
                                 .discord_client
@@ -573,6 +580,13 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                         }
                     }
                     "compact_boundary" => {
+                        // Clear compacting flag — compaction is done
+                        {
+                            let mut sessions = state.sessions.lock().await;
+                            if let Some(session) = sessions.get_mut(agent_name) {
+                                session.compacting = false;
+                            }
+                        }
                         debug!("Compact boundary for agent '{}'", agent_name);
                     }
                     _ => {
@@ -702,6 +716,14 @@ async fn check_auto_compact(
         context_tokens,
         context_window
     );
+
+    // Set compacting flag before sending /compact
+    {
+        let mut sessions = state.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(agent_name) {
+            session.compacting = true;
+        }
+    }
 
     if let Some(ch_id) = state.channel_for_agent(agent_name).await {
         let _ = state

@@ -446,6 +446,8 @@ async def _handle_system_message(
 ) -> AsyncIterator[StreamOutput]:
     """Transform a SystemMessage into StreamOutput events."""
     if msg.subtype == "status" and msg.data.get("status") == "compacting":
+        # Set compacting flag — prevents interrupts during compaction
+        session.compacting = True
         self_triggered = session.name in self_compacting_names
         yield CompactStart(
             token_count=session.context_tokens,
@@ -453,6 +455,8 @@ async def _handle_system_message(
         )
 
     elif msg.subtype == "compact_boundary":
+        # Clear compacting flag — compaction is done
+        session.compacting = False
         metadata = msg.data.get("compact_metadata", {})
         trigger = metadata.get("trigger", "unknown")
         pre_tokens = metadata.get("pre_tokens", 0)

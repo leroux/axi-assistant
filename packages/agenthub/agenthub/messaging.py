@@ -291,11 +291,18 @@ async def receive_user_message(
     if session.query_lock.locked():
         session.message_queue.append(queue_item)
         position = len(session.message_queue)
-        await hub.callbacks.post_system(
-            session.name,
-            f"Agent **{session.name}** is busy — message queued (position {position}). "
-            "Will process after current turn.",
-        )
+        if session.compacting:
+            await hub.callbacks.post_system(
+                session.name,
+                f"\U0001f504 Agent **{session.name}** is compacting context — message queued (position {position}). "
+                "Will process after compaction completes.",
+            )
+        else:
+            await hub.callbacks.post_system(
+                session.name,
+                f"Agent **{session.name}** is busy — message queued (position {position}). "
+                "Will process after current turn.",
+            )
         return ReceiveResult(status="queued")
 
     # Normal processing path
@@ -595,6 +602,14 @@ async def deliver_inter_agent_message(
 
     if target_session.query_lock.locked():
         target_session.message_queue.appendleft((prompt, None))
+        if target_session.compacting:
+            # Don't interrupt during compaction — message is queued, will process after
+            log.info(
+                "Inter-agent message from '%s' to compacting agent '%s' — queued (no interrupt)",
+                sender_name,
+                target_session.name,
+            )
+            return f"delivered to compacting agent '{target_session.name}' (queued, will process after compaction)"
         log.info(
             "Inter-agent message from '%s' to busy agent '%s' — interrupting",
             sender_name,

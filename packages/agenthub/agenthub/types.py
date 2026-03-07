@@ -64,6 +64,8 @@ class AgentSession:
     # Context window monitoring (updated from stderr autocompact debug lines)
     context_tokens: int = 0
     context_window: int = 0
+    # True while context compaction is in progress (prevents interrupts)
+    compacting: bool = False
 
 
 # ---------------------------------------------------------------------------

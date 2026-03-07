@@ -1169,11 +1169,13 @@ async def _maybe_compact(session: AgentSession, channel: TextChannel) -> None:
     await channel.send(f"\U0001f504 Context at {usage_pct:.0%} ({pre_tokens:,} tokens) \u2014 compacting...")
     _self_compacting.add(session.name)
     _compact_start_times[session.name] = time.monotonic()
+    session.compacting = True
     try:
         await session.client.query(as_stream(cmd))
         await stream_with_retry(session, channel)
     finally:
         _self_compacting.discard(session.name)
+        session.compacting = False
     # compact_boundary handler posts the completion message with timing + stats
 
 
@@ -1597,6 +1599,14 @@ async def deliver_inter_agent_message(
 
     if target_session.query_lock.locked():
         target_session.message_queue.appendleft((prompt, channel, None))
+        if target_session.compacting:
+            # Don't interrupt during compaction — message is queued, will process after
+            log.info(
+                "Inter-agent message from '%s' to compacting agent '%s' \u2014 queued (no interrupt)",
+                sender_name,
+                target_session.name,
+            )
+            return f"delivered to compacting agent '{target_session.name}' (queued, will process after compaction)"
         log.info(
             "Inter-agent message from '%s' to busy agent '%s' \u2014 interrupting",
             sender_name,
