@@ -94,21 +94,21 @@ Tasks:
 - [x] Model management (get/set current model)
 - [x] OpenTelemetry tracing setup (tracing + tracing-subscriber with env-filter)
 
-### Phase 5: AgentHub [ ]
+### Phase 5: AgentHub [x]
 **Goal**: Multi-agent session orchestrator library.
 
 Tasks:
-- [ ] AgentSession struct (name, client, cwd, queue, activity, etc.)
-- [ ] FrontendCallbacks trait (post_message, on_wake, on_sleep, etc.)
-- [ ] Scheduler: slot management, eviction (protected/interactive/background)
-- [ ] Lifecycle: wake_agent, sleep_agent, wake_or_queue
-- [ ] Registry: session dict, spawn, kill, end_session
-- [ ] Messaging: process_message, stream_with_retry, message queue drain
-- [ ] Inter-agent messaging
-- [ ] Rate limit tracking (per-session usage, quota management)
-- [ ] ShutdownCoordinator: graceful (wait for busy agents) + force
-- [ ] ReconnectManager: procmux reconnect, buffer replay, session reconstruction
-- [ ] Background task management (fire-and-forget with cleanup)
+- [x] AgentSession struct (name, client, cwd, queue, activity, etc.)
+- [x] FrontendCallbacks trait (post_message, on_wake, on_sleep, etc.)
+- [x] Scheduler: slot management, eviction (protected/interactive/background)
+- [x] Lifecycle: wake_agent, sleep_agent, wake_or_queue
+- [x] Registry: session dict, spawn, kill, end_session
+- [x] Messaging: process_message, stream_with_retry, message queue drain
+- [x] Inter-agent messaging
+- [x] Rate limit tracking (per-session usage, quota management)
+- [x] ShutdownCoordinator: graceful (wait for busy agents) + force
+- [x] ReconnectManager: procmux reconnect, buffer replay, session reconstruction
+- [x] Background task management (fire-and-forget with cleanup)
 
 ### Phase 6: Discord Bot [ ]
 **Goal**: Full Discord bot replacing main.py, agents.py, channels.py.

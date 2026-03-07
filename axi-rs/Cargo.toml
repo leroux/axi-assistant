@@ -5,6 +5,7 @@ members = [
     "crates/claudewire",
     "crates/axi-supervisor",
     "crates/axi-config",
+    "crates/axi-hub",
 ]
 
 [workspace.package]
