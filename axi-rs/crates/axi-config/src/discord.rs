@@ -30,6 +30,7 @@ pub enum DiscordError {
     RetriesExhausted,
 }
 
+#[derive(Clone)]
 pub struct DiscordClient {
     client: reqwest::Client,
     base_url: String,

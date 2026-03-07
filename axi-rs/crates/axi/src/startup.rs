@@ -127,8 +127,13 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
         .filter(|s| !s.is_empty());
 
     let mut master_session = AgentSession::new(master_name.clone());
-    master_session.cwd = master_cwd;
+    master_session.cwd = master_cwd.clone();
     master_session.session_id = master_session_id;
+
+    // Build SDK MCP servers for the master agent
+    let (sdk_servers, _sdk_json) =
+        crate::mcp_tools::build_sdk_mcp_config(&state, &master_name, &master_cwd, true);
+    master_session.sdk_mcp_servers = sdk_servers;
 
     crate::registry::register_session(&state, master_session).await;
 

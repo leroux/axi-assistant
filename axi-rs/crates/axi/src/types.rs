@@ -3,13 +3,15 @@
 //! `AgentSession` is a flat data container — lifecycle operations are
 //! module-level functions in lifecycle.rs, registry.rs, etc.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
 use claudewire::events::ActivityState;
+
+use crate::mcp_protocol::McpServer;
 
 /// Message content: either plain text or structured content blocks (JSON array).
 #[derive(Debug, Clone)]
@@ -72,6 +74,8 @@ pub struct AgentSession {
     pub compact_instructions: Option<String>,
     pub context_tokens: u64,
     pub context_window: u64,
+    /// SDK MCP servers available to this agent (handled in-process via control protocol).
+    pub sdk_mcp_servers: HashMap<String, McpServer>,
 }
 
 impl AgentSession {
@@ -99,6 +103,7 @@ impl AgentSession {
             compact_instructions: None,
             context_tokens: 0,
             context_window: 0,
+            sdk_mcp_servers: HashMap::new(),
         }
     }
 

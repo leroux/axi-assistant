@@ -3,6 +3,7 @@
 //! Each function creates an `McpServer` with the appropriate tools registered.
 //! Tool handlers capture shared state via Arc closures.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{Datelike, Local, Timelike, Weekday};
@@ -603,6 +604,15 @@ pub fn create_master_server(state: Arc<BotState>) -> McpServer {
                 )
                 .await;
 
+                // Build and store SDK MCP servers for this agent
+                let (sdk_servers, _) = build_sdk_mcp_config(&state, &name, &cwd, false);
+                {
+                    let mut sessions = state.sessions.lock().await;
+                    if let Some(session) = sessions.get_mut(&name) {
+                        session.sdk_mcp_servers = sdk_servers;
+                    }
+                }
+
                 // Save agent config
                 crate::registry::save_agent_config(
                     &cwd,
@@ -757,6 +767,7 @@ pub fn create_master_server(state: Arc<BotState>) -> McpServer {
                 };
 
                 // Rebuild with fresh prompt but same session_id
+                let is_master = name == state.config.master_agent_name;
                 let system_prompt = build_spawned_prompt(&state, &cwd, None, None);
                 crate::registry::rebuild_session(
                     &state,
@@ -767,6 +778,15 @@ pub fn create_master_server(state: Arc<BotState>) -> McpServer {
                     None,
                 )
                 .await;
+
+                // Rebuild SDK MCP servers
+                let (sdk_servers, _) = build_sdk_mcp_config(&state, &name, &cwd, is_master);
+                {
+                    let mut sessions = state.sessions.lock().await;
+                    if let Some(session) = sessions.get_mut(&name) {
+                        session.sdk_mcp_servers = sdk_servers;
+                    }
+                }
 
                 info!("Restarted agent '{}' (session={:?})", name, session_id);
                 ToolResult::text(format!(
@@ -909,6 +929,15 @@ pub fn create_agent_server(state: Arc<BotState>) -> McpServer {
                 )
                 .await;
 
+                // Build and store SDK MCP servers
+                let (sdk_servers, _) = build_sdk_mcp_config(&state, &name, &cwd, false);
+                {
+                    let mut sessions = state.sessions.lock().await;
+                    if let Some(session) = sessions.get_mut(&name) {
+                        session.sdk_mcp_servers = sdk_servers;
+                    }
+                }
+
                 match create_agent_channel(&state, &name).await {
                     Ok(channel_id) => {
                         state.register_channel(ChannelId::new(channel_id), &name).await;
@@ -1020,12 +1049,94 @@ pub fn create_agent_server(state: Arc<BotState>) -> McpServer {
                 )
                 .await;
 
+                // Rebuild SDK MCP servers
+                let (sdk_servers, _) = build_sdk_mcp_config(&state, &name, &cwd, false);
+                {
+                    let mut sessions = state.sessions.lock().await;
+                    if let Some(session) = sessions.get_mut(&name) {
+                        session.sdk_mcp_servers = sdk_servers;
+                    }
+                }
+
                 ToolResult::text(format!("Agent '{name}' restarted."))
             }
         },
     );
 
     server
+}
+
+// ---------------------------------------------------------------------------
+// SDK MCP config builder — determines which MCP servers each agent gets
+// ---------------------------------------------------------------------------
+
+/// Convert an McpServer to the JSON config entry for `--mcp-config`.
+/// SDK servers use `{"type": "sdk", "name": "...", "version": "..."}`.
+fn sdk_server_json(server: &McpServer) -> Value {
+    json!({
+        "type": "sdk",
+        "name": server.name,
+        "version": server.version,
+    })
+}
+
+/// Build the SDK MCP server set for an agent.
+///
+/// Returns:
+/// - `HashMap<String, McpServer>` — server instances for handling control requests
+/// - `Value` — JSON object for merging into `--mcp-config` mcpServers
+///
+/// Server assignment (matching Python `_build_mcp_servers` + `sdk_mcp_servers_for_cwd`):
+/// - All agents: utils, schedule, discord
+/// - Master: axi (master version with restart + send_message)
+/// - Regular agents: axi (spawned version without restart/send_message)
+pub fn build_sdk_mcp_config(
+    state: &Arc<BotState>,
+    agent_name: &str,
+    cwd: &str,
+    is_master: bool,
+) -> (HashMap<String, McpServer>, Value) {
+    let mut servers = HashMap::new();
+    let mut config = serde_json::Map::new();
+
+    // Utils — shared across all agents
+    let utils = create_utils_server(Arc::clone(state));
+    config.insert("utils".to_string(), sdk_server_json(&utils));
+    servers.insert("utils".to_string(), utils);
+
+    // Schedule — per-agent, scoped to agent_name
+    let schedule = crate::mcp_schedule::create_schedule_server(
+        agent_name.to_string(),
+        state.config.schedules_path.clone(),
+        Some(cwd.to_string()),
+    );
+    config.insert("schedule".to_string(), sdk_server_json(&schedule));
+    servers.insert("schedule".to_string(), schedule);
+
+    // Discord — cross-channel messaging
+    let discord = create_discord_server(Arc::new(state.discord_client.clone()));
+    config.insert("discord".to_string(), sdk_server_json(&discord));
+    servers.insert("discord".to_string(), discord);
+
+    // Axi — agent management (master vs spawned version)
+    let axi = if is_master {
+        create_master_server(Arc::clone(state))
+    } else {
+        create_agent_server(Arc::clone(state))
+    };
+    config.insert("axi".to_string(), sdk_server_json(&axi));
+    servers.insert("axi".to_string(), axi);
+
+    // Playwright — external stdio server (not SDK, handled by Claude CLI directly)
+    config.insert(
+        "playwright".to_string(),
+        json!({
+            "command": "npx",
+            "args": ["@playwright/mcp@latest", "--headless"],
+        }),
+    );
+
+    (servers, Value::Object(config))
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,5 +1172,67 @@ mod tests {
         assert!(server.handlers.contains_key("get_date_and_time"));
         assert!(server.handlers.contains_key("set_agent_status"));
         assert!(server.handlers.contains_key("clear_agent_status"));
+    }
+
+    #[tokio::test]
+    async fn build_sdk_mcp_config_master() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = axi_config::Config::for_test(tmp.path());
+        let discord = DiscordClient::new("test");
+        let state = Arc::new(BotState::new(config, discord));
+
+        let (servers, json_cfg) = build_sdk_mcp_config(&state, "axi-master", "/tmp/test", true);
+
+        // Should have utils, schedule, discord, axi
+        assert!(servers.contains_key("utils"));
+        assert!(servers.contains_key("schedule"));
+        assert!(servers.contains_key("discord"));
+        assert!(servers.contains_key("axi"));
+
+        // JSON config should have the same keys plus playwright
+        let cfg_obj = json_cfg.as_object().unwrap();
+        assert!(cfg_obj.contains_key("utils"));
+        assert!(cfg_obj.contains_key("schedule"));
+        assert!(cfg_obj.contains_key("discord"));
+        assert!(cfg_obj.contains_key("axi"));
+        assert!(cfg_obj.contains_key("playwright"));
+
+        // SDK servers should have type "sdk"
+        assert_eq!(cfg_obj["utils"]["type"], "sdk");
+        assert_eq!(cfg_obj["schedule"]["type"], "sdk");
+
+        // Playwright should NOT be type "sdk" (it's an external stdio server)
+        assert!(cfg_obj["playwright"].get("type").is_none());
+        assert_eq!(cfg_obj["playwright"]["command"], "npx");
+
+        // Master axi server should have axi_restart and axi_send_message
+        let axi_server = &servers["axi"];
+        assert!(axi_server.handlers.contains_key("axi_spawn_agent"));
+        assert!(axi_server.handlers.contains_key("axi_kill_agent"));
+        assert!(axi_server.handlers.contains_key("axi_restart"));
+        assert!(axi_server.handlers.contains_key("axi_send_message"));
+    }
+
+    #[tokio::test]
+    async fn build_sdk_mcp_config_spawned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = axi_config::Config::for_test(tmp.path());
+        let discord = DiscordClient::new("test");
+        let state = Arc::new(BotState::new(config, discord));
+
+        let (servers, _json_cfg) = build_sdk_mcp_config(&state, "test-agent", "/tmp/test", false);
+
+        // Spawned agent should have utils, schedule, discord, axi
+        assert!(servers.contains_key("utils"));
+        assert!(servers.contains_key("schedule"));
+        assert!(servers.contains_key("discord"));
+        assert!(servers.contains_key("axi"));
+
+        // Spawned axi server should NOT have axi_restart or axi_send_message
+        let axi_server = &servers["axi"];
+        assert!(axi_server.handlers.contains_key("axi_spawn_agent"));
+        assert!(axi_server.handlers.contains_key("axi_kill_agent"));
+        assert!(!axi_server.handlers.contains_key("axi_restart"));
+        assert!(!axi_server.handlers.contains_key("axi_send_message"));
     }
 }

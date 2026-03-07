@@ -54,15 +54,20 @@ pub async fn create_client(
     let reconnecting = resume_session_id.is_some();
 
     // Get session config
-    let (cwd, system_prompt, mcp_servers) = {
+    let (cwd, system_prompt, mcp_servers, sdk_mcp_json) = {
         let sessions = state.sessions.lock().await;
         let session = sessions
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Session not found: {name}"))?;
+        // Build SDK MCP JSON from the stored servers
+        let sdk_json: serde_json::Value = session.sdk_mcp_servers.iter().map(|(k, s)| {
+            (k.clone(), serde_json::json!({"type": "sdk", "name": s.name, "version": s.version}))
+        }).collect::<serde_json::Map<String, serde_json::Value>>().into();
         (
             session.cwd.clone(),
             session.system_prompt.clone(),
             session.mcp_servers.clone(),
+            sdk_json,
         )
     };
 
@@ -75,6 +80,7 @@ pub async fn create_client(
         &state.config.config_path,
         system_prompt.as_ref(),
         mcp_servers.as_ref(),
+        Some(&sdk_mcp_json),
     );
 
     // Build environment
@@ -631,6 +637,40 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                     if let Err(e) = transport.write(&msg_str).await {
                         warn!("Failed to send control response for '{}': {}", agent_name, e);
                     }
+                } else if subtype == "mcp_message" {
+                    let request_data = event.get("request");
+                    let server_name = request_data
+                        .and_then(|r| r.get("server_name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let mcp_message = request_data
+                        .and_then(|r| r.get("message"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+
+                    let mcp_response = handle_mcp_message(
+                        state,
+                        agent_name,
+                        server_name,
+                        &mcp_message,
+                    )
+                    .await;
+
+                    let control_response = serde_json::json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "mcp_response": mcp_response,
+                            },
+                        },
+                    });
+                    let msg_str = serde_json::to_string(&control_response).unwrap_or_default();
+                    let mut transport = transport.lock().await;
+                    if let Err(e) = transport.write(&msg_str).await {
+                        warn!("Failed to send MCP response for '{}': {}", agent_name, e);
+                    }
                 } else {
                     debug!(
                         "Unhandled control_request subtype '{}' for '{}'",
@@ -762,12 +802,43 @@ async fn handle_permission_request(
             handle_exit_plan_mode(state, agent_name, request_id, channel_id).await
         }
         _ => {
-            // Auto-allow other tools
-            serde_json::json!({
-                "subtype": "success",
-                "request_id": request_id,
-                "response": {"permission": "allow"}
-            })
+            // Run CWD-based permission check before auto-allowing
+            let perm_result = {
+                let sessions = state.sessions.lock().await;
+                if let Some(session) = sessions.get(agent_name) {
+                    let config = crate::permissions::PermissionConfig::new(
+                        std::path::Path::new(&session.cwd),
+                        &state.config.axi_user_data,
+                        &state.config.bot_dir,
+                        Some(state.config.bot_worktrees_dir.as_path()),
+                        vec![],
+                    );
+                    Some(crate::permissions::check_permission(&config, tool_name, tool_input))
+                } else {
+                    None
+                }
+            };
+
+            match perm_result {
+                Some(crate::permissions::PermissionResult::Deny(reason)) => {
+                    warn!(
+                        "Permission denied for '{}' tool '{}': {}",
+                        agent_name, tool_name, reason
+                    );
+                    serde_json::json!({
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": {"permission": "deny", "message": reason}
+                    })
+                }
+                _ => {
+                    serde_json::json!({
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": {"permission": "allow"}
+                    })
+                }
+            }
         }
     }
 }
@@ -992,6 +1063,124 @@ async fn handle_exit_plan_mode(
 }
 
 // ---------------------------------------------------------------------------
+// SDK MCP message handler
+// ---------------------------------------------------------------------------
+
+/// Handle an MCP message from Claude CLI for an SDK-type MCP server.
+///
+/// Routes JSON-RPC methods (`initialize`, `tools/list`, `tools/call`,
+/// `notifications/initialized`) to the appropriate McpServer instance
+/// stored on the agent's session.
+async fn handle_mcp_message(
+    state: &BotState,
+    agent_name: &str,
+    server_name: &str,
+    message: &serde_json::Value,
+) -> serde_json::Value {
+    let jsonrpc_id = message.get("id").cloned();
+    let method = message
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let params = message.get("params").cloned().unwrap_or(serde_json::Value::Null);
+
+    // Look up the McpServer from the agent's session
+    let server = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .get(agent_name)
+            .and_then(|s| s.sdk_mcp_servers.get(server_name).cloned())
+    };
+
+    let Some(server) = server else {
+        return serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": jsonrpc_id,
+            "error": {"code": -32601, "message": format!("Server '{}' not found", server_name)},
+        });
+    };
+
+    match method {
+        "initialize" => {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": jsonrpc_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {}
+                    },
+                    "serverInfo": {
+                        "name": server.name,
+                        "version": server.version,
+                    },
+                },
+            })
+        }
+
+        "tools/list" => {
+            let tools_data: Vec<serde_json::Value> = server
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "inputSchema": t.input_schema,
+                    })
+                })
+                .collect();
+
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": jsonrpc_id,
+                "result": {"tools": tools_data},
+            })
+        }
+
+        "tools/call" => {
+            let tool_name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let arguments = params
+                .get("arguments")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+
+            let result = server.call_tool(tool_name, arguments).await;
+
+            let mut response_data = serde_json::json!({
+                "content": result.content,
+            });
+            if let Some(true) = result.is_error {
+                response_data["is_error"] = serde_json::json!(true);
+            }
+
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": jsonrpc_id,
+                "result": response_data,
+            })
+        }
+
+        "notifications/initialized" => {
+            // One-way notification, acknowledge with empty result
+            serde_json::json!({"jsonrpc": "2.0", "result": {}})
+        }
+
+        _ => {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": jsonrpc_id,
+                "error": {"code": -32601, "message": format!("Method '{}' not found", method)},
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1001,6 +1190,7 @@ fn build_cli_args(
     config_path: &std::path::Path,
     system_prompt: Option<&serde_json::Value>,
     mcp_servers: Option<&serde_json::Value>,
+    sdk_mcp_servers: Option<&serde_json::Value>,
 ) -> Vec<String> {
     let mut args = vec![
         "claude".to_string(),
@@ -1034,11 +1224,30 @@ fn build_cli_args(
         }
     }
 
-    // MCP server config
-    if let Some(mcp) = mcp_servers {
-        if mcp.is_object() && !mcp.as_object().unwrap().is_empty() {
-            // Wrap in {"mcpServers": ...} format expected by --mcp-config
-            let config = serde_json::json!({"mcpServers": mcp});
+    // MCP server config — merge external servers and SDK servers
+    {
+        let mut merged = serde_json::Map::new();
+
+        // SDK MCP servers (utils, schedule, discord, axi, playwright, etc.)
+        if let Some(sdk) = sdk_mcp_servers {
+            if let Some(obj) = sdk.as_object() {
+                for (k, v) in obj {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        // External MCP servers from mcp_servers.json (override SDK if same name)
+        if let Some(mcp) = mcp_servers {
+            if let Some(obj) = mcp.as_object() {
+                for (k, v) in obj {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        if !merged.is_empty() {
+            let config = serde_json::json!({"mcpServers": merged});
             if let Ok(mcp_json) = serde_json::to_string(&config) {
                 args.extend(["--mcp-config".to_string(), mcp_json]);
             }
@@ -1186,7 +1395,7 @@ mod tests {
     #[test]
     fn cli_args_fresh() {
         let path = std::path::Path::new("/tmp/nonexistent-config.json");
-        let args = build_cli_args(None, path, None, None);
+        let args = build_cli_args(None, path, None, None, None);
         assert!(args.contains(&"claude".to_string()));
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
@@ -1200,7 +1409,7 @@ mod tests {
     #[test]
     fn cli_args_resume() {
         let path = std::path::Path::new("/tmp/nonexistent-config.json");
-        let args = build_cli_args(Some("session-123"), path, None, None);
+        let args = build_cli_args(Some("session-123"), path, None, None, None);
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&"session-123".to_string()));
     }
@@ -1209,7 +1418,7 @@ mod tests {
     fn cli_args_with_system_prompt() {
         let path = std::path::Path::new("/tmp/nonexistent-config.json");
         let prompt = serde_json::Value::String("You are a test bot.".to_string());
-        let args = build_cli_args(None, path, Some(&prompt), None);
+        let args = build_cli_args(None, path, Some(&prompt), None, None);
         assert!(args.contains(&"--append-system-prompt".to_string()));
         assert!(args.contains(&"You are a test bot.".to_string()));
     }
@@ -1218,12 +1427,36 @@ mod tests {
     fn cli_args_with_mcp_servers() {
         let path = std::path::Path::new("/tmp/nonexistent-config.json");
         let mcp = serde_json::json!({"myserver": {"command": "node", "args": ["server.js"]}});
-        let args = build_cli_args(None, path, None, Some(&mcp));
+        let args = build_cli_args(None, path, None, Some(&mcp), None);
         assert!(args.contains(&"--mcp-config".to_string()));
-        // Should be wrapped in {"mcpServers": ...}
         let mcp_idx = args.iter().position(|a| a == "--mcp-config").unwrap();
         let mcp_val: serde_json::Value = serde_json::from_str(&args[mcp_idx + 1]).unwrap();
         assert!(mcp_val.get("mcpServers").is_some());
+    }
+
+    #[test]
+    fn cli_args_with_sdk_mcp_servers() {
+        let path = std::path::Path::new("/tmp/nonexistent-config.json");
+        let sdk = serde_json::json!({"utils": {"type": "sdk", "name": "utils", "version": "1.0.0"}});
+        let args = build_cli_args(None, path, None, None, Some(&sdk));
+        assert!(args.contains(&"--mcp-config".to_string()));
+        let mcp_idx = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let mcp_val: serde_json::Value = serde_json::from_str(&args[mcp_idx + 1]).unwrap();
+        let servers = mcp_val.get("mcpServers").unwrap();
+        assert_eq!(servers.get("utils").unwrap().get("type").unwrap(), "sdk");
+    }
+
+    #[test]
+    fn cli_args_merges_sdk_and_external_mcp() {
+        let path = std::path::Path::new("/tmp/nonexistent-config.json");
+        let external = serde_json::json!({"myserver": {"command": "node"}});
+        let sdk = serde_json::json!({"utils": {"type": "sdk", "name": "utils", "version": "1.0.0"}});
+        let args = build_cli_args(None, path, None, Some(&external), Some(&sdk));
+        let mcp_idx = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let mcp_val: serde_json::Value = serde_json::from_str(&args[mcp_idx + 1]).unwrap();
+        let servers = mcp_val.get("mcpServers").unwrap();
+        assert!(servers.get("utils").is_some());
+        assert!(servers.get("myserver").is_some());
     }
 
     #[test]
@@ -1494,6 +1727,114 @@ mod tests {
         assert_eq!(result["response"]["permission"], "allow");
     }
 
+    #[tokio::test]
+    async fn permission_denies_write_outside_cwd() {
+        let (_server, state) = setup_state().await;
+
+        // Register agent with a specific CWD
+        let mut session = crate::types::AgentSession::new("test-agent".to_string());
+        session.cwd = "/tmp/agent-workdir".to_string();
+        std::fs::create_dir_all("/tmp/agent-workdir").ok();
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert("test-agent".to_string(), session);
+        }
+
+        let transport = Arc::new(Mutex::new(
+            BridgeTransport::new(
+                "test-agent".to_string(),
+                tokio::sync::mpsc::unbounded_channel().1,
+                tokio::sync::mpsc::unbounded_channel().0,
+                Box::new(|_name, _data| Box::pin(async move { Ok(()) })),
+                Box::new(|_name| Box::pin(async move { Ok(()) })),
+                Box::new(|| true),
+                false,
+                None,
+            ),
+        ));
+
+        // Write to /etc/passwd should be denied
+        let result = handle_permission_request(
+            &state, "test-agent", "req-9", "Write",
+            &serde_json::json!({"file_path": "/etc/passwd"}),
+            &transport,
+        ).await;
+
+        assert_eq!(result["response"]["permission"], "deny");
+        assert!(result["response"]["message"].as_str().unwrap().contains("outside"));
+    }
+
+    #[tokio::test]
+    async fn permission_allows_write_inside_cwd() {
+        let (_server, state) = setup_state().await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_str().unwrap().to_string();
+
+        let mut session = crate::types::AgentSession::new("test-agent".to_string());
+        session.cwd = cwd.clone();
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert("test-agent".to_string(), session);
+        }
+
+        let transport = Arc::new(Mutex::new(
+            BridgeTransport::new(
+                "test-agent".to_string(),
+                tokio::sync::mpsc::unbounded_channel().1,
+                tokio::sync::mpsc::unbounded_channel().0,
+                Box::new(|_name, _data| Box::pin(async move { Ok(()) })),
+                Box::new(|_name| Box::pin(async move { Ok(()) })),
+                Box::new(|| true),
+                false,
+                None,
+            ),
+        ));
+
+        let file_path = tmp.path().join("test.txt");
+        std::fs::write(&file_path, "test").unwrap();
+        let result = handle_permission_request(
+            &state, "test-agent", "req-10", "Write",
+            &serde_json::json!({"file_path": file_path.to_str().unwrap()}),
+            &transport,
+        ).await;
+
+        assert_eq!(result["response"]["permission"], "allow");
+    }
+
+    #[tokio::test]
+    async fn permission_denies_forbidden_tool() {
+        let (_server, state) = setup_state().await;
+
+        let mut session = crate::types::AgentSession::new("test-agent".to_string());
+        session.cwd = "/tmp".to_string();
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert("test-agent".to_string(), session);
+        }
+
+        let transport = Arc::new(Mutex::new(
+            BridgeTransport::new(
+                "test-agent".to_string(),
+                tokio::sync::mpsc::unbounded_channel().1,
+                tokio::sync::mpsc::unbounded_channel().0,
+                Box::new(|_name, _data| Box::pin(async move { Ok(()) })),
+                Box::new(|_name| Box::pin(async move { Ok(()) })),
+                Box::new(|| true),
+                false,
+                None,
+            ),
+        ));
+
+        let result = handle_permission_request(
+            &state, "test-agent", "req-11", "Task",
+            &serde_json::json!({}),
+            &transport,
+        ).await;
+
+        assert_eq!(result["response"]["permission"], "deny");
+    }
+
     // -----------------------------------------------------------------------
     // Auto-compact threshold tests
     // -----------------------------------------------------------------------
@@ -1530,5 +1871,149 @@ mod tests {
         assert!(result.is_some());
         let util = result.unwrap();
         assert!((util - 0.95).abs() < 0.001);
+    }
+
+    // -----------------------------------------------------------------------
+    // SDK MCP message handler tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mcp_message_initialize() {
+        let (_server, state) = setup_state().await;
+
+        // Register a session with SDK MCP servers
+        let mut session = crate::types::AgentSession::new("test-agent".to_string());
+        let (sdk_servers, _) = crate::mcp_tools::build_sdk_mcp_config(
+            &state, "test-agent", "/tmp/test", false,
+        );
+        session.sdk_mcp_servers = sdk_servers;
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert("test-agent".to_string(), session);
+        }
+
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        });
+
+        let resp = handle_mcp_message(&state, "test-agent", "utils", &msg).await;
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 1);
+        assert!(resp["result"]["serverInfo"]["name"].as_str().is_some());
+        assert_eq!(resp["result"]["serverInfo"]["name"], "utils");
+    }
+
+    #[tokio::test]
+    async fn mcp_message_tools_list() {
+        let (_server, state) = setup_state().await;
+
+        let mut session = crate::types::AgentSession::new("test-agent".to_string());
+        let (sdk_servers, _) = crate::mcp_tools::build_sdk_mcp_config(
+            &state, "test-agent", "/tmp/test", false,
+        );
+        session.sdk_mcp_servers = sdk_servers;
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert("test-agent".to_string(), session);
+        }
+
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        });
+
+        let resp = handle_mcp_message(&state, "test-agent", "utils", &msg).await;
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert!(!tools.is_empty());
+        let tool_names: Vec<&str> = tools.iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(tool_names.contains(&"get_date_and_time"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_tools_call() {
+        let (_server, state) = setup_state().await;
+
+        let mut session = crate::types::AgentSession::new("test-agent".to_string());
+        let (sdk_servers, _) = crate::mcp_tools::build_sdk_mcp_config(
+            &state, "test-agent", "/tmp/test", false,
+        );
+        session.sdk_mcp_servers = sdk_servers;
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert("test-agent".to_string(), session);
+        }
+
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "get_date_and_time",
+                "arguments": {}
+            }
+        });
+
+        let resp = handle_mcp_message(&state, "test-agent", "utils", &msg).await;
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 3);
+        let content = resp["result"]["content"].as_array().unwrap();
+        assert!(!content.is_empty());
+        assert!(content[0]["text"].as_str().unwrap().contains("now"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_unknown_server() {
+        let (_server, state) = setup_state().await;
+
+        let mut session = crate::types::AgentSession::new("test-agent".to_string());
+        session.sdk_mcp_servers = HashMap::new();
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert("test-agent".to_string(), session);
+        }
+
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/list",
+            "params": {}
+        });
+
+        let resp = handle_mcp_message(&state, "test-agent", "nonexistent", &msg).await;
+        assert!(resp["error"].is_object());
+        assert_eq!(resp["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn mcp_message_unknown_method() {
+        let (_server, state) = setup_state().await;
+
+        let mut session = crate::types::AgentSession::new("test-agent".to_string());
+        let (sdk_servers, _) = crate::mcp_tools::build_sdk_mcp_config(
+            &state, "test-agent", "/tmp/test", false,
+        );
+        session.sdk_mcp_servers = sdk_servers;
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert("test-agent".to_string(), session);
+        }
+
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "some/unknown/method",
+            "params": {}
+        });
+
+        let resp = handle_mcp_message(&state, "test-agent", "utils", &msg).await;
+        assert!(resp["error"].is_object());
+        assert_eq!(resp["error"]["code"], -32601);
     }
 }

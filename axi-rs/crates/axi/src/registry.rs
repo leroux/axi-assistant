@@ -67,11 +67,18 @@ pub async fn rebuild_session(
     system_prompt: Option<serde_json::Value>,
     mcp_servers: Option<serde_json::Value>,
 ) -> AgentSession {
-    let (old_cwd, old_prompt, old_mcp) = {
+    let (old_cwd, old_prompt, old_mcp, old_sdk_mcp) = {
         let sessions = state.sessions.lock().await;
         sessions
             .get(name)
-            .map(|old| (old.cwd.clone(), old.system_prompt.clone(), old.mcp_servers.clone()))
+            .map(|old| {
+                (
+                    old.cwd.clone(),
+                    old.system_prompt.clone(),
+                    old.mcp_servers.clone(),
+                    old.sdk_mcp_servers.clone(),
+                )
+            })
             .unwrap_or_default()
     };
 
@@ -86,6 +93,7 @@ pub async fn rebuild_session(
         old_mcp
     };
     new_session.session_id = session_id;
+    new_session.sdk_mcp_servers = old_sdk_mcp;
 
     let mut sessions = state.sessions.lock().await;
     sessions.insert(name.to_string(), new_session);
@@ -100,6 +108,7 @@ pub async fn rebuild_session(
         result.system_prompt = s.system_prompt.clone();
         result.mcp_servers = s.mcp_servers.clone();
         result.session_id = s.session_id.clone();
+        result.sdk_mcp_servers = s.sdk_mcp_servers.clone();
     }
     result
 }
