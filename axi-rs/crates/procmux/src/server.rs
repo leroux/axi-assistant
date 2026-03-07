@@ -385,12 +385,16 @@ impl ProcmuxServer {
             stderr_task: None,
         };
 
+        // Open log files for stdio capture
+        let stdout_log = open_log_file(&self.stdio_log_dir, name, "stdout");
+        let stderr_log = open_log_file(&self.stdio_log_dir, name, "stderr");
+
         // Spawn stdout relay task
         let stdout = mp.child.stdout.take().expect("stdout pipe");
         let relay_tx = self.relay_tx.clone();
         let proc_name = name.clone();
         mp.stdout_task = Some(tokio::spawn(async move {
-            relay_stdout(proc_name, stdout, relay_tx).await;
+            relay_stdout(proc_name, stdout, relay_tx, stdout_log).await;
         }));
 
         // Spawn stderr relay task
@@ -398,7 +402,7 @@ impl ProcmuxServer {
         let relay_tx = self.relay_tx.clone();
         let proc_name = name.clone();
         mp.stderr_task = Some(tokio::spawn(async move {
-            relay_stderr(proc_name, stderr, relay_tx).await;
+            relay_stderr(proc_name, stderr, relay_tx, stderr_log).await;
         }));
 
         self.procs.insert(name.clone(), mp);
@@ -616,11 +620,51 @@ fn send_to_client_tx(
     tx.send(payload).is_ok()
 }
 
+/// Open a log file for stdio capture, rotating if the current file exceeds 10 MB.
+fn open_log_file(log_dir: &Path, name: &str, stream: &str) -> Option<std::fs::File> {
+    let path = log_dir.join(format!("{}.{}.log", name, stream));
+
+    const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
+    const MAX_ROTATIONS: u32 = 3;
+
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > MAX_LOG_SIZE {
+            for i in (1..MAX_ROTATIONS).rev() {
+                let from = log_dir.join(format!("{}.{}.log.{}", name, stream, i));
+                let to = log_dir.join(format!("{}.{}.log.{}", name, stream, i + 1));
+                std::fs::rename(&from, &to).ok();
+            }
+            let rotated = log_dir.join(format!("{}.{}.log.1", name, stream));
+            std::fs::rename(&path, &rotated).ok();
+        }
+    }
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => Some(f),
+        Err(e) => {
+            warn!("Failed to open log file {}: {}", path.display(), e);
+            None
+        }
+    }
+}
+
+/// Write a line to the log file with a timestamp prefix.
+fn log_line(file: &mut std::fs::File, line: &str) {
+    use std::io::Write;
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+    let _ = writeln!(file, "[{}] {}", now, line);
+}
+
 /// Relay stdout from a child process. Reads JSON lines and sends them as RelayMsg.
 async fn relay_stdout(
     name: String,
     stdout: tokio::process::ChildStdout,
     tx: mpsc::UnboundedSender<RelayMsg>,
+    mut log_file: Option<std::fs::File>,
 ) {
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
@@ -632,6 +676,9 @@ async fn relay_stdout(
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;
+                }
+                if let Some(f) = log_file.as_mut() {
+                    log_line(f, &line);
                 }
                 match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(data) => {
@@ -686,6 +733,7 @@ async fn relay_stderr(
     name: String,
     stderr: tokio::process::ChildStderr,
     tx: mpsc::UnboundedSender<RelayMsg>,
+    mut log_file: Option<std::fs::File>,
 ) {
     let reader = BufReader::new(stderr);
     let mut lines = reader.lines();
@@ -696,6 +744,9 @@ async fn relay_stderr(
                 let text = line.trim().to_string();
                 if text.is_empty() {
                     continue;
+                }
+                if let Some(f) = log_file.as_mut() {
+                    log_line(f, &text);
                 }
                 tx.send(RelayMsg::Stderr {
                     name: name.clone(),

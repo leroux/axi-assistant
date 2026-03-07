@@ -44,7 +44,7 @@ Tasks:
 - [x] Process kill with SIGTERM→SIGKILL escalation via process groups
 - [x] Interrupt command (SIGINT to process group)
 - [x] List and status commands
-- [ ] Per-process stdio logging (rotating files)
+- [x] Per-process stdio logging (rotating files)
 - [x] Signal handling (SIGTERM/SIGINT → graceful shutdown)
 - [x] ProcmuxClient: connect, demux loop, command/stdin sending
 - [ ] Test: run procmux-rs, connect Python bot to it via Unix socket
