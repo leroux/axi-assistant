@@ -122,7 +122,7 @@ Tasks:
 - [x] Reaction-based interactions (plan approval, user questions)
 - [x] Todo list rendering and tracking
 - [x] Channel topic updates with session state
-- [ ] Idle agent reminders
+- [x] Idle agent reminders
 - [x] System prompt generation (SOUL.md, dev_context.md, packs)
 - [x] Channel status prefixes
 

@@ -157,7 +157,7 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
         )),
         tasks: BackgroundTaskSet::new(),
         wake_lock: tokio::sync::Mutex::new(()),
-        process_conn: Arc::new(tokio::sync::Mutex::new(None)),
+        process_conn: Arc::new(tokio::sync::Mutex::new(connect_bridge(&state.config).await)),
         create_client,
         disconnect_client,
         send_query,
@@ -248,4 +248,82 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
     tokio::spawn(async move {
         crate::scheduler::run_scheduler(state_for_scheduler, hub_for_scheduler).await;
     });
+
+    // 10. Start idle agent reminder loop
+    let state_for_idle = state.clone();
+    let hub_for_idle = hub.clone();
+    tokio::spawn(async move {
+        idle_reminder_loop(state_for_idle, hub_for_idle).await;
+    });
+}
+
+/// Connect to the procmux bridge server.
+async fn connect_bridge(
+    config: &axi_config::Config,
+) -> Option<axi_hub::procmux_wire::ProcmuxProcessConnection> {
+    let socket_path = config.bridge_socket_path.to_string_lossy().to_string();
+    match axi_hub::procmux_wire::ProcmuxProcessConnection::connect(&socket_path).await {
+        Ok(conn) => {
+            info!("Connected to procmux bridge at {}", socket_path);
+            Some(conn)
+        }
+        Err(e) => {
+            warn!(
+                "Failed to connect to procmux bridge at {}: {} (agents will not work until bridge is available)",
+                socket_path, e
+            );
+            None
+        }
+    }
+}
+
+/// Periodic loop that checks for idle agents and sends reminders.
+async fn idle_reminder_loop(state: Arc<BotState>, hub: Arc<AgentHub>) {
+    let check_interval = std::time::Duration::from_secs(60);
+    let thresholds = &state.config.idle_reminder_thresholds;
+
+    if thresholds.is_empty() {
+        return;
+    }
+
+    loop {
+        tokio::time::sleep(check_interval).await;
+
+        let sessions = hub.sessions.lock().await;
+        let now = chrono::Utc::now();
+
+        for (name, session) in sessions.iter() {
+            if name == &state.config.master_agent_name {
+                continue;
+            }
+            if session.client.is_none() {
+                continue;
+            }
+            if session.query_lock.try_lock().is_err() {
+                continue; // busy
+            }
+
+            let idle_secs = (now - session.last_activity).num_seconds().max(0) as u64;
+            let reminder_idx = session.idle_reminder_count as usize;
+
+            if reminder_idx < thresholds.len() {
+                let threshold = thresholds[reminder_idx].as_secs();
+                if idle_secs >= threshold {
+                    let idle_minutes = idle_secs as f64 / 60.0;
+                    let name = name.clone();
+                    drop(sessions);
+
+                    hub.callbacks
+                        .on_idle_reminder(&name, idle_minutes)
+                        .await;
+
+                    let mut sessions = hub.sessions.lock().await;
+                    if let Some(s) = sessions.get_mut(&name) {
+                        s.idle_reminder_count += 1;
+                    }
+                    break; // re-acquire lock next iteration
+                }
+            }
+        }
+    }
 }
