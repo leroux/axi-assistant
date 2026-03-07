@@ -1,8 +1,8 @@
-//! Process IO protocol for claudewire.
+//! Low-level process IO event types.
 //!
-//! Defines event types and the command result struct that any process
-//! transport uses. The `ProcessConnection` trait is defined here but
-//! implemented by backends (procmux adapter, direct subprocess, etc.).
+//! These are the channel-level events that flow between a subprocess and
+//! `CliSession`. They carry no protocol semantics — just raw stdout JSON,
+//! stderr text, and exit codes.
 
 // ---------------------------------------------------------------------------
 // Process output events

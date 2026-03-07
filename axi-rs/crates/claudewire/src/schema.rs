@@ -2,8 +2,8 @@
 //!
 //! Serde structs for every message type in the Claude CLI stream-json protocol.
 //! Validation happens at deserialize time — no separate validation step.
-//! Uses `deny_unknown_fields` for strict types and allows extras via
-//! `flatten` + `HashMap` for permissive types.
+//! Types that may gain new upstream fields use `#[serde(flatten)] extra: HashMap`
+//! to capture unknown keys without breaking deserialization.
 
 use std::collections::HashMap;
 

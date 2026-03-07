@@ -13,8 +13,8 @@ const SDK_VERSION: &str = "0.1.39";
 
 /// MCP server configuration for the `--mcp-config` flag.
 ///
-/// SDK and external servers are kept separate because flowcoder agents
-/// need to strip SDK servers (the engine can't do the SDK MCP handshake).
+/// SDK and external servers are kept separate so callers can selectively
+/// include or exclude SDK servers depending on their capabilities.
 #[derive(Debug, Clone, Default)]
 pub struct McpServers {
     pub external: Option<Value>,

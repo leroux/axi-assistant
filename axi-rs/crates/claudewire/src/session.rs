@@ -231,7 +231,7 @@ impl CliSession {
             is_alive,
             ready: true,
             cli_exited: false,
-            exit_code: None, // child is moved into the wait task
+            exit_code: None,
         })
     }
 
