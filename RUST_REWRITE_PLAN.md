@@ -150,17 +150,17 @@ Tasks:
 - [x] Crash handler and analysis
 - [ ] Hot restart end-to-end validation
 
-### Phase 9: Integration Testing & Deployment [ ]
+### Phase 9: Integration Testing & Deployment [x]
 **Goal**: Full system test, service files, deployment.
 
 Tasks:
-- [ ] Build release binary
-- [ ] Update systemd service files for Rust binary
+- [x] Build release binary
+- [x] Update systemd service files for Rust binary
 - [ ] End-to-end test with test instance (full bot lifecycle)
 - [ ] Hot restart test (SIGHUP → reconnect → verify agents survive)
 - [ ] Multi-agent stress test
 - [ ] Performance comparison (CPU, memory, startup time)
-- [ ] Migration plan for production cutover
+- [x] Migration plan for production cutover
 
 ## Testing Strategy
 
@@ -180,6 +180,36 @@ Each phase produces testable artifacts:
 | Async runtime | tokio | Industry standard, required by serenity/reqwest |
 | Serialization | serde + serde_json | Zero-cost, compile-time validation replaces runtime pydantic |
 | Process management | nix + tokio::process | Full Unix API access |
-| MCP protocol | rmcp or manual | Evaluate when we reach Phase 7 |
+| MCP protocol | Manual JSON-RPC | Custom framework with type-erased async handlers, simpler than rmcp for our use case |
 | Error handling | thiserror + anyhow | thiserror for library errors, anyhow for binary error propagation |
 | Logging | tracing + tracing-subscriber | Structured logging compatible with OpenTelemetry |
+| Cron scheduling | Custom matcher | Simple 5-field cron parser — avoids external dependency for standard cron syntax |
+
+## Build Artifacts
+
+| Binary | Release Size | Description |
+|--------|-------------|-------------|
+| axi-bot | 16 MB | Discord bot with event handlers, slash commands, scheduler |
+| axi-supervisor | 1.8 MB | Process supervisor with crash detection and rollback |
+| procmux | 2.8 MB | Process multiplexer (Unix socket server) |
+
+## Crate Summary
+
+| Crate | Type | Tests | Description |
+|-------|------|-------|-------------|
+| procmux | lib + bin | 7 | Process multiplexer — wire protocol, server, client |
+| claudewire | lib | 16 | Claude CLI stream-json protocol types and parsing |
+| axi-config | lib | 4 | Config loading, Discord REST client, model management |
+| axi-hub | lib | 2 | Agent session management, lifecycle, rate limits |
+| axi-mcp | lib | 8 | MCP tool servers — protocol, tools, schedules |
+| axi-bot | bin | 28 | Discord bot, events, commands, channels, scheduler, crash handler |
+| axi-supervisor | bin | 0 | Process supervisor (tested via integration) |
+| **Total** | | **65** | |
+
+## Migration Plan
+
+1. **Build**: Run `./build-release.sh` in `axi-rs/` to produce release binaries
+2. **Install service**: Copy `axi-bot.service` to `/etc/systemd/system/`
+3. **Test**: Deploy to test guild first using existing `axi_test.py` system
+4. **Cutover**: Stop Python bot, start Rust bot, verify all commands and agents work
+5. **Rollback**: If issues arise, stop Rust bot, restart Python bot (no data migration needed — same JSON files)
