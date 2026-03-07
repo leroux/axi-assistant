@@ -73,24 +73,34 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
     // 3. Create the AgentHub
     let frontend = Arc::new(DiscordFrontend::new(state.clone()));
 
-    // SDK client factories — placeholders that will be wired to claudewire bridge
-    let create_client: CreateClientFn = Arc::new(|_name, _resume| {
+    // SDK client factories — wired to procmux bridge via bridge module
+    let state_for_create = state.clone();
+    let create_client: CreateClientFn = Arc::new(move |name, resume| {
+        let state = state_for_create.clone();
+        let name = name.to_string();
+        let resume = resume.map(|s| s.to_string());
         Box::pin(async move {
-            // TODO: Connect to procmux bridge, start claudewire session
-            // For now, return a dummy client
+            crate::bridge::create_client(&state, &name, resume.as_deref()).await?;
             Ok(Box::new(()) as Box<dyn std::any::Any + Send + Sync>)
         })
     });
 
-    let disconnect_client: DisconnectClientFn = Arc::new(|_name| {
+    let state_for_disconnect = state.clone();
+    let disconnect_client: DisconnectClientFn = Arc::new(move |name| {
+        let state = state_for_disconnect.clone();
+        let name = name.to_string();
         Box::pin(async move {
-            // TODO: Disconnect claudewire session via bridge
+            crate::bridge::disconnect_client(&state, &name).await;
         })
     });
 
-    let send_query: SendQueryFn = Arc::new(|_name, _content| {
+    let state_for_query = state.clone();
+    let send_query: SendQueryFn = Arc::new(move |name, content| {
+        let state = state_for_query.clone();
+        let name = name.to_string();
+        let content = content.clone();
         Box::pin(async move {
-            // TODO: Send query to claudewire session via bridge
+            crate::bridge::send_query(&state, &name, &content).await;
         })
     });
 

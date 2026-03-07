@@ -3,6 +3,7 @@
 //! Thin layer wiring Discord events to the AgentHub. All agent state and
 //! operations live in axi-hub; Discord-specific rendering lives here.
 
+mod bridge;
 mod channels;
 mod commands;
 mod crash_handler;

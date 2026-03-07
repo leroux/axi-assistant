@@ -219,18 +219,8 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
 }
 
 /// Create a stream handler that consumes SDK output and renders to Discord.
-///
-/// This is a placeholder — the real implementation will read claudewire events
-/// from the bridge and post live-edit messages to the agent's channel.
 fn make_stream_handler(state: Arc<BotState>) -> axi_hub::messaging::StreamHandlerFn {
-    Arc::new(move |_agent_name: &str| {
-        let _state = state.clone();
-        Box::pin(async move {
-            // TODO: Read claudewire stream events, render via live-edit to Discord
-            // For now, return None (success) — real implementation will process the stream
-            None
-        })
-    })
+    crate::bridge::make_stream_handler(state)
 }
 
 // ---------------------------------------------------------------------------

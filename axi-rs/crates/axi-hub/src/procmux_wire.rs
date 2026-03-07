@@ -104,6 +104,17 @@ impl ProcmuxProcessConnection {
         // Arc prevents consuming self — just drop the reference
     }
 
+    pub async fn register_process(
+        &self,
+        name: &str,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<procmux::client::ProcessMsg> {
+        self.conn.register_process(name).await
+    }
+
+    pub async fn unregister_process(&self, name: &str) {
+        self.conn.unregister_process(name).await;
+    }
+
     pub async fn interrupt(&self, name: &str) -> anyhow::Result<CommandResult> {
         let result = self.conn.send_simple_command("interrupt", name).await?;
         Ok(CommandResult {

@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 use axi_config::{Config, DiscordClient};
 use axi_hub::AgentHub;
 
+use crate::bridge;
 use crate::channels::GuildInfrastructure;
 
 /// Bot state stored in serenity's TypeMap.
@@ -31,6 +32,9 @@ pub struct BotState {
 
     /// Guild infrastructure (categories), set during on_ready.
     pub infra: RwLock<Option<GuildInfrastructure>>,
+
+    /// Per-agent BridgeTransport storage.
+    pub transports: bridge::TransportMap,
 }
 
 impl BotState {
@@ -44,6 +48,7 @@ impl BotState {
             channel_map: RwLock::new(HashMap::new()),
             agent_channels: RwLock::new(HashMap::new()),
             infra: RwLock::new(None),
+            transports: bridge::new_transport_map(),
         }
     }
 

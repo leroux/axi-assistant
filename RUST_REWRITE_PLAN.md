@@ -172,8 +172,8 @@ Tasks:
 - [x] Slash commands wired: list-agents, status, kill-agent, stop, skip, reset-context, send, restart
 - [x] on_ready startup: guild infra, channel reconstruction, hub init, master agent, crash check, scheduler
 - [x] Scheduler loop connected to hub (fired schedules wake agents)
-- [ ] Stream handler (bridge → live-edit rendering) — placeholder, needs claudewire bridge integration
-- [ ] Client factories (create/disconnect/send) — placeholder, needs procmux bridge integration
+- [x] Stream handler (bridge → live-edit rendering) — reads claudewire events, renders via live-edit to Discord
+- [x] Client factories (create/disconnect/send) — wired to procmux bridge via transport manager
 
 ## Testing Strategy
 
@@ -216,10 +216,10 @@ Each phase produces testable artifacts:
 | axi-config | lib | 4 | Config loading, Discord REST client, model management |
 | axi-hub | lib | 2 | Agent session management, lifecycle, rate limits |
 | axi-mcp | lib | 8 | MCP tool servers — protocol, tools, schedules |
-| axi-bot | bin | 53 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions, todos, frontend, startup |
+| axi-bot | bin | 56 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions, todos, frontend, startup, bridge |
 | discordquery | bin | 5 | Discord message history query CLI (guilds, channels, history, search, wait) |
 | axi-supervisor | bin | 0 | Process supervisor (tested via integration) |
-| **Total** | | **95** | |
+| **Total** | | **98** | |
 
 ## Migration Plan
 
