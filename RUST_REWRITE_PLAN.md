@@ -49,26 +49,24 @@ Tasks:
 - [x] ProcmuxClient: connect, demux loop, command/stdin sending
 - [ ] Test: run procmux-rs, connect Python bot to it via Unix socket
 
-### Phase 2: Claudewire [ ]
+### Phase 2: Claudewire [x]
 **Goal**: Rust library implementing the Claude CLI stream-json protocol.
 
 Tasks:
-- [ ] Protocol types: all inbound/outbound message types (serde structs)
-- [ ] Stream event types: MessageStart, ContentBlockDelta, etc.
-- [ ] Content block types: TextBlock, ToolUseBlock, ThinkingBlock
-- [ ] Delta types: TextDelta, InputJsonDelta, ThinkingDelta, SignatureDelta
-- [ ] Control protocol: ControlRequest, ControlResponse
-- [ ] Rate limit event parsing
-- [ ] Schema validation (serde does this at deserialize time)
-- [ ] ProcessConnection trait (replaces Python Protocol)
-- [ ] ProcessEvent types: StdoutEvent, StderrEvent, ExitEvent, CommandResult
-- [ ] BridgeTransport: connect, spawn, subscribe, write, read_messages, stop, close
+- [x] Protocol types: all inbound/outbound message types (serde structs)
+- [x] Stream event types: MessageStart, ContentBlockDelta, etc.
+- [x] Content block types: TextBlock, ToolUseBlock, ThinkingBlock
+- [x] Delta types: TextDelta, InputJsonDelta, ThinkingDelta, SignatureDelta
+- [x] Control protocol: ControlRequest, ControlResponse
+- [x] Rate limit event parsing
+- [x] Schema validation (serde does this at deserialize time)
+- [x] BridgeTransport: write, read_messages, stop, close
+- [x] ActivityState tracking from stream events
+- [x] Bare stream event deduplication
+- [x] Unit tests for serde round-trips and event parsing
 - [ ] Initialize interception for reconnecting agents
 - [ ] OTel trace context injection
 - [ ] DirectProcessConnection: PTY subprocess management
-- [ ] ActivityState tracking from stream events
-- [ ] Bare stream event deduplication
-- [ ] Unit tests for serde round-trips and event parsing
 
 ### Phase 3: Supervisor [x]
 **Goal**: Rust process supervisor replacing supervisor.py.
@@ -120,12 +118,12 @@ Tasks:
 - [x] Channel management: create/move/archive agent channels, categories
 - [x] Slash commands: /spawn, /kill, /list-agents, /stop, /skip, /restart, /model, /debug, /send
 - [x] Message content extraction (text, attachments, embeds)
-- [ ] Response streaming to Discord (live-edit messages)
+- [x] Response streaming to Discord (live-edit messages)
 - [x] Reaction-based interactions (plan approval, user questions)
 - [ ] Todo list rendering and tracking
 - [x] Channel topic updates with session state
 - [ ] Idle agent reminders
-- [ ] System prompt generation (SOUL.md, dev_context.md, packs)
+- [x] System prompt generation (SOUL.md, dev_context.md, packs)
 - [x] Channel status prefixes
 
 ### Phase 7: MCP Tools [x]
@@ -137,7 +135,7 @@ Tasks:
 - [x] Discord tools: discord_send_message, discord_read_messages, discord_list_channels, discord_send_file
 - [x] Schedule tools: schedule_create, schedule_list, schedule_delete
 - [x] Utility tools: get_date_and_time, set_agent_status, clear_agent_status, discord_send_file
-- [ ] Permission callback for cwd-based tool access control
+- [x] Permission callback for cwd-based tool access control
 
 ### Phase 8: Scheduler & Advanced Features [x]
 **Goal**: Cron scheduler, flowcoder integration, remaining features.
@@ -202,9 +200,9 @@ Each phase produces testable artifacts:
 | axi-config | lib | 4 | Config loading, Discord REST client, model management |
 | axi-hub | lib | 2 | Agent session management, lifecycle, rate limits |
 | axi-mcp | lib | 8 | MCP tool servers — protocol, tools, schedules |
-| axi-bot | bin | 28 | Discord bot, events, commands, channels, scheduler, crash handler |
+| axi-bot | bin | 48 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions |
 | axi-supervisor | bin | 0 | Process supervisor (tested via integration) |
-| **Total** | | **65** | |
+| **Total** | | **85** | |
 
 ## Migration Plan
 

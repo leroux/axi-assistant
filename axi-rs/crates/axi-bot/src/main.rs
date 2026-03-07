@@ -7,8 +7,11 @@ mod channels;
 mod commands;
 mod crash_handler;
 mod events;
+mod permissions;
+mod prompts;
 mod scheduler;
 mod state;
+mod streaming;
 
 use std::sync::Arc;
 
