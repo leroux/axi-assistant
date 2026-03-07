@@ -18,6 +18,9 @@ build/
 .vscode/
 .idea/
 
+# Rust
+axi-rs/target/
+
 # OS
 .DS_Store
 

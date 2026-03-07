@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/procmux",
+    "crates/claudewire",
+    "crates/axi-config",
+    "crates/axi",
+    "crates/discordquery",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.lints.clippy]
+# Pedantic — enable most, selectively deny noisy ones
+pedantic = { level = "warn", priority = -1 }
+# Nursery — useful but may have false positives
+nursery = { level = "warn", priority = -1 }
+
+# Selectively disable overly noisy pedantic/nursery lints
+module-name-repetitions = "allow"
+must-use-candidate = "allow"
+missing-errors-doc = "allow"
+missing-panics-doc = "allow"
+missing-docs-in-private-items = "allow"
+redundant-pub-crate = "allow"
+option-if-let-else = "allow"
+significant-drop-tightening = "allow"
+future-not-send = "allow"
+cognitive-complexity = "allow"
+too-many-lines = "allow"
+cast-possible-truncation = "allow"
+cast-sign-loss = "allow"
+cast-precision-loss = "allow"
+struct-excessive-bools = "allow"
+similar-names = "allow"
+return-self-not-must-use = "allow"
+struct-field-names = "allow"
+implicit-hasher = "allow"
+branches-sharing-code = "allow"
+# These are valid concerns but generate too much noise during active development.
+# Re-enable individually as the codebase stabilizes.
+manual-let-else = "allow"
+assigning-clones = "allow"
+unused-async = "allow"
+
+[workspace.lints.rust]
+unsafe-code = "warn"
+unused-qualifications = "warn"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+opentelemetry = { version = "0.28", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.28", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.28", default-features = false, features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.29"
+thiserror = "2"
+anyhow = "1"
+nix = { version = "0.29", features = ["signal", "process"] }
+chrono = { version = "0.4", features = ["serde"] }

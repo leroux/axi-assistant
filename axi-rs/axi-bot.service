@@ -1,0 +1,18 @@
+[Unit]
+Description=Axi Personal Assistant Discord Bot (Rust)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/axi-assistant
+ExecStart=/home/ubuntu/axi-assistant/target/release/axi-supervisor
+ExecReload=kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+Environment="PATH=/home/ubuntu/.cargo/bin:/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=Axi Discord Bot
+After=axi-procmux.service
+Wants=axi-procmux.service
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/axi-assistant
+EnvironmentFile=/home/ubuntu/axi-assistant/.env
+ExecStart=/home/ubuntu/axi-assistant/axi-rs/target/release/axi-bot
+ExecReload=kill -HUP $MAINPID
+Restart=always
+RestartPreventExitStatus=0 SIGTERM
+SuccessExitStatus=42
+RestartSec=2
+TimeoutStopSec=15
+Environment="PATH=/home/ubuntu/.cargo/bin:/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=default.target
