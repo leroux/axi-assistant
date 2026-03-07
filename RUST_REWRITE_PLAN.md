@@ -120,7 +120,7 @@ Tasks:
 - [x] Message content extraction (text, attachments, embeds)
 - [x] Response streaming to Discord (live-edit messages)
 - [x] Reaction-based interactions (plan approval, user questions)
-- [ ] Todo list rendering and tracking
+- [x] Todo list rendering and tracking
 - [x] Channel topic updates with session state
 - [ ] Idle agent reminders
 - [x] System prompt generation (SOUL.md, dev_context.md, packs)
@@ -200,9 +200,9 @@ Each phase produces testable artifacts:
 | axi-config | lib | 4 | Config loading, Discord REST client, model management |
 | axi-hub | lib | 2 | Agent session management, lifecycle, rate limits |
 | axi-mcp | lib | 8 | MCP tool servers — protocol, tools, schedules |
-| axi-bot | bin | 48 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions |
+| axi-bot | bin | 53 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions, todos |
 | axi-supervisor | bin | 0 | Process supervisor (tested via integration) |
-| **Total** | | **85** | |
+| **Total** | | **90** | |
 
 ## Migration Plan
 

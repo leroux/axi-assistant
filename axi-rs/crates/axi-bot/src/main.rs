@@ -12,6 +12,7 @@ mod prompts;
 mod scheduler;
 mod state;
 mod streaming;
+mod todos;
 
 use std::sync::Arc;
 
