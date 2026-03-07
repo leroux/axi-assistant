@@ -64,7 +64,7 @@ Tasks:
 - [x] ActivityState tracking from stream events
 - [x] Bare stream event deduplication
 - [x] Unit tests for serde round-trips and event parsing
-- [ ] Initialize interception for reconnecting agents
+- [x] Initialize interception for reconnecting agents
 - [ ] OTel trace context injection
 - [ ] DirectProcessConnection: PTY subprocess management
 
@@ -202,24 +202,24 @@ Each phase produces testable artifacts:
 
 | Binary | Release Size | Description |
 |--------|-------------|-------------|
-| axi-bot | 16 MB | Discord bot with event handlers, slash commands, scheduler |
+| axi-bot | 17 MB | Discord bot with event handlers, slash commands, scheduler |
 | axi-supervisor | 1.8 MB | Process supervisor with crash detection and rollback |
-| procmux | 2.8 MB | Process multiplexer (Unix socket server) |
-| discordquery | ~5 MB | Discord message history query CLI |
+| procmux | 2.9 MB | Process multiplexer (Unix socket server) |
+| discordquery | 5.8 MB | Discord message history query CLI |
 
 ## Crate Summary
 
 | Crate | Type | Tests | Description |
 |-------|------|-------|-------------|
 | procmux | lib + bin | 7 | Process multiplexer — wire protocol, server, client |
-| claudewire | lib | 16 | Claude CLI stream-json protocol types and parsing |
+| claudewire | lib | 21 | Claude CLI stream-json protocol types, parsing, and transport |
 | axi-config | lib | 4 | Config loading, Discord REST client, model management |
 | axi-hub | lib | 2 | Agent session management, lifecycle, rate limits |
 | axi-mcp | lib | 8 | MCP tool servers — protocol, tools, schedules |
 | axi-bot | bin | 56 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions, todos, frontend, startup, bridge |
 | discordquery | bin | 5 | Discord message history query CLI (guilds, channels, history, search, wait) |
 | axi-supervisor | bin | 0 | Process supervisor (tested via integration) |
-| **Total** | | **98** | |
+| **Total** | | **103** | |
 
 ## Migration Plan
 
