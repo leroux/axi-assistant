@@ -128,15 +128,15 @@ Tasks:
 - [ ] System prompt generation (SOUL.md, dev_context.md, packs)
 - [x] Channel status prefixes
 
-### Phase 7: MCP Tools [ ]
+### Phase 7: MCP Tools [x]
 **Goal**: MCP server implementations for agent tooling.
 
 Tasks:
-- [ ] MCP server framework integration (rmcp or manual JSON-RPC)
-- [ ] Master tools: axi_spawn_agent, axi_kill_agent, axi_send_message, axi_restart
-- [ ] Discord tools: discord_send_message, discord_read_messages, discord_list_channels, discord_send_file
-- [ ] Schedule tools: schedule_create, schedule_list, schedule_delete
-- [ ] Utility tools: get_date_and_time, set_agent_status, clear_agent_status, discord_send_file
+- [x] MCP server framework integration (rmcp or manual JSON-RPC)
+- [x] Master tools: axi_spawn_agent, axi_kill_agent, axi_send_message, axi_restart
+- [x] Discord tools: discord_send_message, discord_read_messages, discord_list_channels, discord_send_file
+- [x] Schedule tools: schedule_create, schedule_list, schedule_delete
+- [x] Utility tools: get_date_and_time, set_agent_status, clear_agent_status, discord_send_file
 - [ ] Permission callback for cwd-based tool access control
 
 ### Phase 8: Scheduler & Advanced Features [ ]

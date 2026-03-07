@@ -119,6 +119,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "axi-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axi-config",
+ "axi-hub",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "axi-supervisor"
 version = "0.1.0"
 dependencies = [
