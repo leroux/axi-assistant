@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +31,28 @@ _tracer = trace.get_tracer(__name__)
 
 # Callback: consume the SDK stream, render to user, return error or None.
 StreamHandlerFn = Callable[["AgentSession"], Awaitable[str | None]]
+
+
+# ---------------------------------------------------------------------------
+# Result of receive_user_message
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class ReceiveResult:
+    """Outcome of receive_user_message.
+
+    status values:
+        "processed"            — message was sent and response streamed
+        "queued"               — agent busy, message appended to queue
+        "queued_reconnecting"  — agent reconnecting, message queued
+        "shutdown"             — hub is shutting down, message rejected
+        "error"                — unrecoverable error during processing
+        "timeout"              — query timed out, session was recovered
+    """
+
+    status: str
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +229,143 @@ async def handle_query_timeout(hub: AgentHub, session: AgentSession) -> None:
             new_session.name,
             f"Agent **{new_session.name}** timed out and was reset (sleeping). Context lost.",
         )
+
+
+# ---------------------------------------------------------------------------
+# User message ingestion (single entry point for all frontends)
+# ---------------------------------------------------------------------------
+
+
+async def receive_user_message(
+    hub: AgentHub,
+    session: AgentSession,
+    content: Any,
+    stream_handler: StreamHandlerFn,
+    *,
+    queue_item: Any = None,
+) -> ReceiveResult:
+    """Receive a user message for an agent — single entry point for all frontends.
+
+    Handles:
+    - Shutdown rejection
+    - Reconnecting → queue
+    - Busy → queue
+    - Lock acquisition
+    - Wake-if-sleeping (with ConcurrencyLimitError handling)
+    - Process message + stream with retry
+    - Error/timeout handling
+
+    Does NOT drain the queue or check scheduler yield — the caller handles
+    post-processing since queue item format is frontend-specific.
+
+    Args:
+        queue_item: What to append to message_queue when queuing is needed.
+            Defaults to ``(content, None)``. Frontends pass their own format
+            (e.g. Discord uses ``(content, channel, orig_message)``).
+
+    Returns:
+        ReceiveResult with status and optional error description.
+    """
+    from agenthub.types import ConcurrencyLimitError
+
+    if queue_item is None:
+        queue_item = (content, None)
+
+    if hub.shutdown_requested:
+        await hub.callbacks.post_system(
+            session.name, "Bot is restarting — not accepting new messages."
+        )
+        return ReceiveResult(status="shutdown")
+
+    # Reconnecting: queue
+    if session.reconnecting:
+        session.message_queue.append(queue_item)
+        position = len(session.message_queue)
+        await hub.callbacks.post_system(
+            session.name,
+            f"Agent **{session.name}** is reconnecting — message queued (position {position}).",
+        )
+        return ReceiveResult(status="queued_reconnecting")
+
+    # Busy: queue
+    if session.query_lock.locked():
+        session.message_queue.append(queue_item)
+        position = len(session.message_queue)
+        await hub.callbacks.post_system(
+            session.name,
+            f"Agent **{session.name}** is busy — message queued (position {position}). "
+            "Will process after current turn.",
+        )
+        return ReceiveResult(status="queued")
+
+    # Normal processing path
+    hub.scheduler.mark_interactive(session.name)
+    lifecycle.reset_activity(session)
+    session.bridge_busy = False
+
+    if session.agent_log:
+        preview = content[:200] if isinstance(content, str) else str(content)[:200]
+        session.agent_log.info("USER: %s", preview)
+
+    result = ReceiveResult(status="processed")
+
+    with _tracer.start_as_current_span(
+        "receive_user_message",
+        attributes={
+            "agent.name": session.name,
+            "agent.type": session.agent_type or "claude_code",
+            "message.length": len(content) if isinstance(content, str) else -1,
+        },
+    ):
+        async with session.query_lock:
+            if not lifecycle.is_awake(session):
+                try:
+                    await lifecycle.wake_agent(hub, session)
+                except ConcurrencyLimitError:
+                    session.message_queue.append(queue_item)
+                    await hub.callbacks.post_system(
+                        session.name,
+                        "All agent slots busy. Message queued — will run when a slot opens.",
+                    )
+                    return ReceiveResult(status="queued")
+                except Exception:
+                    log.exception(
+                        "Failed to wake agent '%s' for user message", session.name
+                    )
+                    await hub.callbacks.post_system(
+                        session.name,
+                        f"Failed to wake agent **{session.name}**.",
+                    )
+                    return ReceiveResult(status="error", error="Failed to wake agent")
+
+            session.activity = ActivityState(
+                phase="starting", query_started=datetime.now(UTC)
+            )
+
+            try:
+                await process_message(hub, session, content, stream_handler)
+            except TimeoutError:
+                await handle_query_timeout(hub, session)
+                result = ReceiveResult(status="timeout")
+            except RuntimeError as e:
+                log.warning(
+                    "Runtime error for '%s': %s", session.name, e
+                )
+                await hub.callbacks.post_system(session.name, str(e))
+                result = ReceiveResult(status="error", error=str(e))
+            except Exception as e:
+                log.exception(
+                    "Error processing message for '%s'", session.name
+                )
+                await hub.callbacks.post_system(
+                    session.name,
+                    f"Error communicating with agent **{session.name}**.",
+                )
+                result = ReceiveResult(status="error", error=str(e))
+            finally:
+                session.activity = ActivityState(phase="idle")
+
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,12 @@
-"""Construct the AgentHub with Discord-specific callbacks and SDK factories.
+"""Construct the AgentHub with FrontendRouter and SDK factories.
 
 Called once from agents.init() to create the hub. The hub shares the same
 sessions dict as agents.py's `agents` — both reference the same objects.
 This allows gradual migration: existing code works alongside hub calls.
+
+The FrontendRouter multiplexes events to all registered frontends. Currently
+only DiscordFrontend is registered; future frontends (web, Slack) will be
+added via router.add().
 """
 
 from __future__ import annotations
@@ -12,8 +16,10 @@ from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-from agenthub import AgentHub, FrontendCallbacks
+from agenthub import AgentHub
+from agenthub.frontend_router import FrontendRouter
 from axi import config
+from axi.discord_frontend import DiscordFrontend
 
 if TYPE_CHECKING:
     from discord.ext.commands import Bot
@@ -21,101 +27,6 @@ if TYPE_CHECKING:
     from agenthub.types import AgentSession
 
 log = logging.getLogger("axi")
-
-
-# ---------------------------------------------------------------------------
-# Frontend callbacks — map hub events to Discord operations
-# ---------------------------------------------------------------------------
-
-
-def _build_callbacks(bot: Bot) -> FrontendCallbacks:
-    """Build FrontendCallbacks that use the Discord bot for notifications."""
-    from axi.channels import get_agent_channel, get_master_channel
-
-    async def post_message(agent_name: str, text: str) -> None:
-        channel = await get_agent_channel(agent_name)
-        if channel:
-            from axi.agents import send_long
-
-            await send_long(channel, text)
-
-    async def post_system(agent_name: str, text: str) -> None:
-        channel = await get_agent_channel(agent_name)
-        if channel:
-            from axi.agents import send_system
-
-            await send_system(channel, text)
-
-    async def on_wake(agent_name: str) -> None:
-        log.debug("Hub: agent '%s' woke", agent_name)
-
-    async def on_sleep(agent_name: str) -> None:
-        log.debug("Hub: agent '%s' slept", agent_name)
-
-    async def on_session_id(agent_name: str, session_id: str) -> None:
-        log.debug("Hub: agent '%s' session_id=%s", agent_name, session_id)
-
-    async def get_channel(agent_name: str) -> Any:
-        return await get_agent_channel(agent_name)
-
-    async def on_spawn(session: Any) -> None:
-        log.info("Hub: agent '%s' spawned", session.name)
-
-    async def on_kill(agent_name: str, session_id: str | None) -> None:
-        log.info("Hub: agent '%s' killed", agent_name)
-
-    async def broadcast(text: str) -> None:
-        master_ch = await get_master_channel()
-        if master_ch:
-            await master_ch.send(text)
-
-    async def schedule_rate_limit_expiry(seconds: float) -> None:
-        pass  # Handled by existing rate limit code for now
-
-    async def on_idle_reminder(agent_name: str, idle_minutes: float) -> None:
-        pass  # Handled by existing idle check code for now
-
-    async def on_reconnect(agent_name: str, was_mid_task: bool) -> None:
-        channel = await get_agent_channel(agent_name)
-        if channel:
-            if was_mid_task:
-                await channel.send("*(reconnected after restart — resuming output)*")
-            else:
-                await channel.send("*(reconnected after restart)*")
-
-    async def close_app() -> None:
-        from axi.tracing import shutdown_tracing
-
-        shutdown_tracing()
-        await bot.close()
-
-    async def kill_process() -> None:
-        from agenthub.shutdown import kill_supervisor
-
-        kill_supervisor()
-
-    async def send_goodbye() -> None:
-        master_ch = await get_master_channel()
-        if master_ch:
-            await master_ch.send("*System:* Shutting down — see you soon!")
-
-    return FrontendCallbacks(
-        post_message=post_message,
-        post_system=post_system,
-        on_wake=on_wake,
-        on_sleep=on_sleep,
-        on_session_id=on_session_id,
-        get_channel=get_channel,
-        on_spawn=on_spawn,
-        on_kill=on_kill,
-        broadcast=broadcast,
-        schedule_rate_limit_expiry=schedule_rate_limit_expiry,
-        on_idle_reminder=on_idle_reminder,
-        on_reconnect=on_reconnect,
-        close_app=close_app,
-        kill_process=kill_process,
-        send_goodbye=send_goodbye,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -189,18 +100,37 @@ async def _disconnect_client(client: Any, name: str) -> None:
 # Hub construction
 # ---------------------------------------------------------------------------
 
+# Module-level router — accessible for adding more frontends later
+router: FrontendRouter | None = None
+
 
 def create_hub(
     bot: Bot,
     sessions: dict[str, Any],
 ) -> AgentHub:
-    """Create and configure the AgentHub.
+    """Create and configure the AgentHub with FrontendRouter.
 
-    The hub shares the same sessions dict as agents.py — both point to the
-    same session objects. This allows gradual migration: existing code that
-    accesses `agents["name"]` works alongside hub.sessions["name"].
+    Creates a FrontendRouter, registers DiscordFrontend, and uses
+    router.as_callbacks() to generate the FrontendCallbacks that AgentHub
+    expects. The router is stored module-level so other code can add
+    frontends later (e.g. web, Slack).
     """
-    callbacks = _build_callbacks(bot)
+    global router
+
+    # Create router and register Discord as the first frontend
+    router = FrontendRouter()
+    discord_fe = DiscordFrontend(bot)
+    router.add(discord_fe)
+
+    # Optionally register the web frontend
+    if config.WEB_ENABLED:
+        from axi.web_frontend import WebFrontend
+
+        web_fe = WebFrontend(port=config.WEB_PORT)
+        router.add(web_fe)
+
+    # Generate backward-compatible callbacks from the router
+    callbacks = router.as_callbacks()
 
     hub = AgentHub(
         max_awake=config.MAX_AWAKE_AGENTS,
@@ -218,5 +148,11 @@ def create_hub(
 
     # Share the same sessions dict — gradual migration
     hub.sessions = sessions  # type: ignore[assignment]
+
+    # Give the web frontend a reference to the hub for message routing
+    if config.WEB_ENABLED:
+        web_fe = router.get("web")
+        if web_fe:
+            web_fe.set_hub(hub)  # type: ignore[union-attr]
 
     return hub

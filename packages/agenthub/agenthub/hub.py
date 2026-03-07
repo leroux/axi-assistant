@@ -132,6 +132,19 @@ class AgentHub:
             self, self.sessions[name], content, stream_handler
         )
 
+    async def receive_user_message(
+        self,
+        name: str,
+        content: Any,
+        stream_handler: messaging.StreamHandlerFn,
+        *,
+        queue_item: Any = None,
+    ) -> messaging.ReceiveResult:
+        return await messaging.receive_user_message(
+            self, self.sessions[name], content, stream_handler,
+            queue_item=queue_item,
+        )
+
     # Reconnect
     async def connect_bridge(self, socket_path: str) -> None:
         await reconnect.connect_procmux(self, socket_path)

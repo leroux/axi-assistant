@@ -48,6 +48,8 @@ __all__ = [
     "STREAMING_EDIT_INTERVAL",
     "USAGE_HISTORY_PATH",
     "VALID_MODELS",
+    "WEB_ENABLED",
+    "WEB_PORT",
     "discord_client",
     "get_model",
     "intents",
@@ -136,6 +138,8 @@ FLOWCODER_ENABLED = os.environ.get("FLOWCODER_ENABLED", "1").lower() in ("1", "t
 STREAMING_DISCORD = os.environ.get("STREAMING_DISCORD", "").lower() in ("1", "true", "yes")
 CHANNEL_STATUS_ENABLED = os.environ.get("CHANNEL_STATUS_ENABLED", "").lower() in ("1", "true", "yes")
 CLEAN_TOOL_MESSAGES = os.environ.get("CLEAN_TOOL_MESSAGES", "").lower() in ("1", "true", "yes")
+WEB_ENABLED = os.environ.get("WEB_ENABLED", "").lower() in ("1", "true", "yes")
+WEB_PORT = int(os.environ.get("WEB_PORT", "8420"))
 
 # Context compaction threshold — fraction of context window that triggers auto-compact.
 # Default 0.80 (80%). Set lower to compact earlier, higher to use more context before compacting.

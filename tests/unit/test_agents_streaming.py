@@ -243,7 +243,7 @@ class TestLiveEditTick:
         session = self._make_session()
         assert ctx.live_edit is not None
         ctx.live_edit.message_id = "msg_001"
-        ctx.live_edit.last_edit_time = time.monotonic() - 2.0  # 2s ago
+        ctx.live_edit.last_edit_time = time.monotonic() - 10.0  # 10s ago (well past any interval)
         ctx.text_buffer = "Hello world updated"
 
         with patch("axi.config.discord_client") as mock_client:

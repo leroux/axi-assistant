@@ -287,7 +287,9 @@ async def on_message(message: discord.Message) -> None:
         if handled:
             return
 
-    # --- Backpressure conditions ---
+    # --- Centralized message processing via hub ---
+    from agenthub.messaging import receive_user_message
+
     msg_id = message.id
     log.info(
         "ON_MSG[%s][%s] processing=%s reconnecting=%s queue_size=%d lock_locked=%s",
@@ -299,91 +301,40 @@ async def on_message(message: discord.Message) -> None:
         session.query_lock.locked(),
     )
 
-    # 1. Reconnecting: queue messages
-    if session.reconnecting:
-        session.message_queue.append((content, channel, message))
-        position = len(session.message_queue)
-        log.debug(
-            "Agent '%s' reconnecting after restart, queuing message (queue_size=%d)",
-            agent_name,
-            position,
-        )
-        await agents.add_reaction(message, "📨")
-        await agents.send_system(
-            channel,
-            f"Agent **{agent_name}** is reconnecting after restart — message queued (position {position}).",
-        )
-        return
+    # Stream handler: Discord live-edit rendering to the agent's channel
+    async def _discord_stream_handler(s: AgentSession) -> str | None:
+        return await agents.stream_response_to_channel(s, channel)
 
-    # 2. Agent busy: queue message and interrupt current turn
-    if agents.is_processing(session):
-        session.message_queue.append((content, channel, message))
-        position = len(session.message_queue)
-        log.debug("Agent '%s' busy, queuing message (queue_size=%d)", agent_name, position)
-        await agents.add_reaction(message, "📨")
-        interrupted = await agents.graceful_interrupt(session)
-        if interrupted:
-            await agents.send_system(
-                channel,
-                f"Agent **{agent_name}** is busy — message queued (position {position}). Interrupting current task.",
-            )
-        else:
-            await agents.send_system(
-                channel,
-                f"Agent **{agent_name}** is busy — message queued (position {position}). Will process after current turn.",
-            )
-        return
+    assert agents.hub is not None
+    result = await receive_user_message(
+        agents.hub,
+        session,
+        content,
+        _discord_stream_handler,
+        # Discord-specific queue item format for process_message_queue
+        queue_item=(content, channel, message),
+    )
 
-    # --- Normal processing path ---
-    with _tracer.start_as_current_span(
-        "on_message",
-        attributes={
-            "discord.message_id": msg_id,
-            "discord.channel": channel.name,
-            "agent.name": agent_name,
-            "message.length": len(content) if isinstance(content, str) else -1,
-        },
-    ):
-        scheduler.mark_interactive(agent_name)
-        log.info("ON_MSG[%s][%s] ACQUIRING query_lock", agent_name, msg_id)
-        async with session.query_lock:
-            log.info("ON_MSG[%s][%s] ACQUIRED query_lock", agent_name, msg_id)
-            if not agents.is_awake(session):
-                log.debug("Waking agent '%s' for user message", agent_name)
-                if not await agents.wake_or_queue(session, content, channel, message):
-                    return
+    # Discord-specific reactions based on result
+    _RESULT_REACTIONS = {
+        "processed": "✅",
+        "queued": "📨",
+        "queued_reconnecting": "📨",
+        "timeout": "⏳",
+    }
+    reaction = _RESULT_REACTIONS.get(result.status, "❌")
+    if result.status != "shutdown":
+        await agents.add_reaction(message, reaction)
 
-            log.info("ON_MSG[%s][%s] calling process_message", agent_name, msg_id)
-            session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
-
-            try:
-                await agents.process_message(session, content, channel)
-                await agents.add_reaction(message, "✅")
-            except TimeoutError:
-                log.warning("Query timeout for agent '%s'", agent_name)
-                await agents.add_reaction(message, "⏳")
-                await agents.handle_query_timeout(session, channel)
-            except RuntimeError as e:
-                log.warning("Runtime error for agent '%s': %s", agent_name, e)
-                await agents.add_reaction(message, "❌")
-                await agents.send_system(channel, str(e))
-            except Exception:
-                log.exception("Error processing message for agent '%s'", agent_name)
-                await agents.add_reaction(message, "❌")
-                await agents.send_system(
-                    channel,
-                    f"Error communicating with agent **{agent_name}**. Try `/kill-agent {agent_name}` and respawn.",
-                )
-            finally:
-                session.activity = ActivityState(phase="idle")
-
-        log.info("ON_MSG[%s][%s] query_lock RELEASED, checking queue", agent_name, msg_id)
+    # Post-processing: yield check + queue drain (Discord's 3-tuple format)
+    if result.status == "processed":
         if scheduler.should_yield(session.name):
             log.info("Scheduler yield: '%s' sleeping after user message", session.name)
             await agents.sleep_agent(session)
         else:
             await agents.process_message_queue(session)
-        await bot.process_commands(message)
+
+    await bot.process_commands(message)
 
 
 # ---------------------------------------------------------------------------
@@ -2326,6 +2277,14 @@ async def on_ready() -> None:
 
         check_schedules.start()
         log.info("Schedule checker started")
+
+        # Start web frontend if enabled
+        if config.WEB_ENABLED:
+            from axi.hub_wiring import router as _hub_router
+
+            if _hub_router:
+                await _hub_router.start_all()
+                log.info("Web frontend started on port %d", config.WEB_PORT)
 
         rollback_info = _consume_json_marker(config.ROLLBACK_MARKER_PATH, "Rollback")
         crash_info = _consume_json_marker(config.CRASH_ANALYSIS_MARKER_PATH, "Crash analysis")

@@ -177,3 +177,214 @@ The engine extracts content from `msg["message"]["content"]` for slash command p
 
 ### Concurrent Agents
 Awake agent count is tracked by `count_awake_agents()` which counts sessions where `client is not None`. The concurrency limit (`MAX_AWAKE_AGENTS`) applies. When at capacity, the least-idle agent is evicted (put to sleep) to make room.
+
+---
+
+# Multi-Frontend Architecture
+
+Documented during the extraction and abstraction of Discord-specific code into a pluggable frontend system.
+Last updated: 2026-03-06.
+
+---
+
+## Overview
+
+Axi supports multiple simultaneous frontends (Discord, web UI, Slack) through a **Frontend Adapter Pattern**. AgentHub (the core orchestrator) emits events through a `FrontendRouter` that multiplexes to all registered frontends. Each frontend renders events in its own way.
+
+```
+              AgentHub
+                 |
+          FrontendCallbacks  (backward compat)
+                 |
+           FrontendRouter
+          (multiplexes to N)
+                 |
+     +-----------+-----------+
+     |           |           |
+  Discord    WebFront.    Slack
+  Frontend   (future)    (future)
+```
+
+**Key principle:** AgentHub and all core packages (`agenthub/`) have zero frontend imports. Frontends are leaf nodes that consume typed events.
+
+---
+
+## Layers
+
+### 1. StreamOutput Types (`agenthub/stream_types.py`)
+
+~20 dataclass types representing normalized streaming events. Frontend-agnostic — no Discord or web concepts.
+
+| Type | Purpose |
+|------|---------|
+| `TextDelta` | Incremental text from model response |
+| `TextFlush` | Accumulated text ready to render (with reason: end_turn, mid_turn_split, etc.) |
+| `ThinkingStart` / `ThinkingEnd` | Extended thinking boundaries |
+| `ToolUseStart` / `ToolInputDelta` / `ToolUseEnd` | Tool invocation lifecycle |
+| `TodoUpdate` | Agent updated its todo list |
+| `StreamStart` / `StreamEnd` | Response stream boundaries |
+| `QueryResult` | Final turn result (session_id, cost, duration) |
+| `RateLimitHit` / `TransientError` | API errors |
+| `StreamKilled` | Stream ended without ResultMessage |
+| `CompactStart` / `CompactComplete` | Context compaction |
+| `FlowchartStart` / `FlowchartEnd` | Flowchart execution boundaries |
+| `BlockStart` / `BlockComplete` | Flowchart block boundaries |
+| `SystemNotification` | Catch-all for unhandled system messages |
+
+Union type: `StreamOutput = TextDelta | TextFlush | ... | SystemNotification`
+
+### 2. Streaming Engine (`agenthub/streaming.py`)
+
+Async generator that transforms raw SDK messages into `StreamOutput` events:
+
+```python
+async for event in stream_response(session):
+    # event is a StreamOutput — frontend renders it
+```
+
+Handles:
+- **Text buffering**: Accumulates text, flushes at end-of-turn or mid-turn split (1800 char threshold)
+- **Tool preview extraction**: Extracts human-readable preview from Bash commands, file paths, grep patterns
+- **TodoWrite extraction**: Parses TodoWrite tool input into `TodoUpdate` event
+- **Thinking lifecycle**: Emits ThinkingStart/End at correct content block boundaries
+- **Session ID tracking**: Extracts from StreamEvent and ResultMessage, skips during flowchart mode
+- **Error classification**: Rate limits vs transient errors vs stream kills
+
+### 3. AgentLog (`agenthub/agent_log.py`)
+
+Per-agent append-only event log — the shared source of truth for message parity.
+
+```python
+log = make_agent_log("master")
+log.subscribe(my_callback)
+await log.append(make_event("assistant", "master", text="Hello"))
+# my_callback fires with the LogEvent
+```
+
+Features:
+- `LogEvent` dataclass: ts, kind, agent, text, source, data
+- Subscriber notifications on append (asyncio callbacks)
+- Replay with `since` filter for late-connecting frontends
+- Optional JSONL persistence
+- Source tracking so frontends can skip self-originated events
+
+### 4. Frontend Protocol (`agenthub/frontend.py`)
+
+`@runtime_checkable` Protocol defining the full frontend interface:
+
+- **Outbound messages**: `post_message`, `post_system`, `broadcast`
+- **Lifecycle events**: `on_wake`, `on_sleep`, `on_spawn`, `on_kill`, `on_session_id`, `on_idle_reminder`, `on_reconnect`
+- **Stream rendering**: `on_stream_event` (receives `StreamOutput`)
+- **Interactive gates**: `request_plan_approval` → `PlanApprovalResult`, `ask_question` → answers dict
+- **Channel management**: `ensure_channel`, `move_to_killed`, `get_channel`
+- **Todo**: `update_todo`
+- **Persistence**: `save_session_metadata`, `reconstruct_sessions`
+- **Event log**: `on_log_event`
+- **Lifecycle**: `start`, `stop`
+- **Shutdown**: `send_goodbye`, `close_app`, `kill_process`
+
+### 5. FrontendRouter (`agenthub/frontend_router.py`)
+
+Multiplexer that broadcasts to all registered frontends:
+
+```python
+router = FrontendRouter()
+router.add(discord_frontend)
+router.add(web_frontend)
+
+# Broadcast — all frontends receive
+await router.post_message("master", "hello")
+
+# Race — first response wins (plan approval, questions)
+result = await router.request_plan_approval("agent-1", "plan text", session)
+
+# Backward compat — generates FrontendCallbacks for AgentHub
+callbacks = router.as_callbacks()
+```
+
+Error isolation: if one frontend throws, others still receive the event.
+
+### 6. Discord Extractions (`axi/discord_stream.py`, `axi/discord_ui.py`)
+
+Discord-specific code extracted from `agents.py`:
+
+- **`discord_stream.py`** (981 lines): Live-edit streaming renderer, typing indicators, mid-turn splitting, inline duration timing, compaction handling
+- **`discord_ui.py`** (433 lines): Plan approval via reactions, question UI via reactions, todo list formatting
+
+Both use the `init()` dependency injection pattern to receive references to functions in `agents.py` without circular imports. All symbols are re-exported from `agents.py` for backward compatibility.
+
+---
+
+## Data Flow
+
+### Outbound (hub → frontends)
+```
+AgentHub callback fires
+  → FrontendRouter._broadcast(method, *args)
+    → discord_frontend.method(*args)   # edits Discord message
+    → web_frontend.method(*args)       # pushes WebSocket event
+```
+
+### Streaming (SDK → frontends)
+```
+SDK yields raw messages (StreamEvent, AssistantMessage, ResultMessage, SystemMessage)
+  → streaming.stream_response(session) transforms to StreamOutput events
+    → Frontend.on_stream_event(agent_name, event)
+      → Discord: live-edits message, shows typing, etc.
+      → Web: pushes WebSocket JSON event
+```
+
+### Interactive gates (frontends → hub)
+```
+Hub needs plan approval
+  → FrontendRouter._first_response("request_plan_approval", ...)
+    → asyncio.wait(FIRST_COMPLETED) across all frontends
+      → Discord: posts plan, waits for reaction
+      → Web: shows modal, waits for button click
+    → First response wins, losers cancelled
+    → Returns PlanApprovalResult to hub
+```
+
+### Inbound (user → hub)
+```
+User types in Discord/web/Slack
+  → Frontend-specific message handler (on_message, WebSocket, etc.)
+    → hub.receive_user_message(agent_name, content)
+      → Wakes agent if sleeping
+      → Queues if busy
+      → Streams response via stream_response()
+```
+
+---
+
+## Test Coverage
+
+| Test file | Tests | What's covered |
+|-----------|-------|----------------|
+| `test_agent_log.py` | 15 | Append, subscribe, replay, persistence, source tracking |
+| `test_stream_types.py` | 19 | All StreamOutput dataclass construction and fields |
+| `test_streaming_engine.py` | 21 | SDK message → StreamOutput transformation, text buffering, tool previews, errors |
+| `test_frontend_router.py` | 12 | Broadcast, error isolation, racing, as_callbacks(), lifecycle |
+
+All tests are unit tests with mocked dependencies — no live bot or Discord needed.
+
+---
+
+## Migration Status
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| 0a: Extract discord_stream.py | Done | Streaming renderer extracted from agents.py |
+| 0b: Extract discord_ui.py | Done | Interactive UI handlers extracted from agents.py |
+| 1a: AgentLog | Done | Per-agent event log with subscribers |
+| 1b: StreamOutput types | Done | 20 normalized event dataclasses |
+| 1c: Streaming engine | Done | Frontend-agnostic SDK message transformer |
+| 1.5: Test harness | Done | 67 unit tests across 4 test files |
+| 2a: Frontend protocol | Done | Protocol class with full interface |
+| 2b: FrontendRouter | Done | Multiplexer with broadcast + racing |
+| 2c: DiscordFrontend class | Pending | Wrap Discord code into Frontend impl |
+| 2d: Wire hub_wiring.py | Pending | Replace direct callbacks with router |
+| 3: Web MVP | Pending | WebSocket server + WebFrontend |
+| 4: Web features | Pending | Plan approval, questions, todos in web |
+| 5: Hub ingestion | Pending | hub.receive_user_message() |
+| 6: Clean up | Pending | Parameterize "Discord" references |

@@ -2,9 +2,43 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from agenthub.callbacks import FrontendCallbacks
+
+
+def _make_callbacks(**overrides: Any) -> FrontendCallbacks:
+    """Build a FrontendCallbacks with no-op defaults, applying overrides."""
+
+    async def _noop(*args: object, **kwargs: object) -> None:
+        pass
+
+    async def _noop_channel(agent_name: str) -> object:
+        return None
+
+    async def _noop_spawn(session: object) -> None:
+        pass
+
+    defaults: dict[str, Any] = {
+        "post_message": _noop,
+        "post_system": _noop,
+        "on_wake": _noop,
+        "on_sleep": _noop,
+        "on_session_id": _noop,
+        "get_channel": _noop_channel,
+        "on_spawn": _noop_spawn,
+        "on_kill": _noop,
+        "broadcast": _noop,
+        "schedule_rate_limit_expiry": _noop,
+        "on_idle_reminder": _noop,
+        "on_reconnect": _noop,
+        "close_app": _noop,
+        "kill_process": _noop,
+    }
+    defaults.update(overrides)
+    return FrontendCallbacks(**defaults)
 
 
 class TestFrontendCallbacks:
@@ -29,7 +63,7 @@ class TestFrontendCallbacks:
         async def get_channel(agent_name: str) -> object:
             return f"channel-{agent_name}"
 
-        cb = FrontendCallbacks(
+        cb = _make_callbacks(
             post_message=post_message,
             post_system=post_system,
             on_wake=on_wake,
@@ -64,16 +98,12 @@ class TestFrontendCallbacks:
         async def on_session_id(agent_name: str, session_id: str) -> None:
             calls.append(f"sid:{agent_name}:{session_id}")
 
-        async def get_channel(agent_name: str) -> object:
-            return None
-
-        cb = FrontendCallbacks(
+        cb = _make_callbacks(
             post_message=post_message,
             post_system=post_system,
             on_wake=on_wake,
             on_sleep=on_sleep,
             on_session_id=on_session_id,
-            get_channel=get_channel,
         )
 
         await cb.post_message("a1", "hello")
