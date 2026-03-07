@@ -278,11 +278,24 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
             }
         };
 
-        let event_type = event
+        let top_type = event
             .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+
+        // Unwrap stream_event wrappers — the inner event is in .event
+        let (event_type, inner) = if top_type == "stream_event" {
+            let inner_event = event.get("event").unwrap_or(&event);
+            let inner_type = inner_event
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            (inner_type, inner_event)
+        } else {
+            (top_type, &event)
+        };
 
         // Update activity state in hub
         {
@@ -295,7 +308,7 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
 
         match event_type.as_str() {
             "content_block_start" => {
-                let block_type = event
+                let block_type = inner
                     .get("content_block")
                     .and_then(|b| b.get("type"))
                     .and_then(|v| v.as_str())
@@ -314,7 +327,7 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                         .await;
                     }
 
-                    let tool_name = event
+                    let tool_name = inner
                         .get("content_block")
                         .and_then(|b| b.get("name"))
                         .and_then(|v| v.as_str())
@@ -324,7 +337,7 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
             }
 
             "content_block_delta" => {
-                let delta = event.get("delta").unwrap_or(&serde_json::Value::Null);
+                let delta = inner.get("delta").unwrap_or(&serde_json::Value::Null);
                 let delta_type = delta
                     .get("type")
                     .and_then(|v| v.as_str())
