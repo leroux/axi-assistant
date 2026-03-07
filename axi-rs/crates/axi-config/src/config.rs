@@ -3,11 +3,11 @@
 //! Leaf module — no project imports. All env vars, paths, constants live here.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// All configuration for the Axi bot, loaded once at startup.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Config {
     // Discord
     pub discord_token: String,
@@ -25,7 +25,9 @@ pub struct Config {
     pub config_path: PathBuf,
     pub schedules_path: PathBuf,
     pub history_path: PathBuf,
-pub rate_limit_history_path: PathBuf,
+    pub rollback_marker_path: PathBuf,
+    pub crash_analysis_marker_path: PathBuf,
+    pub rate_limit_history_path: PathBuf,
     pub usage_history_path: PathBuf,
     pub mcp_servers_path: PathBuf,
     pub readme_content_path: PathBuf,
@@ -35,6 +37,7 @@ pub rate_limit_history_path: PathBuf,
     pub streaming_discord: bool,
     pub channel_status_enabled: bool,
     pub clean_tool_messages: bool,
+    pub enable_crash_handler: bool,
     pub show_awaiting_input: bool,
 
     // Numeric
@@ -62,24 +65,14 @@ pub rate_limit_history_path: PathBuf,
     pub admin_allowed_cwds: Vec<PathBuf>,
 }
 
-impl std::fmt::Debug for Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Config")
-            .field("discord_token", &"[REDACTED]")
-            .field("discord_guild_id", &self.discord_guild_id)
-            .field("master_agent_name", &self.master_agent_name)
-            .field("bot_dir", &self.bot_dir)
-            .field("axi_user_data", &self.axi_user_data)
-            .finish_non_exhaustive()
-    }
-}
-
 impl Config {
     /// Load configuration from environment. Call `dotenvy::dotenv()` first.
     pub fn from_env() -> Result<Self, ConfigError> {
         let bot_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let bot_worktrees_dir = bot_dir
-            .parent().map_or_else(|| PathBuf::from("/home/ubuntu/axi-tests"), |p| p.join("axi-tests"));
+            .parent()
+            .map(|p| p.join("axi-tests"))
+            .unwrap_or_else(|| PathBuf::from("/home/ubuntu/axi-tests"));
 
         let home = dirs_home();
         let axi_user_data = env_path("AXI_USER_DATA", home.join("axi-user-data"));
@@ -106,6 +99,7 @@ impl Config {
         let streaming_discord = env_bool("STREAMING_DISCORD", false);
         let channel_status_enabled = env_bool("CHANNEL_STATUS_ENABLED", false);
         let clean_tool_messages = env_bool("CLEAN_TOOL_MESSAGES", false);
+        let enable_crash_handler = env_bool("ENABLE_CRASH_HANDLER", false);
         let show_awaiting_input = env_bool("SHOW_AWAITING_INPUT", false);
 
         // Numeric
@@ -139,6 +133,8 @@ impl Config {
             config_path: bot_dir.join("config.json"),
             schedules_path: axi_user_data.join("schedules.json"),
             history_path: axi_user_data.join("schedule_history.json"),
+            rollback_marker_path: bot_dir.join(".rollback_performed"),
+            crash_analysis_marker_path: bot_dir.join(".crash_analysis"),
             rate_limit_history_path: log_dir.join("rate_limit_history.jsonl"),
             usage_history_path: axi_user_data.join("usage_history.jsonl"),
             mcp_servers_path: axi_user_data.join("mcp_servers.json"),
@@ -147,6 +143,7 @@ impl Config {
             streaming_discord,
             channel_status_enabled,
             clean_tool_messages,
+            enable_crash_handler,
             show_awaiting_input,
             max_awake_agents,
             compact_threshold,
@@ -172,55 +169,6 @@ impl Config {
     }
 }
 
-impl Config {
-    /// Create a minimal `Config` suitable for integration tests.
-    ///
-    /// All paths point into `base_dir`, feature flags use sensible defaults,
-    /// and the Discord token / guild ID are placeholders.
-    pub fn for_test(base_dir: &Path) -> Self {
-        Self {
-            discord_token: "test-token".to_string(),
-            discord_guild_id: 1,
-            allowed_user_ids: HashSet::from([1]),
-            bot_dir: base_dir.to_path_buf(),
-            bot_worktrees_dir: base_dir.join("worktrees"),
-            axi_user_data: base_dir.join("user-data"),
-            default_cwd: base_dir.to_path_buf(),
-            log_dir: base_dir.join("logs"),
-            bridge_socket_path: base_dir.join(".bridge.sock"),
-            master_session_path: base_dir.join(".master_session_id"),
-            config_path: base_dir.join("config.json"),
-            schedules_path: base_dir.join("schedules.json"),
-            history_path: base_dir.join("schedule_history.json"),
-            rate_limit_history_path: base_dir.join("rate_limit_history.jsonl"),
-            usage_history_path: base_dir.join("usage_history.jsonl"),
-            mcp_servers_path: base_dir.join("mcp_servers.json"),
-            readme_content_path: base_dir.join("readme_content.md"),
-            flowcoder_enabled: false,
-            streaming_discord: true,
-            channel_status_enabled: false,
-            clean_tool_messages: false,
-            show_awaiting_input: false,
-            max_awake_agents: 7,
-            compact_threshold: 0.80,
-            streaming_edit_interval: 1.5,
-            query_timeout: Duration::from_secs(300),
-            interrupt_timeout: Duration::from_secs(15),
-            api_error_max_retries: 3,
-            api_error_base_delay: Duration::from_secs(5),
-            day_boundary_hour: 0,
-            schedule_timezone: "UTC".to_string(),
-            active_category_name: "Active".to_string(),
-            axi_category_name: "Axi".to_string(),
-            killed_category_name: "Killed".to_string(),
-            master_agent_name: "axi-master".to_string(),
-            idle_reminder_thresholds: vec![Duration::from_secs(1800)],
-            allowed_cwds: vec![base_dir.to_path_buf()],
-            admin_allowed_cwds: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("required environment variable {0} not set")]
@@ -236,7 +184,9 @@ pub enum ConfigError {
 // ---------------------------------------------------------------------------
 
 fn dirs_home() -> PathBuf {
-    std::env::var("HOME").map_or_else(|_| PathBuf::from("/tmp"), PathBuf::from)
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
 fn env_required(key: &str) -> Result<String, ConfigError> {
@@ -269,12 +219,12 @@ fn env_path_list(key: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn real_path(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+fn real_path(p: &PathBuf) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())
 }
 
 /// Resolve Discord token from env or test slot reservation.
-fn resolve_discord_token(bot_dir: &Path) -> Result<String, ConfigError> {
+fn resolve_discord_token(bot_dir: &PathBuf) -> Result<String, ConfigError> {
     if let Ok(token) = std::env::var("DISCORD_TOKEN") {
         return Ok(token);
     }
@@ -326,9 +276,9 @@ fn resolve_discord_token(bot_dir: &Path) -> Result<String, ConfigError> {
         .and_then(|b| b.get(token_id))
         .and_then(|b| b.get("token"))
         .and_then(|t| t.as_str())
-        .map(ToString::to_string)
+        .map(|s| s.to_string())
         .ok_or_else(|| {
-            ConfigError::TokenError(format!("Cannot resolve token for bot '{token_id}'"))
+            ConfigError::TokenError(format!("Cannot resolve token for bot '{}'", token_id))
         })
 }
 

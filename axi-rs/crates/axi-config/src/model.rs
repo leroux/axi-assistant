@@ -10,7 +10,7 @@ static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 /// Get the current model preference.
 ///
-/// `AXI_MODEL` env var takes precedence over config file.
+/// AXI_MODEL env var takes precedence over config file.
 pub fn get_model(config_path: &std::path::Path) -> String {
     if let Ok(env_model) = std::env::var("AXI_MODEL") {
         let lower = env_model.to_lowercase();
@@ -19,7 +19,7 @@ pub fn get_model(config_path: &std::path::Path) -> String {
         }
     }
 
-    let _lock = CONFIG_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     match load_config(config_path) {
         Some(config) => config
             .get("model")
@@ -41,7 +41,7 @@ pub fn set_model(config_path: &std::path::Path, model: &str) -> Option<String> {
         ));
     }
 
-    let _lock = CONFIG_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut config = load_config(config_path).unwrap_or_else(|| serde_json::json!({}));
     config["model"] = serde_json::Value::String(lower);
     save_config(config_path, &config);

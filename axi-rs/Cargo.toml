@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/procmux",
     "crates/claudewire",
+    "crates/axi-supervisor",
+    "crates/axi-config",
 ]
 
 [workspace.package]

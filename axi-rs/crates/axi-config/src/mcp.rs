@@ -1,4 +1,4 @@
-//! MCP server config loading from `mcp_servers.json`.
+//! MCP server config loading from mcp_servers.json.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -6,18 +6,21 @@ use std::path::Path;
 use serde_json::Value;
 use tracing::warn;
 
-/// Load named MCP server configs from `mcp_servers.json`.
+/// Load named MCP server configs from mcp_servers.json.
 ///
-/// Returns a map of {name: `config_dict`} for each requested name found.
+/// Returns a map of {name: config_dict} for each requested name found.
 /// Unknown names are logged and skipped.
 pub fn load_mcp_servers(path: &Path, names: &[String]) -> HashMap<String, Value> {
     if names.is_empty() {
         return HashMap::new();
     }
 
-    let data = if let Ok(d) = std::fs::read_to_string(path) { d } else {
-        warn!("mcp_servers.json not found at {}", path.display());
-        return HashMap::new();
+    let data = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(_) => {
+            warn!("mcp_servers.json not found at {}", path.display());
+            return HashMap::new();
+        }
     };
 
     let registry: Value = match serde_json::from_str(&data) {

@@ -83,16 +83,16 @@ Tasks:
 - [x] Log capture and ANSI stripping
 - [x] Crash analysis marker file writing
 
-### Phase 4: Config & Tracing [ ]
+### Phase 4: Config & Tracing [x]
 **Goal**: Centralized configuration and OpenTelemetry setup.
 
 Tasks:
-- [ ] Environment variable loading (dotenvy)
-- [ ] All config constants (paths, timeouts, feature flags)
-- [ ] Discord REST client (reqwest-based)
-- [ ] MCP server config loading
-- [ ] Model management (get/set current model)
-- [ ] OpenTelemetry tracing setup (OTLP exporter)
+- [x] Environment variable loading (dotenvy)
+- [x] All config constants (paths, timeouts, feature flags)
+- [x] Discord REST client (reqwest-based)
+- [x] MCP server config loading
+- [x] Model management (get/set current model)
+- [x] OpenTelemetry tracing setup (tracing + tracing-subscriber with env-filter)
 
 ### Phase 5: AgentHub [ ]
 **Goal**: Multi-agent session orchestrator library.

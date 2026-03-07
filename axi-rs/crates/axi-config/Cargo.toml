@@ -18,6 +18,3 @@ urlencoding = "2"
 
 [dev-dependencies]
 tempfile = "3"
-
-[lints]
-workspace = true
