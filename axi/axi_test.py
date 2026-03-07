@@ -580,9 +580,15 @@ def _execute_merge(main_repo: str, branch: str, message: str | None = None) -> t
     if not log_r.stdout.strip():
         return ("error", "no commits to merge — branch is identical to main")
 
-    # Collect commit messages before squashing
-    msg_r = _git(main_repo, "log", "--format=- %s", f"main..{branch}")
-    commit_log = msg_r.stdout.strip()
+    # Collect full commit messages (subject + body) before squashing
+    msg_r = _git(main_repo, "log", "--format=%B---", f"main..{branch}")
+    raw_msgs = msg_r.stdout.strip()
+    # Split by separator, clean up, format as bullet list
+    commits = [m.strip() for m in raw_msgs.split("---") if m.strip()]
+    if len(commits) == 1:
+        commit_log = commits[0]
+    else:
+        commit_log = "\n\n".join(f"- {c}" for c in commits)
 
     # Squash merge
     merge_r = _git(main_repo, "merge", "--squash", branch)
@@ -590,13 +596,16 @@ def _execute_merge(main_repo: str, branch: str, message: str | None = None) -> t
         _git(main_repo, "reset", "--hard", "HEAD")
         return ("error", f"squash merge failed: {merge_r.stderr.strip()}")
 
-    # Build commit message
+    # Build commit message: custom message as title, always include full commit log
     if message:
         commit_msg = message
-    else:
-        commit_msg = branch
         if commit_log:
             commit_msg += f"\n\n{commit_log}"
+    else:
+        if commit_log:
+            commit_msg = commit_log
+        else:
+            commit_msg = branch
 
     # Commit
     commit_r = _git(main_repo, "commit", "-m", commit_msg)
