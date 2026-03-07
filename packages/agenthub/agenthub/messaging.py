@@ -87,6 +87,33 @@ async def interrupt_session(hub: AgentHub, session: AgentSession) -> None:
             pass
 
 
+async def graceful_interrupt(session: AgentSession) -> bool:
+    """Gracefully interrupt the current turn via the SDK control protocol.
+
+    Sends control_request.interrupt to the CLI, which aborts the current
+    API call and emits a result.  The CLI stays alive with full conversation
+    context — ready for the next user message.
+
+    Returns True if the interrupt was acknowledged, False on failure.
+    On failure the queued message will process after the current turn finishes.
+    """
+    if session.client is None:
+        log.debug("graceful_interrupt: no client for '%s'", session.name)
+        return False
+
+    try:
+        async with asyncio.timeout(5):
+            await session.client.interrupt()
+        log.info("INTERRUPT[%s] graceful interrupt sent", session.name)
+        return True
+    except TimeoutError:
+        log.warning("INTERRUPT[%s] graceful interrupt timed out", session.name)
+        return False
+    except Exception:
+        log.warning("INTERRUPT[%s] graceful interrupt failed", session.name, exc_info=True)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Core: process one conversation turn
 # ---------------------------------------------------------------------------
@@ -288,22 +315,31 @@ async def receive_user_message(
         )
         return ReceiveResult(status="queued_reconnecting")
 
-    # Busy: queue
+    # Busy: queue and interrupt current turn for early processing
     if session.query_lock.locked():
         session.message_queue.append(queue_item)
         position = len(session.message_queue)
         if session.compacting:
+            # Don't interrupt during compaction
             await hub.callbacks.post_system(
                 session.name,
                 f"\U0001f504 Agent **{session.name}** is compacting context — message queued (position {position}). "
                 "Will process after compaction completes.",
             )
         else:
-            await hub.callbacks.post_system(
-                session.name,
-                f"Agent **{session.name}** is busy — message queued (position {position}). "
-                "Will process after current turn.",
-            )
+            interrupted = await graceful_interrupt(session)
+            if interrupted:
+                await hub.callbacks.post_system(
+                    session.name,
+                    f"Agent **{session.name}** is busy — message queued (position {position}). "
+                    "Interrupting current task.",
+                )
+            else:
+                await hub.callbacks.post_system(
+                    session.name,
+                    f"Agent **{session.name}** is busy — message queued (position {position}). "
+                    "Will process after current turn.",
+                )
         return ReceiveResult(status="queued")
 
     # Normal processing path
@@ -616,11 +652,10 @@ async def deliver_inter_agent_message(
             sender_name,
             target_session.name,
         )
-        try:
-            await interrupt_session(hub, target_session)
-        except Exception:
-            log.exception(
-                "Failed to interrupt '%s' for inter-agent message (message still queued)",
+        interrupted = await graceful_interrupt(target_session)
+        if not interrupted:
+            log.warning(
+                "Graceful interrupt failed for '%s' inter-agent message (message still queued)",
                 target_session.name,
             )
         return f"delivered to busy agent '{target_session.name}' (interrupted, will process next)"
