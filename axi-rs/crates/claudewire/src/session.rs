@@ -1,17 +1,24 @@
-//! `BridgeTransport` — routes messages through a process event queue.
+//! `CliSession` — manages a Claude CLI subprocess and its IO channels.
 //!
-//! Implements the transport interface for Claude CLI communication.
-//! For reconnecting agents, intercepts the initialize `control_request` and
-//! fakes a success response — the CLI is already initialized.
+//! Two construction paths:
+//! - `CliSession::spawn(config)` — builds CLI args from a `Config`, spawns the process
+//! - `CliSession::from_command(cmd)` — takes a pre-built `tokio::process::Command`
 //!
-//! This module has NO dependency on procmux. It works with any backend that
-//! sends `ProcessEvents` through a tokio mpsc channel.
+//! Both wire stdin/stdout/stderr through the same channel-based read/write API.
+//! For reconnecting agents, `CliSession::new()` accepts raw channels (used by procmux).
 
+use std::process::Stdio;
+
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::debug;
 
+use crate::config::Config;
 use crate::schema::is_bare_stream_type;
-use crate::types::{ProcessEvent, StdoutEvent, ExitEvent};
+use crate::types::{ExitEvent, ProcessEvent, StdoutEvent};
 
 /// Callback type for stderr output.
 pub type StderrCallback = Box<dyn Fn(&str) + Send + Sync>;
@@ -24,8 +31,8 @@ pub type SendStdinFn =
 pub type KillFn =
     Box<dyn Fn(String) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> + Send + Sync>;
 
-/// `BridgeTransport` routes Claude CLI messages through a process connection.
-pub struct BridgeTransport {
+/// `CliSession` manages a Claude CLI process and routes messages through channels.
+pub struct CliSession {
     name: String,
     reconnecting: bool,
     stderr_callback: Option<StderrCallback>,
@@ -39,7 +46,8 @@ pub struct BridgeTransport {
     exit_code: Option<i32>,
 }
 
-impl BridgeTransport {
+impl CliSession {
+    /// Create a `CliSession` from raw channels (for procmux or other backends).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
@@ -64,6 +72,167 @@ impl BridgeTransport {
             cli_exited: false,
             exit_code: None,
         }
+    }
+
+    /// Spawn a Claude CLI process from a `Config`.
+    ///
+    /// Builds CLI args and env vars from the config, then delegates to `from_command`.
+    pub fn spawn(
+        config: &Config,
+        name: String,
+        stderr_callback: Option<StderrCallback>,
+    ) -> anyhow::Result<Self> {
+        let args = config.to_cli_args();
+        let env = config.to_env();
+
+        let mut cmd = Command::new(&args[0]);
+        cmd.args(&args[1..]);
+        cmd.envs(env);
+
+        Self::from_command(cmd, name, stderr_callback)
+    }
+
+    /// Create a `CliSession` from a pre-built `tokio::process::Command`.
+    ///
+    /// Spawns the process, wires stdin/stdout/stderr to channels.
+    pub fn from_command(
+        mut cmd: Command,
+        name: String,
+        stderr_callback: Option<StderrCallback>,
+    ) -> anyhow::Result<Self> {
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd.spawn()?;
+
+        let child_stdin = child.stdin.take().expect("stdin was piped");
+        let child_stdout = child.stdout.take().expect("stdout was piped");
+        let child_stderr = child.stderr.take().expect("stderr was piped");
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        // Stdout reader task — parse NDJSON lines into ProcessEvent::Stdout
+        let stdout_tx = event_tx.clone();
+        let stdout_name = name.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(child_stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<serde_json::Value>(&line) {
+                    Ok(data) => {
+                        stdout_tx
+                            .send(ProcessEvent::Stdout(StdoutEvent {
+                                name: stdout_name.clone(),
+                                data,
+                            }))
+                            .ok();
+                    }
+                    Err(e) => {
+                        debug!(
+                            "[session][{}] ignoring non-JSON stdout: {:.100} ({})",
+                            stdout_name, line, e
+                        );
+                    }
+                }
+            }
+        });
+
+        // Stderr reader task — send ProcessEvent::Stderr
+        let stderr_tx = event_tx.clone();
+        let stderr_name = name.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(child_stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                stderr_tx
+                    .send(ProcessEvent::Stderr(crate::types::StderrEvent {
+                        name: stderr_name.clone(),
+                        text: line,
+                    }))
+                    .ok();
+            }
+        });
+
+        // Stdin writer task — forward bytes from channel to process stdin
+        tokio::spawn(async move {
+            let mut writer = child_stdin;
+            while let Some(data) = stdin_rx.recv().await {
+                if writer.write_all(&data).await.is_err() {
+                    break;
+                }
+                if writer.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Build the pid-based is_alive check
+        let pid = child.id();
+        let is_alive: Box<dyn Fn() -> bool + Send + Sync> = Box::new(move || {
+            if let Some(pid) = pid {
+                // Signal 0 checks if process exists without sending a signal
+                signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+            } else {
+                false
+            }
+        });
+
+        // Build the stdin sender
+        let stdin_sender = stdin_tx.clone();
+        let send_stdin: SendStdinFn = Box::new(move |_name, data| {
+            let tx = stdin_sender.clone();
+            Box::pin(async move {
+                let mut bytes = serde_json::to_vec(&data)?;
+                bytes.push(b'\n');
+                tx.send(bytes).map_err(|_| anyhow::anyhow!("stdin channel closed"))?;
+                Ok(())
+            })
+        });
+
+        // Build the kill function
+        let kill_pid = pid;
+        let kill: KillFn = Box::new(move |_name| {
+            Box::pin(async move {
+                if let Some(pid) = kill_pid {
+                    signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
+                }
+                Ok(())
+            })
+        });
+
+        // Spawn a wait task that owns the child and sends ExitEvent
+        let wait_tx = event_tx.clone();
+        let wait_name = name.clone();
+        let mut owned_child = child;
+        tokio::spawn(async move {
+            let status = owned_child.wait().await;
+            let code = status.ok().and_then(|s| s.code());
+            wait_tx
+                .send(ProcessEvent::Exit(ExitEvent {
+                    name: wait_name,
+                    code,
+                }))
+                .ok();
+        });
+
+        Ok(Self {
+            name,
+            reconnecting: false,
+            stderr_callback,
+            rx: Some(event_rx),
+            tx: Some(event_tx),
+            send_stdin,
+            kill,
+            is_alive,
+            ready: true,
+            cli_exited: false,
+            exit_code: None, // child is moved into the wait task
+        })
     }
 
     /// Write data to the CLI's stdin.
@@ -106,8 +275,6 @@ impl BridgeTransport {
             return Ok(());
         }
 
-        // Inject OTel trace context (placeholder — will wire up later)
-        // For now, just send the message as-is
         (self.send_stdin)(self.name.clone(), msg).await
     }
 
@@ -115,9 +282,6 @@ impl BridgeTransport {
     /// Returns None when the stream ends.
     pub async fn read_message(&mut self) -> Option<serde_json::Value> {
         let rx = self.rx.as_mut()?;
-        if !(self.is_alive)() && !self.cli_exited {
-            return None;
-        }
 
         loop {
             let event = rx.recv().await?;
@@ -225,7 +389,7 @@ mod tests {
     use serde_json::json;
     use tokio::sync::mpsc;
 
-    fn make_transport(reconnecting: bool) -> (BridgeTransport, mpsc::UnboundedReceiver<(String, serde_json::Value)>) {
+    fn make_session(reconnecting: bool) -> (CliSession, mpsc::UnboundedReceiver<(String, serde_json::Value)>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<(String, serde_json::Value)>();
         let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -242,7 +406,7 @@ mod tests {
         let kill: KillFn = Box::new(|_name| Box::pin(async { Ok(()) }));
         let is_alive = Box::new(move || alive_clone.load(std::sync::atomic::Ordering::SeqCst));
 
-        let transport = BridgeTransport::new(
+        let session = CliSession::new(
             "test-agent".to_string(),
             event_rx,
             event_tx,
@@ -253,12 +417,12 @@ mod tests {
             None,
         );
 
-        (transport, stdin_rx)
+        (session, stdin_rx)
     }
 
     #[tokio::test]
     async fn initialize_interception_for_reconnecting() {
-        let (mut transport, mut stdin_rx) = make_transport(true);
+        let (mut session, mut stdin_rx) = make_session(true);
 
         // Send an initialize control_request
         let init_msg = json!({
@@ -270,13 +434,13 @@ mod tests {
             }
         });
 
-        transport.write(&init_msg.to_string()).await.unwrap();
+        session.write(&init_msg.to_string()).await.unwrap();
 
         // Should NOT have been forwarded to stdin
         assert!(stdin_rx.try_recv().is_err());
 
         // Should have injected a fake control_response into the event queue
-        let response = transport.read_message().await.unwrap();
+        let response = session.read_message().await.unwrap();
         assert_eq!(response["type"], "control_response");
         assert_eq!(response["response"]["subtype"], "success");
         assert_eq!(response["response"]["request_id"], "req-123");
@@ -284,7 +448,7 @@ mod tests {
         // After interception, reconnecting should be false
         // Subsequent writes should go through normally
         let normal_msg = json!({"type": "user", "content": "hello"});
-        transport.write(&normal_msg.to_string()).await.unwrap();
+        session.write(&normal_msg.to_string()).await.unwrap();
 
         let (name, data) = stdin_rx.try_recv().unwrap();
         assert_eq!(name, "test-agent");
@@ -293,10 +457,10 @@ mod tests {
 
     #[tokio::test]
     async fn normal_write_forwards_to_stdin() {
-        let (mut transport, mut stdin_rx) = make_transport(false);
+        let (mut session, mut stdin_rx) = make_session(false);
 
         let msg = json!({"type": "user", "content": "test"});
-        transport.write(&msg.to_string()).await.unwrap();
+        session.write(&msg.to_string()).await.unwrap();
 
         let (name, data) = stdin_rx.try_recv().unwrap();
         assert_eq!(name, "test-agent");
@@ -309,22 +473,22 @@ mod tests {
         let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let alive_clone = alive.clone();
 
-        let transport_tx = event_tx.clone();
+        let session_tx = event_tx.clone();
         let send_stdin: SendStdinFn = Box::new(|_name, _data| Box::pin(async { Ok(()) }));
         let kill: KillFn = Box::new(|_name| Box::pin(async { Ok(()) }));
         let is_alive = Box::new(move || alive_clone.load(std::sync::atomic::Ordering::SeqCst));
 
-        let mut transport = BridgeTransport::new(
+        let mut session = CliSession::new(
             "test".to_string(), event_rx, event_tx, send_stdin, kill, is_alive, false, None,
         );
 
         // Send a stdout event (use "result" type — bare stream types are deduped/dropped)
-        transport_tx.send(ProcessEvent::Stdout(StdoutEvent {
+        session_tx.send(ProcessEvent::Stdout(StdoutEvent {
             name: "test".to_string(),
             data: json!({"type": "result", "cost_usd": 0.01}),
         })).ok();
 
-        let msg = transport.read_message().await.unwrap();
+        let msg = session.read_message().await.unwrap();
         assert_eq!(msg["type"], "result");
         assert_eq!(msg["cost_usd"], 0.01);
     }
@@ -339,7 +503,7 @@ mod tests {
         let kill: KillFn = Box::new(|_name| Box::pin(async { Ok(()) }));
         let is_alive = Box::new(move || alive_clone.load(std::sync::atomic::Ordering::SeqCst));
 
-        let mut transport = BridgeTransport::new(
+        let mut session = CliSession::new(
             "test".to_string(), event_rx, event_tx.clone(), send_stdin, kill, is_alive, false, None,
         );
 
@@ -349,10 +513,10 @@ mod tests {
             code: Some(0),
         })).ok();
 
-        let msg = transport.read_message().await;
+        let msg = session.read_message().await;
         assert!(msg.is_none());
-        assert!(transport.cli_exited());
-        assert_eq!(transport.exit_code(), Some(0));
+        assert!(session.cli_exited());
+        assert_eq!(session.exit_code(), Some(0));
     }
 
     #[tokio::test]
@@ -365,14 +529,14 @@ mod tests {
         let kill: KillFn = Box::new(|_name| Box::pin(async { Ok(()) }));
         let is_alive = Box::new(move || alive_clone.load(std::sync::atomic::Ordering::SeqCst));
 
-        let mut transport = BridgeTransport::new(
+        let mut session = CliSession::new(
             "test".to_string(), event_rx, event_tx, send_stdin, kill, is_alive, false, None,
         );
 
-        transport.stop().await;
-        assert!(transport.cli_exited());
+        session.stop().await;
+        assert!(session.cli_exited());
 
         // Second stop is a no-op
-        transport.stop().await;
+        session.stop().await;
     }
 }
