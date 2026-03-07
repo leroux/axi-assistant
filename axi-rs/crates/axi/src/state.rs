@@ -81,10 +81,6 @@ pub struct BotState {
     pub retry_base_delay: f64,
     pub slot_timeout: f64,
     pub shutdown_requested: AtomicBool,
-
-    // --- Voice ---
-    pub voice_session: RwLock<Option<Arc<axi_voice::gateway::VoiceSession>>>,
-    pub voice_active_agent: RwLock<Option<String>>,
 }
 
 impl BotState {
@@ -121,8 +117,6 @@ impl BotState {
             process_conn: Arc::new(Mutex::new(None)),
             slot_timeout: 300.0,
             shutdown_requested: AtomicBool::new(false),
-            voice_session: RwLock::new(None),
-            voice_active_agent: RwLock::new(None),
         }
     }
 

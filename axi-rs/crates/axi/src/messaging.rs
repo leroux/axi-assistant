@@ -433,15 +433,11 @@ pub async fn deliver_inter_agent_message(
         "{ts_prefix}[Inter-agent message from {sender_name}] {content}"
     ));
 
-    let (is_busy, is_compacting) = {
+    let is_busy = {
         let sessions = state.sessions.lock().await;
-        let busy = sessions
+        sessions
             .get(target_name)
-            .is_some_and(lifecycle::is_processing);
-        let compacting = sessions
-            .get(target_name)
-            .is_some_and(|s| s.compacting);
-        (busy, compacting)
+            .is_some_and(lifecycle::is_processing)
     };
 
     if is_busy {
@@ -454,21 +450,12 @@ pub async fn deliver_inter_agent_message(
                 });
             }
         }
-        if is_compacting {
-            // Don't interrupt during compaction — message is queued, will process after
-            info!(
-                "Inter-agent message from '{}' to compacting agent '{}' — queued (no interrupt)",
-                sender_name, target_name
-            );
-            format!("delivered to compacting agent '{target_name}' (queued, will process after compaction)")
-        } else {
-            info!(
-                "Inter-agent message from '{}' to busy agent '{}' — interrupting",
-                sender_name, target_name
-            );
-            interrupt_session(&state, target_name).await;
-            format!("delivered to busy agent '{target_name}' (interrupted, will process next)")
-        }
+        info!(
+            "Inter-agent message from '{}' to busy agent '{}' — interrupting",
+            sender_name, target_name
+        );
+        interrupt_session(&state, target_name).await;
+        format!("delivered to busy agent '{target_name}' (interrupted, will process next)")
     } else {
         let state_ref = state.clone();
         let target = target_name.to_string();

@@ -28,8 +28,6 @@ regex-lite = "0.1"
 shellexpand = "3"
 urlencoding = "2"
 axi-config = { path = "../axi-config" }
-axi-voice = { path = "../axi-voice" }
-songbird = { workspace = true }
 claudewire = { path = "../claudewire" }
 procmux = { path = "../procmux" }
 

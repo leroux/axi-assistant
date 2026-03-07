@@ -147,13 +147,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "axi-bot"
+name = "axi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axi-config",
- "axi-hub",
- "axi-mcp",
  "base64",
  "chrono",
  "claudewire",
@@ -162,16 +160,19 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "procmux",
+ "regex-lite",
  "reqwest",
  "serde",
  "serde_json",
  "serenity",
+ "shellexpand",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "urlencoding",
  "wiremock",
 ]
 
@@ -191,38 +192,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
-]
-
-[[package]]
-name = "axi-hub"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "claudewire",
- "procmux",
- "regex-lite",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "axi-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axi-config",
- "axi-hub",
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]

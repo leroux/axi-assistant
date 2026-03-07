@@ -4,9 +4,7 @@ members = [
     "crates/procmux",
     "crates/claudewire",
     "crates/axi-config",
-    "crates/axi-hub",
-    "crates/axi-bot",
-    "crates/axi-mcp",
+    "crates/axi",
     "crates/discordquery",
 ]
 

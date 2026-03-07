@@ -198,26 +198,13 @@ pub async fn register_commands(ctx: &Context) -> anyhow::Result<()> {
                 )
                 .required(true),
             ),
-        CreateCommand::new("voice-join")
-            .description("Join your voice channel and start the voice interface.")
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::Channel,
-                    "channel",
-                    "Voice channel to join (defaults to your current VC)",
-                )
-                .required(false),
-            ),
-        CreateCommand::new("voice-leave")
-            .description("Leave the voice channel and stop the voice interface."),
     ];
 
-    let num_commands = commands.len();
     guild_id
         .set_commands(&ctx.http, commands)
         .await?;
 
-    info!("Registered {} slash commands", num_commands);
+    info!("Registered {} slash commands", 17);
     Ok(())
 }
 
@@ -270,8 +257,6 @@ pub async fn handle_command(ctx: &Context, command: &CommandInteraction) {
         "clear" => handle_clear(ctx, command, &state).await,
         "claude-usage" => handle_claude_usage(ctx, command, &state).await,
         "restart-agent" => handle_restart_agent(ctx, command, &state).await,
-        "voice-join" => handle_voice_join(ctx, command, &state).await,
-        "voice-leave" => handle_voice_leave(ctx, command, &state).await,
         _ => {
             let _ = command
                 .create_response(
@@ -942,124 +927,6 @@ async fn handle_restart_agent(ctx: &Context, command: &CommandInteraction, state
         &format!("Restarted agent **{agent_name}** with fresh system prompt."),
     )
     .await;
-}
-
-// ---------------------------------------------------------------------------
-// Voice commands
-// ---------------------------------------------------------------------------
-
-async fn handle_voice_join(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    // Check if already in a voice session
-    {
-        let session = state.voice_session.read().await;
-        if session.is_some() {
-            let _ = respond_ephemeral(ctx, command, "Already in a voice channel. Use `/voice-leave` first.").await;
-            return;
-        }
-    }
-
-    // Find the user's voice channel
-    let guild_id = if let Some(id) = command.guild_id { id } else {
-        let _ = respond_ephemeral(ctx, command, "This command must be used in a server.").await;
-        return;
-    };
-
-    // Check for explicit channel parameter first, then fall back to user's VC
-    let explicit_channel = command.data.options.iter().find_map(|opt| {
-        if opt.name == "channel" {
-            if let CommandDataOptionValue::Channel(ch) = &opt.value {
-                Some(*ch)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    });
-
-    let voice_channel_id = if let Some(ch) = explicit_channel {
-        ch
-    } else {
-        // Extract voice channel ID from cache — the CacheRef is not Send,
-        // so we must drop it before any .await.
-        let vc = ctx
-            .cache
-            .guild(guild_id)
-            .and_then(|g| {
-                g.voice_states
-                    .get(&command.user.id)
-                    .and_then(|vs| vs.channel_id)
-            });
-
-        if let Some(id) = vc { id } else {
-            let _ = respond_ephemeral(ctx, command, "You must be in a voice channel first, or specify a channel.").await;
-            return;
-        }
-    };
-
-    // Check for required API keys
-    let deepgram_key = std::env::var("DEEPGRAM_API_KEY").unwrap_or_default();
-    if deepgram_key.is_empty() {
-        let _ = respond_ephemeral(
-            ctx,
-            command,
-            "Missing `DEEPGRAM_API_KEY` environment variable.",
-        )
-        .await;
-        return;
-    }
-
-    let _ = respond(ctx, command, "Joining voice channel...").await;
-
-    let config = axi_voice::VoiceConfig {
-        guild_id,
-        channel_id: voice_channel_id,
-        authorized_user: command.user.id,
-        stt: Box::new(axi_voice::stt::DeepgramStt::new(deepgram_key)),
-        tts: crate::startup::select_tts_provider(),
-    };
-
-    match axi_voice::gateway::VoiceSession::join(ctx, config).await {
-        Ok((session, transcript_rx)) => {
-            let agent_name = state.config.master_agent_name.clone();
-            *state.voice_active_agent.write().await = Some(agent_name);
-            *state.voice_session.write().await = Some(Arc::clone(&session));
-
-            // Spawn transcript consumer
-            let state_for_voice = {
-                let data = ctx.data.read().await;
-                Arc::clone(data.get::<BotState>().expect("BotState not found"))
-            };
-            tokio::spawn(async move {
-                crate::startup::consume_voice_transcripts(state_for_voice, transcript_rx).await;
-            });
-
-            // Greet after DAVE readiness delay
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                session.speak("Hello! I'm listening.".to_string()).await;
-            });
-
-            info!("Voice session started in channel {voice_channel_id}");
-        }
-        Err(e) => {
-            error!("Failed to start voice session: {e}");
-        }
-    }
-}
-
-async fn handle_voice_leave(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    let session = state.voice_session.write().await.take();
-    match session {
-        Some(session) => {
-            *state.voice_active_agent.write().await = None;
-            session.leave(ctx).await;
-            let _ = respond(ctx, command, "Left voice channel.").await;
-        }
-        None => {
-            let _ = respond_ephemeral(ctx, command, "Not in a voice channel.").await;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

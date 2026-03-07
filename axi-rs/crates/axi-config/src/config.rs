@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// All configuration for the Axi bot, loaded once at startup.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     // Discord
     pub discord_token: String,
@@ -60,6 +60,18 @@ pub rate_limit_history_path: PathBuf,
     // Allowed CWDs
     pub allowed_cwds: Vec<PathBuf>,
     pub admin_allowed_cwds: Vec<PathBuf>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("discord_token", &"[REDACTED]")
+            .field("discord_guild_id", &self.discord_guild_id)
+            .field("master_agent_name", &self.master_agent_name)
+            .field("bot_dir", &self.bot_dir)
+            .field("axi_user_data", &self.axi_user_data)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Config {

@@ -127,16 +127,6 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
         content_preview_str
     );
 
-    // Temporary: handle !voice-join <channel_id> for testing
-    if msg.content.starts_with("!voice-join") {
-        handle_voice_text_command(ctx, msg, &state).await;
-        return;
-    }
-    if msg.content == "!voice-leave" {
-        handle_voice_leave_text(ctx, msg, &state).await;
-        return;
-    }
-
     // Handle text commands (// prefix)
     if msg.content.starts_with("// ") {
         let cmd = msg.content[3..].trim();
@@ -326,107 +316,6 @@ async fn handle_text_command(
                 &format!("Unknown command: `{command}`. Available: debug, status, clear, compact, stop"),
             ).await;
         }
-    }
-}
-
-/// Temporary: handle `!voice-join [channel_id]` text command for testing voice.
-async fn handle_voice_text_command(ctx: &Context, msg: &Message, state: &BotState) {
-    use serenity::all::ChannelId;
-    let dc = &state.discord_client;
-    let ch = msg.channel_id.get();
-
-    // Parse optional channel_id argument
-    let parts: Vec<&str> = msg.content.split_whitespace().collect();
-    let voice_channel_id = if parts.len() > 1 {
-        if let Ok(id) = parts[1].parse::<u64>() { ChannelId::new(id) } else {
-            let _ = dc.send_message(ch, "Invalid channel ID.").await;
-            return;
-        }
-    } else {
-        // Try to find user's voice channel from cache
-        let guild_id = match msg.guild_id {
-            Some(id) => id,
-            None => return,
-        };
-        let vc = ctx.cache.guild(guild_id).and_then(|g| {
-            g.voice_states.get(&msg.author.id).and_then(|vs| vs.channel_id)
-        });
-        if let Some(id) = vc { id } else {
-            let _ = dc.send_message(ch, "Specify a channel ID: `!voice-join <channel_id>`").await;
-            return;
-        }
-    };
-
-    let guild_id = if let Some(id) = msg.guild_id { id } else { return };
-
-    // Check if already in a session
-    {
-        let session = state.voice_session.read().await;
-        if session.is_some() {
-            let _ = dc.send_message(ch, "Already in a voice session. Use `!voice-leave` first.").await;
-            return;
-        }
-    }
-
-    let deepgram_key = std::env::var("DEEPGRAM_API_KEY").unwrap_or_default();
-    if deepgram_key.is_empty() {
-        let _ = dc.send_message(ch, "Missing DEEPGRAM_API_KEY.").await;
-        return;
-    }
-
-    let _ = dc.send_message(ch, &format!("Joining voice channel {voice_channel_id}...")).await;
-
-    let config = axi_voice::VoiceConfig {
-        guild_id,
-        channel_id: voice_channel_id,
-        authorized_user: msg.author.id,
-        stt: Box::new(axi_voice::stt::DeepgramStt::new(deepgram_key)),
-        tts: crate::startup::select_tts_provider(),
-    };
-
-    match axi_voice::gateway::VoiceSession::join(ctx, config).await {
-        Ok((session, transcript_rx)) => {
-            let agent_name = state.config.master_agent_name.clone();
-            *state.voice_active_agent.write().await = Some(agent_name);
-            *state.voice_session.write().await = Some(Arc::clone(&session));
-
-            // Spawn transcript consumer
-            let state_for_voice = {
-                let data = ctx.data.read().await;
-                Arc::clone(data.get::<BotState>().expect("BotState not found"))
-            };
-            tokio::spawn(async move {
-                crate::startup::consume_voice_transcripts(state_for_voice, transcript_rx).await;
-            });
-
-            // Greet after DAVE readiness delay
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                session.speak("Hello! I'm listening.".to_string()).await;
-            });
-
-            info!("Voice session started via text command in channel {voice_channel_id}");
-            let _ = dc.send_message(ch, "Voice session started.").await;
-        }
-        Err(e) => {
-            let _ = dc.send_message(ch, &format!("Failed: {e}")).await;
-        }
-    }
-}
-
-/// Temporary: handle `!voice-leave` text command.
-async fn handle_voice_leave_text(ctx: &Context, msg: &Message, state: &BotState) {
-    let dc = &state.discord_client;
-    let ch = msg.channel_id.get();
-
-    let session = state.voice_session.write().await.take();
-    if let Some(session) = session {
-        let Some(_guild_id) = msg.guild_id else { return };
-        *state.voice_active_agent.write().await = None;
-        session.leave(ctx).await;
-        let _ = dc.send_message(ch, "Left voice channel.").await;
-    } else {
-        let _ = dc.send_message(ch, "Not in a voice session.").await;
     }
 }
 

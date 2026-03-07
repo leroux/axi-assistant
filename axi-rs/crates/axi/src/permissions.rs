@@ -142,7 +142,8 @@ pub fn check_permission(
             let path = PathBuf::from(path_str);
             if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
                 std::fs::canonicalize(parent)
-                    .map_or_else(|_| normalize_path(&path), |p| p.join(name))
+                    .map(|p| p.join(name))
+                    .unwrap_or_else(|_| normalize_path(&path))
             } else {
                 normalize_path(&path)
             }

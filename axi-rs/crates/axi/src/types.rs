@@ -72,8 +72,6 @@ pub struct AgentSession {
     pub compact_instructions: Option<String>,
     pub context_tokens: u64,
     pub context_window: u64,
-    /// True while context compaction is in progress (prevents interrupts).
-    pub compacting: bool,
 }
 
 impl AgentSession {
@@ -101,11 +99,10 @@ impl AgentSession {
             compact_instructions: None,
             context_tokens: 0,
             context_window: 0,
-            compacting: false,
         }
     }
 
-    pub const fn is_awake(&self) -> bool {
+    pub fn is_awake(&self) -> bool {
         self.awake
     }
 }

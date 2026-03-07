@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use serenity::all::{ChannelId, GuildId, UserId};
+use serenity::all::GuildId;
 use serenity::client::Context;
 use tracing::{error, info, warn};
 
@@ -186,92 +186,6 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
     tokio::spawn(async move {
         bridge_monitor_loop(state_for_bridge).await;
     });
-
-    // 11. Auto-join voice channel for testing (if VOICE_AUTO_JOIN_CHANNEL set)
-    if let Ok(vc_id_str) = std::env::var("VOICE_AUTO_JOIN_CHANNEL") {
-        if let Ok(vc_id) = vc_id_str.parse::<u64>() {
-            info!("Auto-joining voice channel {} for testing...", vc_id);
-            let guild_id = GuildId::new(state.config.discord_guild_id);
-            let channel_id = ChannelId::new(vc_id);
-            let deepgram_key = std::env::var("DEEPGRAM_API_KEY").unwrap_or_default();
-            let authorized_user = std::env::var("VOICE_AUTHORIZED_USER")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .map_or(UserId::new(275_841_062_327_549_953), UserId::new); // default to user
-
-            let tts: Arc<dyn axi_voice::tts::TtsProvider> = select_tts_provider();
-
-            let config = axi_voice::VoiceConfig {
-                guild_id,
-                channel_id,
-                authorized_user,
-                stt: Box::new(axi_voice::stt::DeepgramStt::new(deepgram_key)),
-                tts,
-            };
-
-            match axi_voice::gateway::VoiceSession::join(ctx, config).await {
-                Ok((session, transcript_rx)) => {
-                    let agent_name = state.config.master_agent_name.clone();
-                    *state.voice_active_agent.write().await = Some(agent_name.clone());
-                    *state.voice_session.write().await = Some(Arc::clone(&session));
-
-                    // Spawn transcript consumer
-                    let state_for_voice = state.clone();
-                    tokio::spawn(async move {
-                        consume_voice_transcripts(state_for_voice, transcript_rx).await;
-                    });
-
-                    // Greet after DAVE readiness delay
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                        session.speak("Hello! I'm listening.".to_string()).await;
-                    });
-
-                    info!("Auto-joined voice channel {vc_id}");
-                }
-                Err(e) => {
-                    error!("Failed to auto-join voice channel: {e}");
-                }
-            }
-        }
-    }
-}
-
-/// Select the best available TTS provider based on environment variables.
-pub(crate) fn select_tts_provider() -> Arc<dyn axi_voice::tts::TtsProvider> {
-    if let Ok(openai_key) = std::env::var("OPENAI_API_KEY") {
-        info!("Using OpenAI TTS");
-        Arc::new(axi_voice::tts::OpenAiTts::new(openai_key))
-    } else if let Ok(model) = std::env::var("PIPER_MODEL") {
-        info!(model = %model, "Using Piper TTS (local neural)");
-        Arc::new(axi_voice::tts::PiperTts::new(model))
-    } else {
-        info!("Using espeak-ng TTS (local)");
-        Arc::new(axi_voice::tts::EspeakTts::new())
-    }
-}
-
-/// Consume voice transcripts and route them to the active voice agent.
-///
-/// Adds a voice prefix instructing the agent to respond concisely,
-/// then queues the message for the `voice_active_agent`.
-pub(crate) async fn consume_voice_transcripts(
-    state: Arc<BotState>,
-    mut rx: tokio::sync::mpsc::Receiver<String>,
-) {
-    while let Some(text) = rx.recv().await {
-        let agent_name = state.voice_active_agent.read().await.clone();
-        let Some(agent_name) = agent_name else {
-            warn!("Voice transcript received but no active voice agent");
-            continue;
-        };
-
-        let voice_msg = format!(
-            "[Voice message — respond in 1-2 short spoken sentences, no markdown or formatting]\n{text}"
-        );
-        let content = crate::types::MessageContent::Text(voice_msg);
-        crate::lifecycle::queue_and_wake(&state, &agent_name, content, None).await;
-    }
 }
 
 /// Connect to the procmux bridge server, retrying with backoff.
@@ -317,29 +231,14 @@ pub(crate) async fn is_bridge_down(state: &BotState) -> bool {
 }
 
 /// Background loop that monitors the procmux bridge connection.
-/// Only triggers restart if a bridge was previously connected and then lost.
-/// If no bridge was ever connected (standalone mode), this loop is a no-op.
 async fn bridge_monitor_loop(state: Arc<BotState>) {
     const CHECK_INTERVAL_SECS: u64 = 2;
     const GRACE_PERIOD_SECS: u64 = 3;
 
-    // Wait for initial connection attempt to complete before monitoring.
-    // If no bridge was ever connected, don't crash — run in standalone mode.
-    let mut had_bridge = false;
-
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
 
-        let bridge_down = is_bridge_down(&state).await;
-
-        if !bridge_down {
-            // Bridge is alive — remember that we had one.
-            had_bridge = true;
-            continue;
-        }
-
-        // Bridge is down. Only restart if we previously had a live connection.
-        if !had_bridge {
+        if !is_bridge_down(&state).await {
             continue;
         }
 

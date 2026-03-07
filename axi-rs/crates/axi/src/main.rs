@@ -46,7 +46,6 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use songbird::{driver::{DecodeConfig, DecodeMode}, Config as SongbirdConfig, SerenityInit};
 use state::BotState;
 
 struct Handler;
@@ -136,21 +135,15 @@ async fn main() -> anyhow::Result<()> {
         | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::GUILD_MESSAGE_REACTIONS
         | GatewayIntents::MESSAGE_CONTENT
-        | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::GUILD_VOICE_STATES;
+        | GatewayIntents::DIRECT_MESSAGES;
 
     let discord_client =
         axi_config::DiscordClient::new(&config.discord_token);
 
     let bot_state = BotState::new(config, discord_client);
 
-    // Configure Songbird to decode incoming voice packets (required for STT)
-    let songbird_config = SongbirdConfig::default()
-        .decode_mode(DecodeMode::Decode(DecodeConfig::default()));
-
     let mut client = Client::builder(&bot_state.config.discord_token, intents)
         .event_handler(Handler)
-        .register_songbird_from_config(songbird_config)
         .await?;
 
     // Store state in serenity's TypeMap
