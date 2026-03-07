@@ -1401,6 +1401,27 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
         agents.fire_and_forget(_run_flowchart())
         return True
 
+    if cmd == "skip":
+        if session.client is None or not session.query_lock.locked():
+            await agents.send_system(channel, f"Agent **{agent_name}** is not busy.")
+            return True
+
+        try:
+            await _interrupt_agent(session)
+            queued = len(session.message_queue)
+            if queued:
+                msg = (
+                    f"Skipped current query for **{agent_name}**. "
+                    f"{queued} queued message{'s' if queued != 1 else ''} will continue processing."
+                )
+            else:
+                msg = f"Skipped current query for **{agent_name}**. No queued messages."
+            await agents.send_system(channel, msg)
+        except Exception as e:
+            log.exception("Failed to skip agent '%s'", agent_name)
+            await agents.send_system(channel, f"Failed to skip **{agent_name}**: {e}")
+        return True
+
     if cmd == "stop":
         if session.client is None or not session.query_lock.locked():
             await agents.send_system(channel, f"Agent **{agent_name}** is not busy.")
