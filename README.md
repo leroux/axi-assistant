@@ -13,6 +13,7 @@ Axi is a Discord-based personal assistant powered by Claude Code. It runs as a p
 - [Discord Query Tool](#discord-query-tool)
 - [Permissions & Sandboxing](#permissions--sandboxing)
 - [Self-Modification](#self-modification)
+- [Voice Interface](#voice-interface)
 - [Configuration](#configuration)
 
 ---
@@ -513,6 +514,119 @@ The [rollback system](#restart--rollback-system) exists specifically as a safety
 
 ---
 
+## Voice Interface
+
+Axi can join a Discord voice channel, listen to speech via Deepgram STT, route transcripts to the active agent, and speak responses back using TTS. The voice pipeline runs in the Rust rewrite (`axi-rs/`).
+
+### Architecture
+
+```
+Discord Voice Channel
+    │ Opus → PCM (Songbird + DAVE E2EE)
+    ▼
+VoiceReceiveHandler (VoiceTick events)
+    │ filter to authorized user's SSRC
+    │ downsample 48kHz stereo → 16kHz mono
+    ▼
+Deepgram Nova-3 (WebSocket streaming STT)
+    │ speech_final transcript
+    ▼
+Agent (queue_and_wake → Claude)
+    │ response text
+    ▼
+TTS Provider (Piper / OpenAI / espeak-ng)
+    │ PCM → upsample to 48kHz stereo f32
+    ▼
+Songbird playback (RawAdapter → Opus → Discord)
+```
+
+### Prerequisites
+
+**System packages:**
+
+```bash
+sudo apt install libopus-dev
+```
+
+**Piper TTS (recommended for natural-sounding local voice):**
+
+```bash
+# Download and install the Piper binary
+cd /tmp
+curl -sL "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz" -o piper.tar.gz
+tar xzf piper.tar.gz
+sudo cp -r piper /usr/local/lib/piper
+sudo ln -sf /usr/local/lib/piper/piper /usr/local/bin/piper
+
+# Download the lessac-high voice model (~109MB)
+sudo mkdir -p /usr/local/share/piper-voices
+sudo curl -sL "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx" \
+  -o /usr/local/share/piper-voices/en_US-lessac-high.onnx
+sudo curl -sL "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx.json" \
+  -o /usr/local/share/piper-voices/en_US-lessac-high.onnx.json
+
+# Verify
+echo "Hello world" | LD_LIBRARY_PATH=/usr/local/lib/piper piper \
+  --model /usr/local/share/piper-voices/en_US-lessac-high.onnx \
+  --output_raw --espeak_data /usr/local/lib/piper/espeak-ng-data 2>/dev/null | wc -c
+```
+
+### Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `DEEPGRAM_API_KEY` | Yes | Deepgram API key for speech-to-text |
+| `PIPER_MODEL` | No | Path to Piper `.onnx` model file (e.g., `/usr/local/share/piper-voices/en_US-lessac-high.onnx`) |
+| `OPENAI_API_KEY` | No | OpenAI API key (used for TTS if set; takes priority over Piper) |
+| `VOICE_AUTO_JOIN_CHANNEL` | No | Voice channel ID to auto-join on startup (for testing) |
+| `VOICE_AUTHORIZED_USER` | No | Discord user ID to transcribe (defaults to `275841062327549953`) |
+
+### TTS Provider Selection
+
+TTS providers are selected in priority order:
+
+1. **OpenAI TTS** — if `OPENAI_API_KEY` is set. Cloud-based, highest quality, costs ~$0.015/1K chars.
+2. **Piper TTS** — if `PIPER_MODEL` is set. Local neural TTS, natural-sounding, free. The `en_US-lessac-high` voice is recommended.
+3. **espeak-ng** — fallback. Local formant synthesis, robotic but always available.
+
+### Usage
+
+**Slash command:**
+```
+/voice-join [channel]    Join your current voice channel (or specify one)
+/voice-leave             Leave the voice channel
+```
+
+**Text command (in any text channel the bot can see):**
+```
+!voice-join [channel_id]
+!voice-leave
+```
+
+**Auto-join (for testing):** Set `VOICE_AUTO_JOIN_CHANNEL=<channel_id>` in `.env` and the bot joins on startup.
+
+### How It Works
+
+1. Bot joins the voice channel via Songbird with DAVE E2EE support
+2. Incoming audio is decoded, filtered to the authorized user's SSRC, downsampled to 16kHz mono, and streamed to Deepgram via WebSocket
+3. When Deepgram signals `speech_final` (end of utterance), the transcript is sent to the active agent with a voice-mode prefix requesting concise spoken responses
+4. The agent's text response is synthesized through the configured TTS provider, resampled to 48kHz stereo f32, and played back through Songbird
+5. Playback waits for each track to finish before starting the next, with a 250ms gap between utterances
+
+### Key Files
+
+| File | Purpose |
+|---|---|
+| `axi-rs/crates/axi-voice/src/gateway.rs` | `VoiceSession` lifecycle, TTS queue consumer, transcript loop |
+| `axi-rs/crates/axi-voice/src/stt.rs` | `SttProvider` trait + Deepgram Nova-3 WebSocket client |
+| `axi-rs/crates/axi-voice/src/tts.rs` | `TtsProvider` trait + OpenAI / Piper / espeak-ng implementations |
+| `axi-rs/crates/axi-voice/src/receive.rs` | Songbird event handler — SSRC filtering + audio forwarding to STT |
+| `axi-rs/crates/axi-voice/src/playback.rs` | TTS audio → Songbird playback with track-end waiting |
+| `axi-rs/crates/axi-voice/src/resample.rs` | Audio format conversions (48k↔16k, 22k→48k, 24k→48k) |
+| `axi-rs/vendor/songbird/` | Vendored Songbird 0.5 fork with DAVE E2EE support |
+
+---
+
 ## Configuration
 
 ### Environment Variables
@@ -523,6 +637,11 @@ The [rollback system](#restart--rollback-system) exists specifically as a safety
 | `ALLOWED_USER_IDS` | Yes | Comma-separated Discord user IDs authorized to interact |
 | `SCHEDULE_TIMEZONE` | No | IANA timezone for cron expressions (e.g., `US/Pacific`). Defaults to `UTC`. Handles DST automatically. |
 | `DEFAULT_CWD` | No | Default working directory for agent sessions (defaults to the bot's directory) |
+| `DEEPGRAM_API_KEY` | No* | Deepgram API key for voice STT (*required if using voice) |
+| `PIPER_MODEL` | No | Path to Piper TTS `.onnx` model file for local neural voice synthesis |
+| `OPENAI_API_KEY` | No | OpenAI API key for cloud TTS (takes priority over Piper if set) |
+| `VOICE_AUTO_JOIN_CHANNEL` | No | Voice channel ID to auto-join on startup |
+| `VOICE_AUTHORIZED_USER` | No | Discord user ID whose speech is transcribed (defaults to bot owner) |
 
 ### Constants (in `bot.py`)
 
