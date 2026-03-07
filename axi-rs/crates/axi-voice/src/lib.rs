@@ -8,6 +8,8 @@ pub mod router;
 pub mod stt;
 pub mod tts;
 
+pub use gateway::VoiceConfig;
+
 // Phase 3
 // pub mod briefing;
 

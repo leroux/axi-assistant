@@ -1011,53 +1011,39 @@ async fn handle_voice_join(ctx: &Context, command: &CommandInteraction, state: &
 
     let _ = respond(ctx, command, "Joining voice channel...").await;
 
-    let stt = axi_voice::stt::DeepgramStt::new(deepgram_key);
-    let tts: Arc<dyn axi_voice::tts::TtsProvider> =
-        if let Ok(openai_key) = std::env::var("OPENAI_API_KEY") {
-            info!("Using OpenAI TTS");
-            Arc::new(axi_voice::tts::OpenAiTts::new(openai_key))
-        } else if let Ok(model) = std::env::var("PIPER_MODEL") {
-            info!(model = %model, "Using Piper TTS (local neural)");
-            Arc::new(axi_voice::tts::PiperTts::new(model))
-        } else {
-            info!("Using espeak-ng TTS (local)");
-            Arc::new(axi_voice::tts::EspeakTts::new())
-        };
-
-    // Create callback that routes voice transcripts through the master agent
-    let state_for_voice = {
-        let data = ctx.data.read().await;
-        Arc::clone(data.get::<BotState>().expect("BotState not found"))
-    };
-    let agent_name_for_voice = state.config.master_agent_name.clone();
-    let chat_send: axi_voice::gateway::ChatSendFn = Arc::new(move |text: String| {
-        let state = Arc::clone(&state_for_voice);
-        let name = agent_name_for_voice.clone();
-        Box::pin(async move {
-            let content = crate::types::MessageContent::Text(text);
-            crate::lifecycle::queue_and_wake(&state, &name, content, None).await;
-        })
-    });
-
-    match axi_voice::gateway::VoiceSession::join(
-        ctx,
+    let config = axi_voice::VoiceConfig {
         guild_id,
-        voice_channel_id,
-        command.user.id,
-        &stt,
-        tts,
-        state.config.master_agent_name.clone(),
-        chat_send,
-    )
-    .await
-    {
-        Ok(session) => {
-            *state.voice_session.write().await = Some(session);
-            info!("Voice session started in channel {}", voice_channel_id);
+        channel_id: voice_channel_id,
+        authorized_user: command.user.id,
+        stt: Box::new(axi_voice::stt::DeepgramStt::new(deepgram_key)),
+        tts: crate::startup::select_tts_provider(),
+    };
+
+    match axi_voice::gateway::VoiceSession::join(ctx, config).await {
+        Ok((session, transcript_rx)) => {
+            let agent_name = state.config.master_agent_name.clone();
+            *state.voice_active_agent.write().await = Some(agent_name);
+            *state.voice_session.write().await = Some(Arc::clone(&session));
+
+            // Spawn transcript consumer
+            let state_for_voice = {
+                let data = ctx.data.read().await;
+                Arc::clone(data.get::<BotState>().expect("BotState not found"))
+            };
+            tokio::spawn(async move {
+                crate::startup::consume_voice_transcripts(state_for_voice, transcript_rx).await;
+            });
+
+            // Greet after DAVE readiness delay
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                session.speak("Hello! I'm listening.".to_string()).await;
+            });
+
+            info!("Voice session started in channel {voice_channel_id}");
         }
         Err(e) => {
             error!("Failed to start voice session: {e}");
-            // Can't edit response easily, just log
         }
     }
 }
@@ -1066,6 +1052,7 @@ async fn handle_voice_leave(ctx: &Context, command: &CommandInteraction, state: 
     let session = state.voice_session.write().await.take();
     match session {
         Some(session) => {
+            *state.voice_active_agent.write().await = None;
             session.leave(ctx).await;
             let _ = respond(ctx, command, "Left voice channel.").await;
         }

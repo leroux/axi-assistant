@@ -412,12 +412,12 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                     {
                         let voice_text = ctx.text_buffer.clone();
                         if !voice_text.is_empty() {
-                            let voice = state.voice_session.read().await;
-                            if let Some(ref vs) = *voice {
-                                let active = vs.active_agent.read().await;
-                                if *active == agent_name {
-                                    drop(active);
-                                    vs.speak(voice_text, 0, true).await;
+                            let active = state.voice_active_agent.read().await;
+                            if active.as_deref() == Some(agent_name) {
+                                drop(active);
+                                let voice = state.voice_session.read().await;
+                                if let Some(ref vs) = *voice {
+                                    vs.speak(voice_text).await;
                                 }
                             }
                         }

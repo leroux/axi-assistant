@@ -84,6 +84,7 @@ pub struct BotState {
 
     // --- Voice ---
     pub voice_session: RwLock<Option<Arc<axi_voice::gateway::VoiceSession>>>,
+    pub voice_active_agent: RwLock<Option<String>>,
 }
 
 impl BotState {
@@ -121,6 +122,7 @@ impl BotState {
             slot_timeout: 300.0,
             shutdown_requested: AtomicBool::new(false),
             voice_session: RwLock::new(None),
+            voice_active_agent: RwLock::new(None),
         }
     }
 
