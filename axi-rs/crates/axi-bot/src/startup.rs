@@ -18,7 +18,6 @@ use axi_hub::tasks::BackgroundTaskSet;
 use axi_hub::types::AgentSession;
 
 use crate::channels;
-use crate::crash_handler;
 use crate::frontend::DiscordFrontend;
 use crate::state::BotState;
 
@@ -216,20 +215,7 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
         *hub_lock = Some(hub.clone());
     }
 
-    // 6. Check for crash analysis marker
-    if state.config.enable_crash_handler {
-        if let Some(marker) = crash_handler::consume_marker(
-            state.config.crash_analysis_marker_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
-        ) {
-            let notification = crash_handler::crash_notification(&marker, true);
-            let _ = state
-                .discord_client
-                .send_message(master_channel.id.get(), &notification)
-                .await;
-        }
-    }
-
-    // 7. Send startup notification
+    // 6. Send startup notification
     let _ = state
         .discord_client
         .send_message(
@@ -238,18 +224,18 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
         )
         .await;
 
-    // 8. Mark startup complete
+    // 7. Mark startup complete
     state.startup_complete.store(true, Ordering::SeqCst);
     info!("Startup complete — bot is ready");
 
-    // 9. Start cron scheduler loop in background
+    // 8. Start cron scheduler loop in background
     let state_for_scheduler = state.clone();
     let hub_for_scheduler = hub.clone();
     tokio::spawn(async move {
         crate::scheduler::run_scheduler(state_for_scheduler, hub_for_scheduler).await;
     });
 
-    // 10. Start idle agent reminder loop
+    // 9. Start idle agent reminder loop
     let state_for_idle = state.clone();
     let hub_for_idle = hub.clone();
     tokio::spawn(async move {

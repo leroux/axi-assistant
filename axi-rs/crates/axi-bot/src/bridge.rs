@@ -239,6 +239,7 @@ pub fn make_stream_handler(
 ///
 /// Returns None on success, Some(error) on transient error (triggers retry).
 #[allow(unused_assignments)]
+#[tracing::instrument(skip(state), fields(agent.name = agent_name))]
 async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
     let transport = {
         let transports = state.transports.lock().await;
@@ -253,6 +254,16 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
     let channel_id = state.channel_for_agent(agent_name).await;
     let streaming_enabled = state.config.streaming_discord && channel_id.is_some();
     let mut ctx = streaming::StreamContext::new(channel_id.map(serenity::all::ChannelId::get), streaming_enabled);
+
+    // Set per-session flags
+    {
+        let hub = state.hub().await;
+        let sessions = hub.sessions.lock().await;
+        if let Some(session) = sessions.get(agent_name) {
+            ctx.debug = session.debug;
+        }
+    }
+    ctx.clean_tool_messages = state.config.clean_tool_messages;
 
     let mut current_block_type: Option<String> = None;
     let mut got_result = false;
@@ -311,7 +322,23 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
 
                 current_block_type = Some(block_type.to_string());
 
-                if block_type == "tool_use" {
+                if block_type == "thinking" {
+                    // Show thinking indicator
+                    streaming::show_thinking(
+                        &mut ctx,
+                        &state.discord_client,
+                        agent_name,
+                    )
+                    .await;
+                } else if block_type == "tool_use" {
+                    // Hide thinking indicator if shown
+                    streaming::hide_thinking(
+                        &mut ctx,
+                        &state.discord_client,
+                        agent_name,
+                    )
+                    .await;
+
                     // Finalize any pending text before tool use
                     if !ctx.text_buffer.is_empty() {
                         streaming::live_edit_finalize(
@@ -328,6 +355,33 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("tool");
                     debug!("Agent '{}' using tool: {}", agent_name, tool_name);
+                    ctx.current_tool_name = Some(tool_name.to_string());
+                    ctx.tool_input_json.clear();
+
+                    // Show tool progress message
+                    streaming::show_tool_progress(
+                        &mut ctx,
+                        &state.discord_client,
+                        agent_name,
+                        tool_name,
+                    )
+                    .await;
+                } else if block_type == "text" {
+                    // Hide thinking indicator when text starts
+                    streaming::hide_thinking(
+                        &mut ctx,
+                        &state.discord_client,
+                        agent_name,
+                    )
+                    .await;
+
+                    // Delete tool progress messages when text output starts
+                    streaming::delete_tool_progress(
+                        &mut ctx,
+                        &state.discord_client,
+                        agent_name,
+                    )
+                    .await;
                 }
             }
 
@@ -349,12 +403,42 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                         .await;
                     }
                 }
-                // input_json_delta, thinking_delta, signature_delta — not rendered
+                if delta_type == "input_json_delta" {
+                    if let Some(json_part) = delta.get("partial_json").and_then(|v| v.as_str()) {
+                        ctx.tool_input_json.push_str(json_part);
+                    }
+                }
+                // thinking_delta, signature_delta — not rendered
             }
 
             "content_block_stop" => {
                 if current_block_type.as_deref() == Some("text") {
                     streaming::live_edit_finalize(
+                        &mut ctx,
+                        &state.discord_client,
+                        agent_name,
+                    )
+                    .await;
+                } else if current_block_type.as_deref() == Some("tool_use") {
+                    // Check if it's TodoWrite
+                    if ctx.current_tool_name.as_deref() == Some("TodoWrite") {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&ctx.tool_input_json) {
+                            if let Some(todos) = parsed.get("todos").and_then(|v| v.as_array()) {
+                                let channel_id = ctx.live_edit.as_ref().map(|le| le.channel_id);
+                                if let Some(ch_id) = channel_id {
+                                    let msg = crate::todos::format_todo_message(todos);
+                                    if !msg.is_empty() {
+                                        let _ = state.discord_client.send_message(ch_id, &msg).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ctx.current_tool_name = None;
+                    ctx.tool_input_json.clear();
+                } else if current_block_type.as_deref() == Some("thinking") {
+                    // Hide thinking indicator when block completes
+                    streaming::hide_thinking(
                         &mut ctx,
                         &state.discord_client,
                         agent_name,
@@ -384,6 +468,35 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                             session_id,
                         )
                         .ok();
+                    }
+                }
+
+                // Track context tokens for auto-compact
+                {
+                    let context_tokens = event
+                        .get("total_input_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .or_else(|| {
+                            event
+                                .get("usage")
+                                .and_then(|u| u.get("input_tokens"))
+                                .and_then(serde_json::Value::as_u64)
+                        })
+                        .unwrap_or(0);
+                    let context_window = event
+                        .get("context_window")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+
+                    if context_tokens > 0 || context_window > 0 {
+                        let hub = state.hub().await;
+                        let mut sessions = hub.sessions.lock().await;
+                        if let Some(session) = sessions.get_mut(agent_name) {
+                            session.context_tokens = context_tokens;
+                            if context_window > 0 {
+                                session.context_window = context_window;
+                            }
+                        }
                     }
                 }
 
@@ -453,6 +566,87 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                 }
             }
 
+            "system" => {
+                let subtype = inner
+                    .get("subtype")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match subtype {
+                    "compacting" => {
+                        if let Some(ch_id) = ctx.live_edit.as_ref().map(|le| le.channel_id) {
+                            let _ = state
+                                .discord_client
+                                .send_message(ch_id, "*Compacting context...*")
+                                .await;
+                        }
+                    }
+                    "compact_boundary" => {
+                        debug!("Compact boundary for agent '{}'", agent_name);
+                    }
+                    _ => {
+                        debug!(
+                            "Unhandled system message subtype '{}' for '{}'",
+                            subtype, agent_name
+                        );
+                    }
+                }
+            }
+
+            "control_request" => {
+                let request_id = event
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let subtype = event
+                    .get("request")
+                    .and_then(|r| r.get("subtype"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if subtype == "permission" {
+                    let tool_name = event
+                        .get("request")
+                        .and_then(|r| r.get("tool"))
+                        .and_then(|t| t.get("tool_name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    let tool_input = event
+                        .get("request")
+                        .and_then(|r| r.get("tool"))
+                        .and_then(|t| t.get("tool_input"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+
+                    let response = handle_permission_request(
+                        state,
+                        agent_name,
+                        &request_id,
+                        tool_name,
+                        &tool_input,
+                        &transport,
+                    )
+                    .await;
+
+                    // Send control response
+                    let control_response = serde_json::json!({
+                        "type": "control_response",
+                        "response": response,
+                    });
+                    let msg_str = serde_json::to_string(&control_response).unwrap_or_default();
+                    let mut transport = transport.lock().await;
+                    if let Err(e) = transport.write(&msg_str).await {
+                        warn!("Failed to send control response for '{}': {}", agent_name, e);
+                    }
+                } else {
+                    debug!(
+                        "Unhandled control_request subtype '{}' for '{}'",
+                        subtype, agent_name
+                    );
+                }
+            }
+
             _ => {}
         }
     }
@@ -462,7 +656,337 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
         streaming::live_edit_finalize(&mut ctx, &state.discord_client, agent_name).await;
     }
 
+    // Clean up any remaining thinking or tool progress indicators
+    streaming::hide_thinking(&mut ctx, &state.discord_client, agent_name).await;
+    streaming::delete_tool_progress(&mut ctx, &state.discord_client, agent_name).await;
+
+    // Append response timing to last message
+    streaming::append_timing(&ctx, &state.discord_client, agent_name).await;
+
+    // Auto-compact check
+    check_auto_compact(state, agent_name, &transport).await;
+
     None
+}
+
+/// Check if context usage exceeds threshold and trigger compact if needed.
+async fn check_auto_compact(
+    state: &BotState,
+    agent_name: &str,
+    transport: &Arc<Mutex<BridgeTransport>>,
+) {
+    let (context_tokens, context_window) = {
+        let hub = state.hub().await;
+        let sessions = hub.sessions.lock().await;
+        match sessions.get(agent_name) {
+            Some(s) => (s.context_tokens, s.context_window),
+            None => return,
+        }
+    };
+
+    if context_window == 0 || context_tokens == 0 {
+        return;
+    }
+
+    let utilization = context_tokens as f64 / context_window as f64;
+    if utilization < state.config.compact_threshold {
+        return;
+    }
+
+    info!(
+        "Auto-compact for '{}': {:.0}% context used ({}/{})",
+        agent_name,
+        utilization * 100.0,
+        context_tokens,
+        context_window
+    );
+
+    if let Some(ch_id) = state.channel_for_agent(agent_name).await {
+        let _ = state
+            .discord_client
+            .send_message(ch_id.get(), "*Auto-compacting context...*")
+            .await;
+    }
+
+    // Send /compact as user message
+    let compact_msg = MessageContent::Text("/compact".to_string());
+    let json_content = serde_json::Value::String("/compact".to_string());
+    let msg = events::make_user_message(&json_content);
+    let msg_str = serde_json::to_string(&msg).unwrap_or_default();
+
+    let mut transport = transport.lock().await;
+    if let Err(e) = transport.write(&msg_str).await {
+        warn!("Failed to send auto-compact for '{}': {}", agent_name, e);
+    }
+    drop(transport);
+
+    // Note: The compact response will be handled by the next stream_response call
+    // since the caller (process_message) will loop if there's more to process.
+    // We don't stream the compact result here — the hub's message processing handles it.
+    let _ = compact_msg; // suppress unused warning
+}
+
+// ---------------------------------------------------------------------------
+// Permission callbacks
+// ---------------------------------------------------------------------------
+
+const EMOJI_NUMBERS: &[&str] = &["1\u{fe0f}\u{20e3}", "2\u{fe0f}\u{20e3}", "3\u{fe0f}\u{20e3}", "4\u{fe0f}\u{20e3}"];
+
+/// Handle a permission request from Claude CLI. Returns the control response inner object.
+async fn handle_permission_request(
+    state: &BotState,
+    agent_name: &str,
+    request_id: &str,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    _transport: &Arc<Mutex<BridgeTransport>>,
+) -> serde_json::Value {
+    let channel_id = match state.channel_for_agent(agent_name).await {
+        Some(ch) => ch.get(),
+        None => {
+            return serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"permission": "allow"}
+            });
+        }
+    };
+
+    match tool_name {
+        "AskUserQuestion" => {
+            handle_ask_user_question(state, agent_name, request_id, tool_input, channel_id).await
+        }
+        "ExitPlanMode" => {
+            handle_exit_plan_mode(state, agent_name, request_id, channel_id).await
+        }
+        _ => {
+            // Auto-allow other tools
+            serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"permission": "allow"}
+            })
+        }
+    }
+}
+
+async fn handle_ask_user_question(
+    state: &BotState,
+    agent_name: &str,
+    request_id: &str,
+    tool_input: &serde_json::Value,
+    channel_id: u64,
+) -> serde_json::Value {
+    let questions = tool_input
+        .get("questions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if questions.is_empty() {
+        return serde_json::json!({
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {"permission": "allow"}
+        });
+    }
+
+    // Format the question message
+    let mut msg_parts = Vec::new();
+    let mut all_options = Vec::new();
+
+    for (qi, q) in questions.iter().enumerate() {
+        let question_text = q.get("question").and_then(|v| v.as_str()).unwrap_or("?");
+        let options = q.get("options").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+        if questions.len() > 1 {
+            msg_parts.push(format!("**Q{}:** {}", qi + 1, question_text));
+        } else {
+            msg_parts.push(format!("**{question_text}**"));
+        }
+
+        for (oi, opt) in options.iter().enumerate() {
+            let label = opt.get("label").and_then(|v| v.as_str()).unwrap_or("");
+            let desc = opt.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let emoji = EMOJI_NUMBERS.get(oi).unwrap_or(&"");
+            msg_parts.push(format!("{emoji} **{label}** — {desc}"));
+            all_options.push(label.to_string());
+        }
+    }
+
+    let msg_content = msg_parts.join("\n");
+
+    // Post to Discord
+    let msg_id = match state.discord_client.send_message(channel_id, &msg_content).await {
+        Ok(resp) => resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        Err(e) => {
+            warn!("Failed to post question for '{}': {}", agent_name, e);
+            return serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"permission": "allow"}
+            });
+        }
+    };
+
+    // Add reaction emojis
+    let emoji_count = all_options.len().min(4);
+    for emoji in &EMOJI_NUMBERS[..emoji_count] {
+        if let Ok(id) = msg_id.parse::<u64>() {
+            let _ = state.discord_client.add_reaction(channel_id, id, emoji).await;
+        }
+    }
+
+    // Create oneshot channel and register pending question
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let question = crate::state::PendingQuestion {
+            agent_name: agent_name.to_string(),
+            channel_id,
+            message_id: msg_id.clone(),
+            request_id: request_id.to_string(),
+            question_type: crate::state::QuestionType::AskUser,
+            options: all_options.clone(),
+            sender: tx,
+        };
+        let mut pending = state.pending_questions.lock().await;
+        pending.insert(msg_id.clone(), question);
+    }
+
+    // Wait for answer (with timeout)
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(300), rx).await;
+
+    // Clean up
+    {
+        let mut pending = state.pending_questions.lock().await;
+        pending.remove(&msg_id);
+    }
+
+    match answer {
+        Ok(Ok(crate::state::QuestionAnswer::Selection(idx))) => {
+            let label = all_options.get(idx).cloned().unwrap_or_default();
+            let mut answers = HashMap::new();
+            for q in &questions {
+                let question_text = q.get("question").and_then(|v| v.as_str()).unwrap_or("?");
+                answers.insert(question_text.to_string(), serde_json::Value::String(label.clone()));
+            }
+            serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {
+                    "permission": "allow",
+                    "updated_input": {
+                        "questions": questions,
+                        "answers": answers,
+                    }
+                }
+            })
+        }
+        Ok(Ok(crate::state::QuestionAnswer::Text(text))) => {
+            let mut answers = HashMap::new();
+            for q in &questions {
+                let question_text = q.get("question").and_then(|v| v.as_str()).unwrap_or("?");
+                answers.insert(question_text.to_string(), serde_json::Value::String(text.clone()));
+            }
+            serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {
+                    "permission": "allow",
+                    "updated_input": {
+                        "questions": questions,
+                        "answers": answers,
+                    }
+                }
+            })
+        }
+        _ => {
+            // Timeout or channel closed — auto-allow
+            serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"permission": "allow"}
+            })
+        }
+    }
+}
+
+async fn handle_exit_plan_mode(
+    state: &BotState,
+    agent_name: &str,
+    request_id: &str,
+    channel_id: u64,
+) -> serde_json::Value {
+    // Post plan approval request
+    let msg_content = "*Plan ready for review. React with \u{2705} to approve or \u{274c} to deny.*";
+
+    let msg_id = match state.discord_client.send_message(channel_id, msg_content).await {
+        Ok(resp) => resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        Err(e) => {
+            warn!("Failed to post plan approval for '{}': {}", agent_name, e);
+            return serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"permission": "allow"}
+            });
+        }
+    };
+
+    // Add approval reactions
+    if let Ok(id) = msg_id.parse::<u64>() {
+        let _ = state.discord_client.add_reaction(channel_id, id, "\u{2705}").await; // ✅
+        let _ = state.discord_client.add_reaction(channel_id, id, "\u{274c}").await; // ❌
+    }
+
+    // Create oneshot channel
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let question = crate::state::PendingQuestion {
+            agent_name: agent_name.to_string(),
+            channel_id,
+            message_id: msg_id.clone(),
+            request_id: request_id.to_string(),
+            question_type: crate::state::QuestionType::PlanApproval,
+            options: Vec::new(),
+            sender: tx,
+        };
+        let mut pending = state.pending_questions.lock().await;
+        pending.insert(msg_id.clone(), question);
+    }
+
+    // Wait for answer
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(600), rx).await;
+
+    // Clean up
+    {
+        let mut pending = state.pending_questions.lock().await;
+        pending.remove(&msg_id);
+    }
+
+    match answer {
+        Ok(Ok(crate::state::QuestionAnswer::Approved)) => {
+            serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"permission": "allow"}
+            })
+        }
+        Ok(Ok(crate::state::QuestionAnswer::Denied)) => {
+            serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"permission": "deny"}
+            })
+        }
+        _ => {
+            // Timeout — auto-allow
+            serde_json::json!({
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"permission": "allow"}
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

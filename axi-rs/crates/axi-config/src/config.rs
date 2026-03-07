@@ -25,9 +25,7 @@ pub struct Config {
     pub config_path: PathBuf,
     pub schedules_path: PathBuf,
     pub history_path: PathBuf,
-    pub rollback_marker_path: PathBuf,
-    pub crash_analysis_marker_path: PathBuf,
-    pub rate_limit_history_path: PathBuf,
+pub rate_limit_history_path: PathBuf,
     pub usage_history_path: PathBuf,
     pub mcp_servers_path: PathBuf,
     pub readme_content_path: PathBuf,
@@ -37,7 +35,6 @@ pub struct Config {
     pub streaming_discord: bool,
     pub channel_status_enabled: bool,
     pub clean_tool_messages: bool,
-    pub enable_crash_handler: bool,
     pub show_awaiting_input: bool,
 
     // Numeric
@@ -97,7 +94,6 @@ impl Config {
         let streaming_discord = env_bool("STREAMING_DISCORD", false);
         let channel_status_enabled = env_bool("CHANNEL_STATUS_ENABLED", false);
         let clean_tool_messages = env_bool("CLEAN_TOOL_MESSAGES", false);
-        let enable_crash_handler = env_bool("ENABLE_CRASH_HANDLER", false);
         let show_awaiting_input = env_bool("SHOW_AWAITING_INPUT", false);
 
         // Numeric
@@ -131,8 +127,6 @@ impl Config {
             config_path: bot_dir.join("config.json"),
             schedules_path: axi_user_data.join("schedules.json"),
             history_path: axi_user_data.join("schedule_history.json"),
-            rollback_marker_path: bot_dir.join(".rollback_performed"),
-            crash_analysis_marker_path: bot_dir.join(".crash_analysis"),
             rate_limit_history_path: log_dir.join("rate_limit_history.jsonl"),
             usage_history_path: axi_user_data.join("usage_history.jsonl"),
             mcp_servers_path: axi_user_data.join("mcp_servers.json"),
@@ -141,7 +135,6 @@ impl Config {
             streaming_discord,
             channel_status_enabled,
             clean_tool_messages,
-            enable_crash_handler,
             show_awaiting_input,
             max_awake_agents,
             compact_threshold,

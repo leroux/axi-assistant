@@ -66,6 +66,7 @@ pub struct AgentSession {
     pub reconnecting: bool,
     pub bridge_busy: bool,
     pub activity: ActivityState,
+    pub debug: bool,
     pub plan_mode: bool,
     pub last_failed_resume_id: Option<String>,
     /// Opaque frontend state — the bot casts this to its own type.
@@ -94,6 +95,7 @@ impl AgentSession {
             reconnecting: false,
             bridge_busy: false,
             activity: ActivityState::default(),
+            debug: false,
             plan_mode: false,
             last_failed_resume_id: None,
             frontend_state: None,

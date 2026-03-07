@@ -27,19 +27,31 @@ pub type StreamHandlerFn = Arc<
 // Interrupt
 // ---------------------------------------------------------------------------
 
+/// Gracefully interrupt an agent's current generation.
+///
+/// Sends SIGINT via procmux which causes Claude CLI to abort the current
+/// API call while keeping the process alive with full context.
+/// Falls back to kill if interrupt fails.
 pub async fn interrupt_session(hub: &AgentHub, name: &str) {
     if let Some(ref conn) = *hub.process_conn.lock().await {
-        match conn.kill(name).await {
+        match conn.interrupt(name).await {
             Ok(result) => {
                 if !result.ok {
                     warn!(
-                        "Bridge kill for '{}' failed: {:?}",
+                        "Graceful interrupt for '{}' failed: {:?}, falling back to kill",
                         name, result.error
                     );
+                    if let Err(e) = conn.kill(name).await {
+                        warn!("Fallback kill for '{}' also failed: {}", name, e);
+                    }
                 }
             }
             Err(e) => {
-                warn!("Bridge kill for '{}' raised: {}", name, e);
+                warn!(
+                    "Graceful interrupt for '{}' raised: {}, falling back to kill",
+                    name, e
+                );
+                let _ = conn.kill(name).await;
             }
         }
     }

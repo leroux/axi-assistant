@@ -9,7 +9,6 @@
 mod bridge;
 mod channels;
 mod commands;
-mod crash_handler;
 mod events;
 mod frontend;
 mod permissions;
@@ -22,11 +21,15 @@ mod todos;
 
 use std::sync::Arc;
 
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_otlp::WithExportConfig;
 use serenity::all::GatewayIntents;
 use serenity::client::{Client, Context, EventHandler};
 use serenity::model::gateway::Ready;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use state::BotState;
 
@@ -74,12 +77,38 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing
     let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_new(&log_level).unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .init();
+    let env_filter = EnvFilter::try_new(&log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+
+    if let Ok(endpoint) = std::env::var("OTEL_ENDPOINT") {
+        // OTel export to OTLP/gRPC (Jaeger-compatible)
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&endpoint)
+            .build()
+            .expect("Failed to create OTLP exporter");
+        let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(
+                opentelemetry_sdk::Resource::builder()
+                    .with_service_name("axi-bot")
+                    .build(),
+            )
+            .build();
+        let otel_layer = tracing_opentelemetry::layer()
+            .with_tracer(tracer_provider.tracer("axi-bot"));
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .with(otel_layer)
+            .init();
+        info!("OpenTelemetry tracing initialized (endpoint={})", endpoint);
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+    }
 
     // Load config
     let config = axi_config::Config::from_env()?;

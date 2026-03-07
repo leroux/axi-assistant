@@ -1,7 +1,15 @@
-//! Async Discord REST client with rate-limit and retry handling.
+//! Standalone async Discord REST client with rate-limit and retry handling.
 //!
-//! Wraps reqwest and provides automatic 429/5xx retry, plus high-level
-//! convenience methods for common operations.
+//! This exists alongside serenity's built-in `ctx.http` by design:
+//!
+//! - **Serenity `ctx.http`**: Required for interaction responses (`create_response`)
+//!   and serenity model methods (`guild_id.channels()`) that return typed structs.
+//!   Only available inside serenity event handlers.
+//!
+//! - **`DiscordClient`** (this module): Used everywhere serenity's Context is
+//!   unavailable — the bridge/streaming layer, MCP tool servers, frontend
+//!   callbacks, and the standalone `discordquery` CLI binary (critical for the
+//!   test instance system: `axi_test.py msg`, `discordquery wait`).
 
 use std::collections::HashMap;
 
@@ -400,6 +408,18 @@ impl DiscordClient {
         self.patch(
             &format!("/channels/{channel_id}"),
             serde_json::json!({ "parent_id": category_id.to_string() }),
+        )
+        .await
+    }
+
+    pub async fn edit_channel_position(
+        &self,
+        channel_id: u64,
+        position: u32,
+    ) -> Result<Value, DiscordError> {
+        self.patch(
+            &format!("/channels/{channel_id}"),
+            serde_json::json!({ "position": position }),
         )
         .await
     }

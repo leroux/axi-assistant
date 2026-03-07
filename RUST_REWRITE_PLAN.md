@@ -65,8 +65,9 @@ Tasks:
 - [x] Bare stream event deduplication
 - [x] Unit tests for serde round-trips and event parsing
 - [x] Initialize interception for reconnecting agents
-- [ ] OTel trace context injection
-- [ ] DirectProcessConnection: PTY subprocess management
+- [x] OTel tracing export (OTLP/gRPC, conditional on OTEL_ENDPOINT env var)
+- [N/A] DirectProcessConnection: PTY subprocess management — not needed; procmux replaces this entirely
+- [N/A] OTel trace context injection into CLI processes — Claude CLI doesn't support receiving trace context
 
 ### Phase 3: Supervisor [x]
 **Goal**: Rust process supervisor replacing supervisor.py.
@@ -79,7 +80,7 @@ Tasks:
 - [x] Optional git rollback on crash (ENABLE_ROLLBACK)
 - [x] Exit code 42 = restart, other = crash
 - [x] Log capture and ANSI stripping
-- [x] Crash analysis marker file writing
+- [x] ~~Crash analysis marker file writing~~ (removed — crash handler deleted)
 
 ### Phase 4: Config & Tracing [x]
 **Goal**: Centralized configuration and OpenTelemetry setup.
@@ -143,9 +144,9 @@ Tasks:
 Tasks:
 - [x] Cron-based event scheduler (recurring + one-off)
 - [x] Schedule persistence (JSON file)
-- [ ] Flowcoder agent type support (optional — may keep in Python)
+- [DEFERRED] Flowcoder agent type support — will be ported separately after Rust bot is in production
 - [ ] Test instance system (axi_test.py equivalent or keep Python version)
-- [x] Crash handler and analysis
+- [x] ~~Crash handler and analysis~~ (removed — crash handler deleted)
 - [ ] Hot restart end-to-end validation
 
 ### Phase 9: Integration Testing & Deployment [x]
@@ -174,6 +175,123 @@ Tasks:
 - [x] Scheduler loop connected to hub (fired schedules wake agents)
 - [x] Stream handler (bridge → live-edit rendering) — reads claudewire events, renders via live-edit to Discord
 - [x] Client factories (create/disconnect/send) — wired to procmux bridge via transport manager
+
+### Phase 11: Feature Parity [ ]
+**Goal**: Close every gap between the Python and Rust implementations.
+
+Phases 1-10 built the structural skeleton. A comprehensive Python↔Rust comparison revealed many features are TODO stubs, unwired, or entirely missing. This phase covers closing every gap.
+
+#### A. MCP Tool Stubs (tools.rs — all return fake success)
+
+| Tool | Status | What's needed |
+|------|--------|---------------|
+| `axi_spawn_agent` | TODO stub | Delegate to hub: validate CWD, build prompt, register session, create channel, run initial prompt |
+| `axi_kill_agent` | TODO stub | Delegate to hub: `end_session`, move channel to Killed |
+| `axi_restart` | TODO stub | Trigger `ShutdownCoordinator` graceful restart (exit code 42) |
+| `axi_restart_agent` | TODO stub | Disconnect + rebuild session with fresh prompt |
+| `axi_send_message` | TODO stub | Delegate to `deliver_inter_agent_message` |
+| `set_agent_status` | TODO stub | Call `channels::set_channel_status` for the agent |
+| `clear_agent_status` | TODO stub | Reset channel name to normalized (no prefix) |
+
+Fix: MCP tool handlers need `Arc<BotState>` captured in closures. Currently `create_master_server` only takes `Arc<Config>`.
+
+#### B. Stream Event Handling Gaps (bridge.rs `stream_response`)
+
+| Feature | Python location | Rust status |
+|---------|----------------|-------------|
+| Thinking indicator (show/hide temp message) | `_show_thinking` / `_hide_thinking` | Missing |
+| Typing indicator management | `channel.typing()` context manager | Missing |
+| TodoWrite display during stream | `_handle_stream_event` detects TodoWrite, posts list | Missing |
+| Clean tool messages (temp progress) | `_show_tool_progress` / `_delete_tool_progress_messages` | Missing |
+| Response timing inline | Appends `-# 3.2s` to last message | Missing |
+| Debug mode (thinking as file attachment) | `discord_state.debug` flag → file upload | Missing |
+| System messages (compacting, compact_boundary) | `_handle_system_message` | Missing |
+| AssistantMessage error handling (rate_limit, billing) | `_handle_assistant_message` | Missing |
+
+#### C. AskUserQuestion Handling
+
+Python: Permission callback intercepts `AskUserQuestion` tool call → posts formatted questions to Discord → adds reaction emojis (1️⃣-4️⃣) → waits for user reaction or text reply → resolves answer.
+
+Rust: **Entirely missing**. No permission callback, no question gate, no reaction answer handling.
+
+#### D. ExitPlanMode Handling
+
+Python: Permission callback intercepts `ExitPlanMode` → posts plan content → adds ✅/❌ reactions → waits for approval.
+
+Rust: **Partially implemented** — reaction handler sends text but no gate mechanism.
+
+#### E. Image Attachment Support
+
+Python: Downloads image attachments, base64-encodes them, creates `ImageBlockParam` content blocks.
+
+Rust: Only adds text description `[Attachment: filename (size, type)]`. No image download or base64 encoding.
+
+#### F. Unwired Slash Commands
+
+| Command | Registered | Wired |
+|---------|-----------|-------|
+| `/debug` | Yes | No |
+| `/plan` | Yes | No |
+| `/compact` | Yes | No |
+| `/clear` | Yes | No |
+| `/claude-usage` | Yes | No |
+| `/restart-agent` | Yes | No |
+
+#### G. Text Commands (// prefix)
+
+Python handles `// <command>`: debug, status, todo, clear, compact, flowchart, stop.
+
+Rust: **No text command parsing at all**.
+
+#### H. Channel Lifecycle
+
+| Feature | Python | Rust |
+|---------|--------|------|
+| Channel recency reordering (debounced) | `mark_channel_active` with rate limiting | Missing |
+| Master channel position enforcement | Pinned to top of Axi category | Missing |
+| Auto-sleep idle agents (1-min threshold) | Idle check in message handler | Missing |
+| Recover stranded messages | On startup, check for unprocessed | Missing |
+| Channel creation/deletion listeners | `on_guild_channel_create/delete` | Missing |
+
+#### I. Auto-Compact
+
+Python: After each response, checks `context_tokens / context_window > COMPACT_THRESHOLD` → sends `/compact` → auto-resumes.
+
+Rust: **Missing entirely**. No context token tracking, no compact trigger.
+
+#### J. Graceful Interrupt
+
+Python: `graceful_interrupt` sends `control_request.interrupt` via SDK — CLI aborts API call but stays alive.
+
+Rust: `interrupt_session` does `conn.kill()` which kills the process entirely.
+
+#### K. Agent Config Persistence
+
+Python: `_save_agent_config` / `_load_agent_config` persist MCP server names and packs to `agents/<name>/agent_config.json`.
+
+Rust: Missing.
+
+#### L. Miscellaneous
+
+- Model warning on non-opus model
+- System prompt posting to Discord on first wake
+- Prompt change detection on resume
+- Message queue backpressure (⏳→📨 reaction flow)
+- Auto-worktree creation for agents spawned with bot_dir CWD
+- Reclaim agent name on respawn
+- SHOW_AWAITING_INPUT feature
+- Stderr callback/drain (autocompact regex)
+- Context tokens tracking from stderr
+
+#### Not Porting
+
+- **DirectProcessConnection / PTY** — Procmux replaces this entirely
+- **Per-agent rotating file logs** — Using centralized tracing
+- **Crash handler** — Removed per user request
+
+#### Deferred
+
+- **Flowcoder agent type** — Will be ported separately after Rust bot is in production
 
 ## Testing Strategy
 
@@ -216,10 +334,10 @@ Each phase produces testable artifacts:
 | axi-config | lib | 4 | Config loading, Discord REST client, model management |
 | axi-hub | lib | 2 | Agent session management, lifecycle, rate limits |
 | axi-mcp | lib | 8 | MCP tool servers — protocol, tools, schedules |
-| axi-bot | bin | 58 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions, todos, frontend, startup, bridge |
+| axi-bot | bin | 51 | Discord bot, events, commands, channels, scheduler, streaming, prompts, permissions, todos, frontend, startup, bridge |
 | discordquery | bin | 5 | Discord message history query CLI (guilds, channels, history, search, wait) |
 | axi-supervisor | bin | 0 | Process supervisor (tested via integration) |
-| **Total** | | **105** | |
+| **Total** | | **98** | |
 
 ## Migration Plan
 

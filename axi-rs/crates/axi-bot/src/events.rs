@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use serenity::all::{ChannelId, Message, Reaction};
+use serenity::all::{Message, Reaction};
 use serenity::client::Context;
 use serenity::model::application::Interaction;
 use serenity::model::channel::MessageType;
@@ -94,9 +94,9 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
         if !state.config.allowed_user_ids.contains(&msg.author.id.get()) {
             return;
         }
-        let _ = msg
-            .channel_id
-            .say(&ctx.http, "*System:* Please use the server channels instead.")
+        let _ = state
+            .discord_client
+            .send_message(msg.channel_id.get(), "*System:* Please use the server channels instead.")
             .await;
         return;
     }
@@ -113,15 +113,26 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
         return;
     }
 
-    // Extract content
-    let content = extract_message_content(msg);
+    // Extract content (may download images)
+    let raw_content = extract_message_content(msg).await;
 
+    let content_preview_str = match &raw_content {
+        axi_hub::MessageContent::Text(t) => content_preview(t, 100),
+        axi_hub::MessageContent::Blocks(_) => "[blocks with images]".to_string(),
+    };
     info!(
         "Message from {} in #{}: {}",
         msg.author.name,
         msg.channel_id,
-        content_preview(&content, 100)
+        content_preview_str
     );
+
+    // Handle text commands (// prefix)
+    if msg.content.starts_with("// ") {
+        let cmd = msg.content[3..].trim();
+        handle_text_command(msg, &state, cmd).await;
+        return;
+    }
 
     // Look up agent for this channel
     let agent_name = if let Some(name) = state.agent_for_channel(msg.channel_id).await { name } else {
@@ -132,15 +143,31 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
         return;
     };
 
-    // Add timestamp prefix (matches Python behavior)
+    // Add timestamp prefix
     let ts_prefix = chrono::Utc::now()
         .format("[%Y-%m-%d %H:%M:%S UTC] ")
         .to_string();
-    let message_content = axi_hub::MessageContent::Text(format!("{ts_prefix}{content}"));
+    let message_content = match raw_content {
+        axi_hub::MessageContent::Text(text) => {
+            axi_hub::MessageContent::Text(format!("{ts_prefix}{text}"))
+        }
+        axi_hub::MessageContent::Blocks(mut blocks) => {
+            // Prepend timestamp to first text block
+            if let Some(first) = blocks.first_mut() {
+                if first.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    if let Some(text) = first.get("text").and_then(|v| v.as_str()) {
+                        first["text"] = serde_json::Value::String(format!("{ts_prefix}{text}"));
+                    }
+                }
+            }
+            axi_hub::MessageContent::Blocks(blocks)
+        }
+    };
 
-    // Mark agent as interactive (user-facing)
+    // Mark agent as interactive (user-facing) and reorder channel
     let hub = state.hub().await;
     hub.scheduler.mark_interactive(&agent_name).await;
+    crate::channels::mark_channel_active(&state.discord_client, msg.channel_id.get()).await;
 
     // Wake-or-queue the message
     let woke = axi_hub::lifecycle::wake_or_queue(
@@ -163,46 +190,47 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
             };
 
             if let Some(query_lock) = query_lock {
-                let _lock = query_lock.lock().await;
-
                 {
-                    let mut sessions = hub_ref.sessions.lock().await;
-                    if let Some(session) = sessions.get_mut(&name) {
-                        axi_hub::lifecycle::reset_activity(session);
-                    }
-                }
+                    let _lock = query_lock.lock().await;
 
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs_f64(hub_ref.query_timeout),
-                    axi_hub::messaging::process_message(
-                        &hub_ref,
-                        &name,
-                        &message_content,
-                        &stream_handler,
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(())) => {
+                    {
                         let mut sessions = hub_ref.sessions.lock().await;
                         if let Some(session) = sessions.get_mut(&name) {
-                            session.last_activity = chrono::Utc::now();
-                            session.activity = claudewire::events::ActivityState::default();
+                            axi_hub::lifecycle::reset_activity(session);
                         }
                     }
-                    Ok(Err(e)) => {
-                        warn!("Query error for '{}': {}", name, e);
-                        hub_ref
-                            .callbacks
-                            .post_system(&name, &format!("Error: {e}"))
-                            .await;
-                    }
-                    Err(_) => {
-                        axi_hub::messaging::handle_query_timeout(&hub_ref, &name).await;
+
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs_f64(hub_ref.query_timeout),
+                        axi_hub::messaging::process_message(
+                            &hub_ref,
+                            &name,
+                            &message_content,
+                            &stream_handler,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            let mut sessions = hub_ref.sessions.lock().await;
+                            if let Some(session) = sessions.get_mut(&name) {
+                                session.last_activity = chrono::Utc::now();
+                                session.activity = claudewire::events::ActivityState::default();
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            warn!("Query error for '{}': {}", name, e);
+                            hub_ref
+                                .callbacks
+                                .post_system(&name, &format!("Error: {e}"))
+                                .await;
+                        }
+                        Err(_) => {
+                            axi_hub::messaging::handle_query_timeout(&hub_ref, &name).await;
+                        }
                     }
                 }
-
-                // Process queue then sleep
+                // query_lock dropped — sleep_agent can now check is_processing correctly
                 axi_hub::messaging::process_message_queue(&hub_ref, &name, &stream_handler).await;
                 axi_hub::lifecycle::sleep_agent(&hub_ref, &name, false).await;
             }
@@ -212,6 +240,86 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
             "Agent '{}' not awake, message queued",
             agent_name
         );
+        // Add hourglass reaction to indicate message is queued
+        let _ = state
+            .discord_client
+            .add_reaction(msg.channel_id.get(), msg.id.get(), "\u{23f3}")
+            .await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text commands (// prefix)
+// ---------------------------------------------------------------------------
+
+/// Handle `// <command>` text commands.
+///
+/// Uses `DiscordClient` (not serenity `ctx.http`) for consistency — all
+/// non-interaction message sends go through the standalone REST client.
+async fn handle_text_command(
+    msg: &Message,
+    state: &BotState,
+    cmd: &str,
+) {
+    let ch = msg.channel_id.get();
+    let dc = &state.discord_client;
+
+    let agent_name = if let Some(name) = state.agent_for_channel(msg.channel_id).await { name } else {
+        let _ = dc.send_message(ch, "No agent in this channel.").await;
+        return;
+    };
+
+    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+    let command = parts[0].to_lowercase();
+
+    match command.as_str() {
+        "debug" => {
+            let hub = state.hub().await;
+            let mut sessions = hub.sessions.lock().await;
+            if let Some(session) = sessions.get_mut(&agent_name) {
+                session.debug = !session.debug;
+                let status = if session.debug { "enabled" } else { "disabled" };
+                let _ = dc.send_message(ch, &format!("Debug mode {status}.")).await;
+            }
+        }
+        "status" => {
+            let hub = state.hub().await;
+            let sessions = hub.sessions.lock().await;
+            if let Some(session) = sessions.get(&agent_name) {
+                let awake = session.client.is_some();
+                let session_id = session.session_id.as_deref().unwrap_or("none");
+                let status = format!(
+                    "**{}** — {} | session: `{}`",
+                    agent_name,
+                    if awake { "awake" } else { "sleeping" },
+                    session_id,
+                );
+                let _ = dc.send_message(ch, &status).await;
+            }
+        }
+        "clear" => {
+            let hub = state.hub().await;
+            let content = axi_hub::MessageContent::Text("/clear".to_string());
+            axi_hub::lifecycle::wake_or_queue(&hub, &agent_name, content, None).await;
+            let _ = dc.send_message(ch, "Sent /clear to agent.").await;
+        }
+        "compact" => {
+            let hub = state.hub().await;
+            let content = axi_hub::MessageContent::Text("/compact".to_string());
+            axi_hub::lifecycle::wake_or_queue(&hub, &agent_name, content, None).await;
+            let _ = dc.send_message(ch, "Sent /compact to agent.").await;
+        }
+        "stop" => {
+            let hub = state.hub().await;
+            axi_hub::messaging::interrupt_session(&hub, &agent_name).await;
+            let _ = dc.send_message(ch, "Agent interrupted.").await;
+        }
+        _ => {
+            let _ = dc.send_message(
+                ch,
+                &format!("Unknown command: `{command}`. Available: debug, status, clear, compact, stop"),
+            ).await;
+        }
     }
 }
 
@@ -244,6 +352,9 @@ pub async fn handle_interaction(ctx: &Context, interaction: Interaction) {
 // Reaction handling
 // ---------------------------------------------------------------------------
 
+/// Number emoji constants for matching reactions.
+const EMOJI_NUMBERS: &[&str] = &["1\u{fe0f}\u{20e3}", "2\u{fe0f}\u{20e3}", "3\u{fe0f}\u{20e3}", "4\u{fe0f}\u{20e3}"];
+
 /// Handle reaction add events — plan approval and question answers.
 pub async fn handle_reaction_add(ctx: &Context, reaction: &Reaction) {
     let data = ctx.data.read().await;
@@ -275,26 +386,68 @@ pub async fn handle_reaction_add(ctx: &Context, reaction: &Reaction) {
     }
 
     let emoji = reaction.emoji.to_string();
+    let message_id = reaction.message_id.get().to_string();
     debug!(
         "Reaction {} on message {} in channel {}",
-        emoji, reaction.message_id, reaction.channel_id
+        emoji, message_id, reaction.channel_id
     );
 
-    // Look up agent for this channel
+    // Check if this reaction resolves a pending question
+    let pending = {
+        let mut pending = state.pending_questions.lock().await;
+        pending.remove(&message_id)
+    };
+
+    if let Some(question) = pending {
+        let answer = match question.question_type {
+            crate::state::QuestionType::AskUser => {
+                // Number emoji → selection index
+                if let Some(idx) = EMOJI_NUMBERS.iter().position(|e| *e == emoji) {
+                    if idx < question.options.len() {
+                        Some(crate::state::QuestionAnswer::Selection(idx))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            crate::state::QuestionType::PlanApproval => {
+                match emoji.as_str() {
+                    "\u{2705}" | "\u{2714}\u{fe0f}" => {
+                        Some(crate::state::QuestionAnswer::Approved)
+                    }
+                    "\u{274c}" | "\u{274e}" => {
+                        Some(crate::state::QuestionAnswer::Denied)
+                    }
+                    _ => None,
+                }
+            }
+        };
+
+        if let Some(answer) = answer {
+            info!(
+                "Resolved pending question for agent '{}' (msg {})",
+                question.agent_name, message_id
+            );
+            let _ = question.sender.send(answer);
+        } else {
+            // Unrecognized emoji — put the question back
+            let mut pending = state.pending_questions.lock().await;
+            pending.insert(message_id, question);
+        }
+        return;
+    }
+
+    // Fallback: legacy plan approval (for reactions on non-pending messages)
     let agent_name = match state.agent_for_channel(reaction.channel_id).await {
         Some(name) => name,
         None => return,
     };
 
-    // Plan approval: checkmark = approve, X = reject
     match emoji.as_str() {
         "\u{2705}" | "\u{2714}\u{fe0f}" => {
-            // Checkmark — approve plan
-            info!(
-                "Plan approved for agent '{}' via reaction",
-                agent_name
-            );
-            // Send approval message to agent
+            info!("Plan approved for agent '{}' via reaction", agent_name);
             let hub = state.hub().await;
             let content = axi_hub::MessageContent::Text(
                 "Plan approved. Proceed with implementation.".to_string(),
@@ -302,24 +455,14 @@ pub async fn handle_reaction_add(ctx: &Context, reaction: &Reaction) {
             axi_hub::lifecycle::wake_or_queue(&hub, &agent_name, content, None).await;
         }
         "\u{274c}" | "\u{274e}" => {
-            // X mark — reject plan
-            info!(
-                "Plan rejected for agent '{}' via reaction",
-                agent_name
-            );
+            info!("Plan rejected for agent '{}' via reaction", agent_name);
             let hub = state.hub().await;
             let content = axi_hub::MessageContent::Text(
                 "Plan rejected. Please revise your approach.".to_string(),
             );
             axi_hub::lifecycle::wake_or_queue(&hub, &agent_name, content, None).await;
         }
-        _ => {
-            // Other reactions — could be question answers (1️⃣, 2️⃣, etc.)
-            debug!(
-                "Unhandled reaction {} for agent '{}'",
-                emoji, agent_name
-            );
-        }
+        _ => {}
     }
 }
 
@@ -327,37 +470,96 @@ pub async fn handle_reaction_add(ctx: &Context, reaction: &Reaction) {
 // Message content extraction
 // ---------------------------------------------------------------------------
 
-/// Extract text content from a Discord message, including attachments.
-pub fn extract_message_content(msg: &Message) -> String {
-    let mut parts = Vec::new();
+/// Image content types we support base64-encoding for the API.
+const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// Extract message content, downloading and base64-encoding image attachments.
+///
+/// Returns `MessageContent::Blocks` when images are present, `MessageContent::Text` otherwise.
+pub async fn extract_message_content(msg: &Message) -> axi_hub::MessageContent {
+    let mut text_parts = Vec::new();
+    let mut image_blocks: Vec<serde_json::Value> = Vec::new();
 
     // Add text content
     if !msg.content.is_empty() {
-        parts.push(msg.content.clone());
+        text_parts.push(msg.content.clone());
     }
 
-    // Add attachment descriptions
+    // Process attachments
     for attachment in &msg.attachments {
-        let size_kb = attachment.size / 1024;
-        parts.push(format!(
-            "[Attachment: {} ({} KB, {})]",
-            attachment.filename,
-            size_kb,
-            attachment
-                .content_type
-                .as_deref()
-                .unwrap_or("unknown type")
-        ));
+        let content_type = attachment.content_type.as_deref().unwrap_or("");
+        if IMAGE_TYPES.iter().any(|t| content_type.starts_with(t)) {
+            // Download and base64-encode image
+            match download_and_encode(&attachment.url).await {
+                Ok(b64_data) => {
+                    let media_type = content_type.split(';').next().unwrap_or(content_type);
+                    image_blocks.push(serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64_data,
+                        }
+                    }));
+                }
+                Err(e) => {
+                    warn!("Failed to download image {}: {}", attachment.filename, e);
+                    let size_kb = attachment.size / 1024;
+                    text_parts.push(format!(
+                        "[Attachment: {} ({} KB, {}) — download failed]",
+                        attachment.filename, size_kb, content_type
+                    ));
+                }
+            }
+        } else {
+            let size_kb = attachment.size / 1024;
+            text_parts.push(format!(
+                "[Attachment: {} ({} KB, {})]",
+                attachment.filename,
+                size_kb,
+                attachment.content_type.as_deref().unwrap_or("unknown type")
+            ));
+        }
     }
 
     // Add embed descriptions
     for embed in &msg.embeds {
         if let Some(desc) = &embed.description {
-            parts.push(format!("[Embed: {desc}]"));
+            text_parts.push(format!("[Embed: {desc}]"));
         }
     }
 
-    parts.join("\n")
+    if image_blocks.is_empty() {
+        axi_hub::MessageContent::Text(text_parts.join("\n"))
+    } else {
+        // Build blocks array: text first, then images
+        let mut blocks = Vec::new();
+        let text = text_parts.join("\n");
+        if !text.is_empty() {
+            blocks.push(serde_json::json!({"type": "text", "text": text}));
+        }
+        blocks.extend(image_blocks);
+        axi_hub::MessageContent::Blocks(blocks)
+    }
+}
+
+/// Download a URL and return its content as base64-encoded string.
+async fn download_and_encode(url: &str) -> Result<String, String> {
+    use base64::Engine;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read body: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
 /// Short preview of message content for logging.
@@ -366,46 +568,6 @@ fn content_preview(content: &str, max_len: usize) -> String {
         content.replace('\n', " ")
     } else {
         format!("{}...", &content[..max_len].replace('\n', " "))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Discord message sending helpers
-// ---------------------------------------------------------------------------
-
-/// Send a system message to a channel (prefixed with *System:*).
-pub async fn send_system(ctx: &Context, channel_id: ChannelId, text: &str) {
-    let msg = format!("*System:* {text}");
-    if let Err(e) = channel_id.say(&ctx.http, &msg).await {
-        warn!("Failed to send system message to {}: {}", channel_id, e);
-    }
-}
-
-/// Send a long message, splitting at Discord's 2000 char limit.
-pub async fn send_long(ctx: &Context, channel_id: ChannelId, text: &str) {
-    const MAX_LEN: usize = 1900; // Leave room for formatting
-
-    if text.len() <= MAX_LEN {
-        let _ = channel_id.say(&ctx.http, text).await;
-        return;
-    }
-
-    // Split on newlines, grouping into chunks that fit
-    let mut chunk = String::new();
-    for line in text.lines() {
-        if chunk.len() + line.len() + 1 > MAX_LEN
-            && !chunk.is_empty()
-        {
-            let _ = channel_id.say(&ctx.http, &chunk).await;
-            chunk.clear();
-        }
-        if !chunk.is_empty() {
-            chunk.push('\n');
-        }
-        chunk.push_str(line);
-    }
-    if !chunk.is_empty() {
-        let _ = channel_id.say(&ctx.http, &chunk).await;
     }
 }
 

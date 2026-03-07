@@ -150,23 +150,32 @@ pub async fn reclaim_agent_name(hub: &AgentHub, name: &str) {
 // Spawn
 // ---------------------------------------------------------------------------
 
-pub async fn spawn_agent(
-    hub: &AgentHub,
-    name: String,
-    cwd: String,
-    agent_type: Option<String>,
-    resume: Option<String>,
-    system_prompt: Option<serde_json::Value>,
-    mcp_servers: Option<serde_json::Value>,
-) -> AgentSession {
-    std::fs::create_dir_all(&cwd).ok();
+/// Parameters for spawning a new agent session.
+#[derive(Default)]
+pub struct SpawnRequest {
+    pub name: String,
+    pub cwd: String,
+    pub agent_type: Option<String>,
+    pub resume: Option<String>,
+    pub system_prompt: Option<serde_json::Value>,
+    pub mcp_servers: Option<serde_json::Value>,
+    pub mcp_server_names: Option<Vec<String>>,
+}
+
+pub async fn spawn_agent(hub: &AgentHub, req: SpawnRequest) -> AgentSession {
+    std::fs::create_dir_all(&req.cwd).ok();
+
+    let name = req.name;
+    let cwd = req.cwd;
+    let resume = req.resume;
 
     let mut session = AgentSession::new(name.clone());
-    session.agent_type = agent_type.unwrap_or_else(|| "claude_code".to_string());
+    session.agent_type = req.agent_type.unwrap_or_else(|| "claude_code".to_string());
     session.cwd = cwd.clone();
-    session.system_prompt = system_prompt;
+    session.system_prompt = req.system_prompt;
     session.session_id = resume.clone();
-    session.mcp_servers = mcp_servers;
+    session.mcp_servers = req.mcp_servers;
+    session.mcp_server_names = req.mcp_server_names;
 
     {
         let mut sessions = hub.sessions.lock().await;
@@ -189,6 +198,37 @@ pub async fn spawn_agent(
         result.session_id = s.session_id.clone();
         result.system_prompt = s.system_prompt.clone();
         result.mcp_servers = s.mcp_servers.clone();
+        result.mcp_server_names = s.mcp_server_names.clone();
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Agent config persistence
+// ---------------------------------------------------------------------------
+
+/// Agent config stored alongside agent data.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+pub struct AgentConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_server_names: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packs: Option<Vec<String>>,
+}
+
+/// Save agent config to `<cwd>/agent_config.json`.
+pub fn save_agent_config(cwd: &str, config: &AgentConfig) {
+    let path = std::path::Path::new(cwd).join("agent_config.json");
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        if let Err(e) = std::fs::write(&path, json) {
+            tracing::warn!("Failed to save agent config to {}: {}", path.display(), e);
+        }
+    }
+}
+
+/// Load agent config from `<cwd>/agent_config.json`.
+pub fn load_agent_config(cwd: &str) -> Option<AgentConfig> {
+    let path = std::path::Path::new(cwd).join("agent_config.json");
+    let data = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&data).ok()
 }

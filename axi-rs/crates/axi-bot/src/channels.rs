@@ -336,6 +336,18 @@ pub async fn reconstruct_channel_map(
     Ok(map)
 }
 
+/// Reorder a channel to position 0 within its category (most recent on top).
+///
+/// This is debounced by the caller — only called when an agent becomes active.
+pub async fn mark_channel_active(
+    discord_client: &axi_config::DiscordClient,
+    channel_id: u64,
+) {
+    if let Err(e) = discord_client.edit_channel_position(channel_id, 0).await {
+        warn!("Failed to reorder channel {}: {}", channel_id, e);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

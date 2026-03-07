@@ -257,15 +257,38 @@ impl ProcmuxServer {
                 self.relay_or_buffer(&name, msg);
             }
             RelayMsg::Exit { name, code } => {
-                if let Some(mp) = self.procs.get_mut(&name) {
+                // Reap the child process to prevent zombies, and get the real exit code.
+                let final_code = if let Some(mp) = self.procs.get_mut(&name) {
+                    let real_code = if code.is_none() {
+                        // stdout relay sent Exit with no code — wait() to reap and get it
+                        match mp.child.try_wait() {
+                            Ok(Some(status)) => status.code(),
+                            Ok(None) => {
+                                // Still running — wait with timeout
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    mp.child.wait(),
+                                ).await {
+                                    Ok(Ok(status)) => status.code(),
+                                    _ => code,
+                                }
+                            }
+                            Err(_) => code,
+                        }
+                    } else {
+                        code
+                    };
                     mp.status = ProcessStatus::Exited;
-                    mp.exit_code = code;
-                    info!("Process '{}' exited (code={:?})", name, code);
-                }
+                    mp.exit_code = real_code;
+                    info!("Process '{}' exited (code={:?})", name, real_code);
+                    real_code
+                } else {
+                    code
+                };
                 let msg = ServerMsg::Exit(ExitMsg {
                     r#type: None,
                     name: name.clone(),
-                    code,
+                    code: final_code,
                 });
                 self.relay_or_buffer(&name, msg);
             }
@@ -336,6 +359,7 @@ impl ProcmuxServer {
         if let Some(cwd) = &msg.cwd {
             cmd.current_dir(cwd);
         }
+        cmd.env_clear();
         cmd.envs(&env);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());

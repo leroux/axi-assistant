@@ -9,6 +9,41 @@ use std::time::Instant;
 use axi_config::DiscordClient;
 use tracing::{debug, warn};
 
+/// Generate a trace ID for this request.
+///
+/// If OpenTelemetry is active and has a valid trace context, uses the OTel
+/// trace ID (first 16 hex chars). Otherwise generates a random 16-char hex ID.
+fn generate_trace_id() -> String {
+    use opentelemetry::trace::TraceContextExt;
+    let ctx = opentelemetry::Context::current();
+    let span_ref = ctx.span();
+    let trace_id = span_ref.span_context().trace_id();
+    if trace_id != opentelemetry::trace::TraceId::INVALID {
+        // Use first 16 chars of the 32-char hex trace ID
+        format!("{trace_id}")[..16].to_string()
+    } else {
+        // No OTel context — generate random ID
+        let bytes: [u8; 8] = rand_bytes();
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+/// Generate 8 random bytes using a simple approach (no extra dep needed).
+fn rand_bytes() -> [u8; 8] {
+    let mut buf = [0u8; 8];
+    // Use timestamp + thread ID as entropy source
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tid = std::thread::current().id();
+    let seed = now ^ (format!("{tid:?}").len() as u128 * 0x517c_c1b7_2722_0a95);
+    for (i, byte) in buf.iter_mut().enumerate() {
+        *byte = ((seed >> (i * 8)) & 0xFF) as u8;
+    }
+    buf
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -53,12 +88,36 @@ impl LiveEditState {
 pub struct StreamContext {
     pub text_buffer: String,
     pub live_edit: Option<LiveEditState>,
+    /// Channel ID for non-streaming fallback (post full text when done).
+    pub channel_id: Option<u64>,
     pub got_result: bool,
     pub hit_rate_limit: bool,
     pub flush_count: u32,
     pub last_flushed_msg_id: Option<String>,
     pub last_flushed_channel_id: Option<u64>,
     pub last_flushed_content: String,
+
+    // Thinking indicator
+    pub thinking_msg_id: Option<String>,
+
+    // Tool progress messages (to delete after tool completes)
+    pub tool_progress_msg_ids: Vec<(u64, String)>, // (channel_id, msg_id)
+    pub current_tool_name: Option<String>,
+
+    // Tool input accumulation (for TodoWrite detection)
+    pub tool_input_json: String,
+
+    // Timing
+    pub start_time: Instant,
+
+    // Trace ID for this request (first 16 hex chars of a UUID)
+    pub trace_id: String,
+
+    // Debug mode
+    pub debug: bool,
+
+    // Clean tool messages feature
+    pub clean_tool_messages: bool,
 }
 
 impl StreamContext {
@@ -70,14 +129,164 @@ impl StreamContext {
             } else {
                 None
             },
+            channel_id,
             got_result: false,
             hit_rate_limit: false,
             flush_count: 0,
             last_flushed_msg_id: None,
             last_flushed_channel_id: None,
             last_flushed_content: String::new(),
+            thinking_msg_id: None,
+            tool_progress_msg_ids: Vec::new(),
+            current_tool_name: None,
+            tool_input_json: String::new(),
+            trace_id: generate_trace_id(),
+            debug: false,
+            clean_tool_messages: false,
+            start_time: Instant::now(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Thinking indicator
+// ---------------------------------------------------------------------------
+
+/// Show a "thinking..." indicator message.
+pub async fn show_thinking(
+    ctx: &mut StreamContext,
+    discord: &DiscordClient,
+    _agent_name: &str,
+) {
+    let channel_id = match &ctx.live_edit {
+        Some(le) => le.channel_id,
+        None => return,
+    };
+
+    match discord.send_message(channel_id, "*thinking...*").await {
+        Ok(resp) => {
+            ctx.thinking_msg_id = resp
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+        }
+        Err(e) => {
+            warn!("Failed to post thinking indicator: {}", e);
+        }
+    }
+}
+
+/// Hide the "thinking..." indicator message.
+pub async fn hide_thinking(
+    ctx: &mut StreamContext,
+    discord: &DiscordClient,
+    _agent_name: &str,
+) {
+    let channel_id = match &ctx.live_edit {
+        Some(le) => le.channel_id,
+        None => return,
+    };
+
+    if let Some(msg_id) = ctx.thinking_msg_id.take() {
+        if let Ok(id) = msg_id.parse::<u64>() {
+            let _ = discord.delete_message(channel_id, id).await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool progress
+// ---------------------------------------------------------------------------
+
+/// Show a temporary progress message for a tool call.
+pub async fn show_tool_progress(
+    ctx: &mut StreamContext,
+    discord: &DiscordClient,
+    agent_name: &str,
+    tool_name: &str,
+) {
+    if !ctx.clean_tool_messages {
+        return;
+    }
+    let channel_id = match &ctx.live_edit {
+        Some(le) => le.channel_id,
+        None => return,
+    };
+
+    let display_name = claudewire::events::tool_display(tool_name);
+    let content = format!("*{display_name}...*");
+    match discord.send_message(channel_id, &content).await {
+        Ok(resp) => {
+            if let Some(msg_id) = resp.get("id").and_then(|v| v.as_str()) {
+                ctx.tool_progress_msg_ids
+                    .push((channel_id, msg_id.to_string()));
+                debug!(
+                    "TOOL_PROGRESS[{}] {} msg_id={}",
+                    agent_name, tool_name, msg_id
+                );
+            }
+        }
+        Err(e) => {
+            warn!("Failed to post tool progress for {}: {}", tool_name, e);
+        }
+    }
+}
+
+/// Delete all tool progress messages.
+pub async fn delete_tool_progress(
+    ctx: &mut StreamContext,
+    discord: &DiscordClient,
+    _agent_name: &str,
+) {
+    for (channel_id, msg_id) in ctx.tool_progress_msg_ids.drain(..) {
+        if let Ok(id) = msg_id.parse::<u64>() {
+            let _ = discord.delete_message(channel_id, id).await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timing suffix
+// ---------------------------------------------------------------------------
+
+/// Append a timing suffix (e.g., "-# 3.2s") to the last flushed message.
+pub async fn append_timing(
+    ctx: &StreamContext,
+    discord: &DiscordClient,
+    _agent_name: &str,
+) {
+    let elapsed = ctx.start_time.elapsed().as_secs_f64();
+    if elapsed < 0.5 {
+        return; // skip for very fast responses
+    }
+
+    let channel_id = match ctx.last_flushed_channel_id {
+        Some(id) => id,
+        None => return,
+    };
+    let msg_id = match &ctx.last_flushed_msg_id {
+        Some(id) => match id.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => return,
+        },
+        None => return,
+    };
+
+    let timing = if elapsed < 60.0 {
+        format!("{elapsed:.1}s")
+    } else {
+        let mins = elapsed as u64 / 60;
+        let secs = elapsed as u64 % 60;
+        format!("{mins}m{secs}s")
+    };
+
+    let trace_tag = if ctx.trace_id.is_empty() {
+        String::new()
+    } else {
+        format!(" [trace={}]", ctx.trace_id)
+    };
+    let new_content = format!("{}\n-# {timing}{trace_tag}", ctx.last_flushed_content);
+    let _ = discord.edit_message(channel_id, msg_id, &new_content).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +422,9 @@ pub async fn live_edit_tick(
 }
 
 /// Finalize the current live-edit message: remove cursor, post any remaining content.
+///
+/// When streaming is disabled (no `live_edit`), posts the full accumulated text
+/// as one or more regular messages.
 pub async fn live_edit_finalize(
     ctx: &mut StreamContext,
     discord: &DiscordClient,
@@ -220,7 +432,31 @@ pub async fn live_edit_finalize(
 ) {
     let le = match &mut ctx.live_edit {
         Some(le) => le,
-        None => return,
+        None => {
+            // Non-streaming mode: post accumulated text as regular message(s)
+            let text = ctx.text_buffer.trim().to_string();
+            if text.is_empty() {
+                return;
+            }
+            let channel_id = match ctx.channel_id {
+                Some(id) => id,
+                None => return,
+            };
+            for chunk in split_message(&text) {
+                if let Ok(resp) = discord.send_message(channel_id, &chunk).await {
+                    ctx.last_flushed_msg_id = resp
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
+                    ctx.last_flushed_channel_id = Some(channel_id);
+                    ctx.last_flushed_content = chunk;
+                }
+            }
+            ctx.text_buffer.clear();
+            ctx.flush_count += 1;
+            debug!("NON_STREAM_POST[{}] len={}", agent_name, text.len());
+            return;
+        }
     };
 
     let text = ctx.text_buffer.trim_start().to_string();

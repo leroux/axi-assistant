@@ -487,12 +487,11 @@ pub async fn run_scheduler(
                     .to_string();
                 axi_hub::registry::spawn_agent(
                     &hub,
-                    agent.clone(),
-                    default_cwd,
-                    None,
-                    None,
-                    None,
-                    None,
+                    axi_hub::registry::SpawnRequest {
+                        name: agent.clone(),
+                        cwd: default_cwd,
+                        ..Default::default()
+                    },
                 )
                 .await;
             }

@@ -251,6 +251,12 @@ pub async fn handle_command(ctx: &Context, command: &CommandInteraction) {
         "restart-including-bridge" => handle_restart_bridge(ctx, command, &state).await,
         "reset-context" => handle_reset_context(ctx, command, &state).await,
         "send" => handle_send(ctx, command, &state).await,
+        "debug" => handle_debug(ctx, command, &state).await,
+        "plan" => handle_plan(ctx, command, &state).await,
+        "compact" => handle_compact(ctx, command, &state).await,
+        "clear" => handle_clear(ctx, command, &state).await,
+        "claude-usage" => handle_claude_usage(ctx, command, &state).await,
+        "restart-agent" => handle_restart_agent(ctx, command, &state).await,
         _ => {
             let _ = command
                 .create_response(
@@ -725,4 +731,256 @@ async fn handle_restart_bridge(ctx: &Context, command: &CommandInteraction, _sta
     );
     // Exit with code 0 to signal supervisor for full restart
     std::process::exit(0);
+}
+
+async fn handle_debug(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await {
+        n
+    } else {
+        let _ = respond_ephemeral(ctx, command, "Could not determine agent.").await;
+        return;
+    };
+
+    let mode = get_string_option(command, "mode");
+    let hub = state.hub().await;
+    let mut sessions = hub.sessions.lock().await;
+
+    let msg = if let Some(session) = sessions.get_mut(&agent_name) {
+        let new_debug = match mode.as_deref() {
+            Some("on") => true,
+            Some("off") => false,
+            _ => !session.debug,
+        };
+        session.debug = new_debug;
+        format!(
+            "Debug mode for **{agent_name}**: **{}**",
+            if new_debug { "ON" } else { "OFF" }
+        )
+    } else {
+        format!("Agent '{agent_name}' not found.")
+    };
+
+    drop(sessions);
+    let _ = respond(ctx, command, &msg).await;
+}
+
+async fn handle_plan(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await {
+        n
+    } else {
+        let _ = respond_ephemeral(ctx, command, "Could not determine agent.").await;
+        return;
+    };
+
+    let hub = state.hub().await;
+    let mut sessions = hub.sessions.lock().await;
+
+    let msg = if let Some(session) = sessions.get_mut(&agent_name) {
+        session.plan_mode = !session.plan_mode;
+        format!(
+            "Plan mode for **{agent_name}**: **{}**",
+            if session.plan_mode { "ON" } else { "OFF" }
+        )
+    } else {
+        format!("Agent '{agent_name}' not found.")
+    };
+
+    drop(sessions);
+    let _ = respond(ctx, command, &msg).await;
+}
+
+async fn handle_compact(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await {
+        n
+    } else {
+        let _ = respond_ephemeral(ctx, command, "Could not determine agent.").await;
+        return;
+    };
+
+    let hub = state.hub().await;
+    let content = axi_hub::MessageContent::Text("/compact".to_string());
+    axi_hub::lifecycle::wake_or_queue(&hub, &agent_name, content, None).await;
+
+    let _ = respond(ctx, command, &format!("Sent `/compact` to **{agent_name}**.")).await;
+}
+
+async fn handle_clear(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await {
+        n
+    } else {
+        let _ = respond_ephemeral(ctx, command, "Could not determine agent.").await;
+        return;
+    };
+
+    let hub = state.hub().await;
+    let content = axi_hub::MessageContent::Text("/clear".to_string());
+    axi_hub::lifecycle::wake_or_queue(&hub, &agent_name, content, None).await;
+
+    let _ = respond(ctx, command, &format!("Sent `/clear` to **{agent_name}**.")).await;
+}
+
+async fn handle_claude_usage(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let history_count = command
+        .data
+        .options
+        .iter()
+        .find(|o| o.name == "history")
+        .and_then(|o| match &o.value {
+            CommandDataOptionValue::Integer(n) => Some(*n as usize),
+            _ => None,
+        })
+        .unwrap_or(5);
+
+    let hub = state.hub().await;
+    let tracker = hub.rate_limits.lock().await;
+
+    let mut lines = Vec::new();
+
+    // Rate limit status
+    if let Some(until) = tracker.rate_limited_until {
+        let secs = (until - chrono::Utc::now()).num_seconds().max(0) as u64;
+        let remaining = axi_hub::rate_limits::format_time_remaining(secs);
+        lines.push(format!("**Rate limited** — resets in {remaining}"));
+    }
+
+    // Quotas
+    if !tracker.rate_limit_quotas.is_empty() {
+        lines.push("**Quotas:**".to_string());
+        for (key, quota) in &tracker.rate_limit_quotas {
+            let util = quota
+                .utilization
+                .map(|u| format!(" ({:.0}%)", u * 100.0))
+                .unwrap_or_default();
+            lines.push(format!("- {key}: {}{util}", quota.status));
+        }
+    }
+
+    // Session usage
+    if !tracker.session_usage.is_empty() {
+        lines.push(String::new());
+        lines.push("**Session usage:**".to_string());
+        for (name, usage) in &tracker.session_usage {
+            lines.push(format!(
+                "- **{name}**: {} queries, ${:.4}, {} turns",
+                usage.queries, usage.total_cost_usd, usage.total_turns
+            ));
+        }
+    }
+
+    // Recent rate limit history
+    if history_count > 0 {
+        if let Some(ref path) = tracker.rate_limit_history_path {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let recent: Vec<&str> = content.lines().rev().take(history_count).collect();
+                if !recent.is_empty() {
+                    lines.push(String::new());
+                    lines.push(format!("**Recent rate limits ({history_count}):**"));
+                    for line in recent.into_iter().rev() {
+                        lines.push(format!("```{line}```"));
+                    }
+                }
+            }
+        }
+    }
+
+    drop(tracker);
+
+    let msg = if lines.is_empty() {
+        "No usage data yet.".to_string()
+    } else {
+        lines.join("\n")
+    };
+
+    let _ = respond_ephemeral(ctx, command, &msg).await;
+}
+
+async fn handle_restart_agent(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await {
+        n
+    } else {
+        let _ = respond_ephemeral(ctx, command, "Could not determine agent.").await;
+        return;
+    };
+
+    let hub = state.hub().await;
+
+    // Get session ID to preserve context
+    let session_id = {
+        let sessions = hub.sessions.lock().await;
+        sessions.get(&agent_name).and_then(|s| s.session_id.clone())
+    };
+
+    // Build a fresh system prompt
+    let system_prompt = {
+        let sessions = hub.sessions.lock().await;
+        sessions.get(&agent_name).map(|session| {
+            let pack_strs: Option<Vec<&str>> = session
+                .mcp_server_names
+                .as_ref()
+                .map(|v| v.iter().map(String::as_str).collect());
+            let preset = state.prompt_builder.spawned_agent_prompt(
+                &session.cwd,
+                pack_strs.as_deref(),
+                session.compact_instructions.as_deref(),
+            );
+            serde_json::json!({
+                "type": "custom_preset",
+                "preset": preset.preset,
+                "custom_instructions": preset.append,
+            })
+        })
+    };
+
+    axi_hub::registry::rebuild_session(
+        &hub,
+        &agent_name,
+        None,
+        session_id,
+        system_prompt,
+        None,
+    )
+    .await;
+
+    let _ = respond(
+        ctx,
+        command,
+        &format!("Restarted agent **{agent_name}** with fresh system prompt."),
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Response helpers
+// ---------------------------------------------------------------------------
+
+async fn respond(
+    ctx: &Context,
+    command: &CommandInteraction,
+    msg: &str,
+) -> serenity::Result<()> {
+    command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().content(msg),
+            ),
+        )
+        .await
+}
+
+async fn respond_ephemeral(
+    ctx: &Context,
+    command: &CommandInteraction,
+    msg: &str,
+) -> serenity::Result<()> {
+    command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(msg)
+                    .ephemeral(true),
+            ),
+        )
+        .await
 }
