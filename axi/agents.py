@@ -1786,7 +1786,7 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
                 cwd=session.cwd,
                 include_partial_messages=True,
                 stderr=make_stderr_callback(session),
-                disallowed_tools=["Task"],
+                disallowed_tools=[],
                 extra_args={"debug-to-stderr": None},
                 env={"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "100"},
             )
