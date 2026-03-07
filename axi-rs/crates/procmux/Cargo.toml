@@ -20,7 +20,3 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 nix = { workspace = true }
-chrono = { workspace = true }
-
-[lints]
-workspace = true

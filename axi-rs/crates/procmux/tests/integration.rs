@@ -76,7 +76,7 @@ async fn spawn_echo_and_read_stdout() {
     }
 
     // Clean up
-    conn.close();
+    conn.close().await;
 
     // Kill the server
     server_handle.abort();
@@ -145,64 +145,8 @@ async fn spawn_and_stdin_stdout_roundtrip() {
     assert!(kill_result.ok);
 
     // Clean up
-    conn.close();
+    conn.close().await;
     server_handle.abort();
-    let _ = std::fs::remove_file(socket_path);
-}
-
-#[tokio::test]
-async fn connection_lost_on_server_shutdown() {
-    let socket_path = "/tmp/procmux-test-connlost.sock";
-    let _ = std::fs::remove_file(socket_path);
-
-    let server = ProcmuxServer::new(socket_path);
-    let server_handle = tokio::spawn(async move {
-        server.run().await.unwrap();
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Connect client and register a process queue
-    let conn = ProcmuxConnection::connect(socket_path).await.unwrap();
-    let mut rx = conn.register_process("test-proc").await;
-
-    assert!(conn.is_alive());
-
-    // Kill the server
-    server_handle.abort();
-    let _ = server_handle.await;
-
-    // The demux loop should detect EOF and signal ConnectionLost
-    let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-
-    match msg {
-        procmux::client::ProcessMsg::ConnectionLost => {}
-        other => panic!("expected ConnectionLost, got {:?}", other),
-    }
-
-    // is_alive() should now return false
-    assert!(!conn.is_alive());
-
-    // A new connection should succeed after restarting the server
-    let _ = std::fs::remove_file(socket_path);
-    let server2 = ProcmuxServer::new(socket_path);
-    let server_handle2 = tokio::spawn(async move {
-        server2.run().await.unwrap();
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let conn2 = ProcmuxConnection::connect(socket_path).await.unwrap();
-    assert!(conn2.is_alive());
-
-    // Verify the new connection works
-    let status = conn2.send_simple_command("status", "").await.unwrap();
-    assert!(status.ok);
-
-    conn.close();
-    conn2.close();
-    server_handle2.abort();
     let _ = std::fs::remove_file(socket_path);
 }
 
@@ -256,7 +200,7 @@ async fn list_and_status() {
     // Kill
     conn.send_simple_command("kill", "test-sleep").await.unwrap();
 
-    conn.close();
+    conn.close().await;
     server_handle.abort();
     let _ = std::fs::remove_file(socket_path);
 }

@@ -19,11 +19,11 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
-use crate::protocol::{ServerMsg, ClientMsg, StdoutMsg, StderrMsg, ExitMsg, CmdMsg, ResultMsg, StdinMsg};
+use crate::protocol::*;
 
 /// A subprocess managed by procmux.
 struct ManagedProcess {
-    _name: String,
+    name: String,
     child: Child,
     status: ProcessStatus,
     exit_code: Option<i32>,
@@ -70,12 +70,14 @@ pub struct ProcmuxServer {
 impl ProcmuxServer {
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
         let socket_path = socket_path.into();
-        let stdio_log_dir = std::env::var("BRIDGE_STDIO_LOG_DIR").map_or_else(|_| {
+        let stdio_log_dir = std::env::var("BRIDGE_STDIO_LOG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
                 socket_path
                     .parent()
-                    .unwrap_or_else(|| Path::new("."))
+                    .unwrap_or(Path::new("."))
                     .join("logs")
-            }, PathBuf::from);
+            });
         std::fs::create_dir_all(&stdio_log_dir).ok();
 
         let (relay_tx, relay_rx) = mpsc::unbounded_channel();
@@ -129,7 +131,7 @@ impl ProcmuxServer {
                 Some(relay) = self.relay_rx.recv() => {
                     self.handle_relay(relay).await;
                 }
-                () = shutdown.notified() => {
+                _ = shutdown.notified() => {
                     info!("Shutting down...");
                     break;
                 }
@@ -192,9 +194,16 @@ impl ProcmuxServer {
         let (client_msg_tx, mut client_msg_rx) = mpsc::unbounded_channel::<String>();
 
         tokio::spawn(async move {
-            while let Ok(Some(line)) = lines.next_line().await {
-                if client_msg_tx.send(line).is_err() {
-                    break;
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if client_msg_tx.send(line).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) | Err(_) => {
+                        break;
+                    }
                 }
             }
         });
@@ -203,14 +212,17 @@ impl ProcmuxServer {
         loop {
             tokio::select! {
                 msg = client_msg_rx.recv() => {
-                    if let Some(line) = msg { self.handle_client_line(&line).await } else {
-                        // Client disconnected
-                        self.client_tx = None;
-                        for mp in self.procs.values_mut() {
-                            mp.subscribed = false;
+                    match msg {
+                        Some(line) => self.handle_client_line(&line).await,
+                        None => {
+                            // Client disconnected
+                            self.client_tx = None;
+                            for mp in self.procs.values_mut() {
+                                mp.subscribed = false;
+                            }
+                            info!("Client disconnected -- buffering all output");
+                            return;
                         }
-                        info!("Client disconnected -- buffering all output");
-                        return;
                     }
                 }
                 Some(relay) = self.relay_rx.recv() => {
@@ -245,7 +257,7 @@ impl ProcmuxServer {
                         name: name.clone(),
                         data,
                     });
-                    self.relay_or_buffer(&name, msg);
+                    self.relay_or_buffer(&name, msg).await;
                 }
             }
             RelayMsg::Stderr { name, text } => {
@@ -254,54 +266,31 @@ impl ProcmuxServer {
                     name: name.clone(),
                     text,
                 });
-                self.relay_or_buffer(&name, msg);
+                self.relay_or_buffer(&name, msg).await;
             }
             RelayMsg::Exit { name, code } => {
-                // Reap the child process to prevent zombies, and get the real exit code.
-                let final_code = if let Some(mp) = self.procs.get_mut(&name) {
-                    let real_code = if code.is_none() {
-                        // stdout relay sent Exit with no code — wait() to reap and get it
-                        match mp.child.try_wait() {
-                            Ok(Some(status)) => status.code(),
-                            Ok(None) => {
-                                // Still running — wait with timeout
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(5),
-                                    mp.child.wait(),
-                                ).await {
-                                    Ok(Ok(status)) => status.code(),
-                                    _ => code,
-                                }
-                            }
-                            Err(_) => code,
-                        }
-                    } else {
-                        code
-                    };
+                if let Some(mp) = self.procs.get_mut(&name) {
                     mp.status = ProcessStatus::Exited;
-                    mp.exit_code = real_code;
-                    info!("Process '{}' exited (code={:?})", name, real_code);
-                    real_code
-                } else {
-                    code
-                };
+                    mp.exit_code = code;
+                    info!("Process '{}' exited (code={:?})", name, code);
+                }
                 let msg = ServerMsg::Exit(ExitMsg {
                     r#type: None,
                     name: name.clone(),
-                    code: final_code,
+                    code,
                 });
-                self.relay_or_buffer(&name, msg);
+                self.relay_or_buffer(&name, msg).await;
             }
         }
     }
 
-    fn relay_or_buffer(&mut self, name: &str, msg: ServerMsg) {
+    async fn relay_or_buffer(&mut self, name: &str, msg: ServerMsg) {
         let Some(mp) = self.procs.get_mut(name) else {
             return;
         };
         if mp.subscribed {
             // Drop the mutable borrow before calling send_to_client
-            let sent = send_to_client_tx(self.client_tx.as_ref(), &msg);
+            let sent = send_to_client_tx(&self.client_tx, &msg);
             if !sent {
                 let mp = self.procs.get_mut(name).unwrap();
                 mp.subscribed = false;
@@ -325,7 +314,8 @@ impl ProcmuxServer {
             "list" => self.cmd_list().await,
             "status" => self.cmd_status().await,
             other => {
-                self.send_result(ResultMsg::err("", format!("unknown command: {other}")));
+                self.send_result(ResultMsg::err("", format!("unknown command: {}", other)))
+                    .await;
             }
         }
     }
@@ -334,15 +324,15 @@ impl ProcmuxServer {
         let name = &msg.name;
 
         // Already running?
-        if let Some(mp) = self.procs.get(name)
-            && mp.status == ProcessStatus::Running
-        {
-            let pid = mp.child.id().unwrap_or(0);
-            let mut result = ResultMsg::ok(name);
-            result.pid = Some(pid);
-            result.already_running = Some(true);
-            self.send_result(result);
-            return;
+        if let Some(mp) = self.procs.get(name) {
+            if mp.status == ProcessStatus::Running {
+                let pid = mp.child.id().unwrap_or(0);
+                let mut result = ResultMsg::ok(name);
+                result.pid = Some(pid);
+                result.already_running = Some(true);
+                self.send_result(result).await;
+                return;
+            }
         }
 
         // Remove old entry
@@ -359,17 +349,14 @@ impl ProcmuxServer {
         if let Some(cwd) = &msg.cwd {
             cmd.current_dir(cwd);
         }
-        cmd.env_clear();
         cmd.envs(&env);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         // Start new session so we can kill the process group
-        // SAFETY: setsid() is safe to call in pre_exec — it only affects the child process.
-        #[allow(unsafe_code)]
         unsafe {
             cmd.pre_exec(|| {
-                nix::unistd::setsid().map_err(io::Error::other)?;
+                nix::unistd::setsid().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 Ok(())
             });
         }
@@ -377,7 +364,7 @@ impl ProcmuxServer {
         let child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                self.send_result(ResultMsg::err(name, e.to_string()));
+                self.send_result(ResultMsg::err(name, e.to_string())).await;
                 return;
             }
         };
@@ -386,7 +373,7 @@ impl ProcmuxServer {
         info!("Spawned process '{}' (pid={})", name, pid);
 
         let mut mp = ManagedProcess {
-            _name: name.clone(),
+            name: name.clone(),
             child,
             status: ProcessStatus::Running,
             exit_code: None,
@@ -398,16 +385,12 @@ impl ProcmuxServer {
             stderr_task: None,
         };
 
-        // Open log files for stdio capture
-        let stdout_log = open_log_file(&self.stdio_log_dir, name, "stdout");
-        let stderr_log = open_log_file(&self.stdio_log_dir, name, "stderr");
-
         // Spawn stdout relay task
         let stdout = mp.child.stdout.take().expect("stdout pipe");
         let relay_tx = self.relay_tx.clone();
         let proc_name = name.clone();
         mp.stdout_task = Some(tokio::spawn(async move {
-            relay_stdout(proc_name, stdout, relay_tx, stdout_log).await;
+            relay_stdout(proc_name, stdout, relay_tx).await;
         }));
 
         // Spawn stderr relay task
@@ -415,55 +398,55 @@ impl ProcmuxServer {
         let relay_tx = self.relay_tx.clone();
         let proc_name = name.clone();
         mp.stderr_task = Some(tokio::spawn(async move {
-            relay_stderr(proc_name, stderr, relay_tx, stderr_log).await;
+            relay_stderr(proc_name, stderr, relay_tx).await;
         }));
 
         self.procs.insert(name.clone(), mp);
         let mut result = ResultMsg::ok(name);
         result.pid = Some(pid);
-        self.send_result(result);
+        self.send_result(result).await;
     }
 
     async fn cmd_kill(&mut self, name: &str) {
         if !self.procs.contains_key(name) {
-            self.send_result(ResultMsg::err(name, "not found"));
+            self.send_result(ResultMsg::err(name, "not found")).await;
             return;
         }
         self.kill_process(name).await;
         self.procs.remove(name);
-        self.send_result(ResultMsg::ok(name));
+        self.send_result(ResultMsg::ok(name)).await;
     }
 
-    async fn cmd_interrupt(&self, name: &str) {
+    async fn cmd_interrupt(&mut self, name: &str) {
         let Some(mp) = self.procs.get(name) else {
-            self.send_result(ResultMsg::err(name, "not running"));
+            self.send_result(ResultMsg::err(name, "not running")).await;
             return;
         };
         if mp.status != ProcessStatus::Running {
-            self.send_result(ResultMsg::err(name, "not running"));
+            self.send_result(ResultMsg::err(name, "not running")).await;
             return;
         }
         if let Some(pid) = mp.child.id() {
-            match nix::unistd::getpgid(Some(Pid::from_raw(pid.cast_signed()))) {
+            match nix::unistd::getpgid(Some(Pid::from_raw(pid as i32))) {
                 Ok(pgid) => {
                     if let Err(e) = signal::killpg(pgid, Signal::SIGINT) {
-                        self.send_result(ResultMsg::err(name, e.to_string()));
+                        self.send_result(ResultMsg::err(name, e.to_string())).await;
                         return;
                     }
-                    self.send_result(ResultMsg::ok(name));
+                    self.send_result(ResultMsg::ok(name)).await;
                 }
                 Err(e) => {
-                    self.send_result(ResultMsg::err(name, e.to_string()));
+                    self.send_result(ResultMsg::err(name, e.to_string())).await;
                 }
             }
         } else {
-            self.send_result(ResultMsg::err(name, "no pid"));
+            self.send_result(ResultMsg::err(name, "no pid")).await;
         }
     }
 
     async fn cmd_subscribe(&mut self, name: &str) {
         let Some(mp) = self.procs.get_mut(name) else {
-            self.send_result(ResultMsg::err(name, "not found"));
+            self.send_result(ResultMsg::err(name, "not found")).await;
             return;
         };
 
@@ -482,7 +465,7 @@ impl ProcmuxServer {
 
         // Replay buffered messages (no mutable borrow on procs needed)
         for msg in &buffered {
-            send_to_client_tx(self.client_tx.as_ref(), msg);
+            send_to_client_tx(&self.client_tx, msg);
         }
 
         let mut result = ResultMsg::ok(name);
@@ -490,19 +473,19 @@ impl ProcmuxServer {
         result.status = Some(status);
         result.exit_code = exit_code;
         result.idle = Some(idle);
-        self.send_result(result);
+        self.send_result(result).await;
     }
 
     async fn cmd_unsubscribe(&mut self, name: &str) {
         let Some(mp) = self.procs.get_mut(name) else {
-            self.send_result(ResultMsg::err(name, "not found"));
+            self.send_result(ResultMsg::err(name, "not found")).await;
             return;
         };
         mp.subscribed = false;
-        self.send_result(ResultMsg::ok(name));
+        self.send_result(ResultMsg::ok(name)).await;
     }
 
-    async fn cmd_list(&self) {
+    async fn cmd_list(&mut self) {
         let mut agents = serde_json::Map::new();
         for (name, mp) in &self.procs {
             agents.insert(
@@ -522,14 +505,14 @@ impl ProcmuxServer {
         }
         let mut result = ResultMsg::ok("");
         result.agents = Some(serde_json::Value::Object(agents));
-        self.send_result(result);
+        self.send_result(result).await;
     }
 
-    async fn cmd_status(&self) {
+    async fn cmd_status(&mut self) {
         let uptime = self.start_time.elapsed().as_secs();
         let mut result = ResultMsg::ok("");
         result.uptime_seconds = Some(uptime);
-        self.send_result(result);
+        self.send_result(result).await;
     }
 
     // -- stdin forwarding --
@@ -578,24 +561,28 @@ impl ProcmuxServer {
         };
 
         // Try SIGTERM to process group first
-        let pgid = nix::unistd::getpgid(Some(Pid::from_raw(pid.cast_signed())));
+        let pgid = nix::unistd::getpgid(Some(Pid::from_raw(pid as i32)));
         if let Ok(pgid) = pgid {
             signal::killpg(pgid, Signal::SIGTERM).ok();
 
             // Wait up to 5 seconds
-            if let Ok(Ok(status)) = tokio::time::timeout(
+            match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 mp.child.wait(),
             )
-            .await {
-                mp.status = ProcessStatus::Exited;
-                mp.exit_code = status.code();
-            } else {
-                // Escalate to SIGKILL
-                signal::killpg(pgid, Signal::SIGKILL).ok();
-                mp.child.wait().await.ok();
-                mp.status = ProcessStatus::Exited;
-                mp.exit_code = mp.child.try_wait().ok().flatten().and_then(|s| s.code());
+            .await
+            {
+                Ok(Ok(status)) => {
+                    mp.status = ProcessStatus::Exited;
+                    mp.exit_code = status.code();
+                }
+                _ => {
+                    // Escalate to SIGKILL
+                    signal::killpg(pgid, Signal::SIGKILL).ok();
+                    mp.child.wait().await.ok();
+                    mp.status = ProcessStatus::Exited;
+                    mp.exit_code = mp.child.try_wait().ok().flatten().and_then(|s| s.code());
+                }
             }
         }
 
@@ -608,71 +595,32 @@ impl ProcmuxServer {
         }
     }
 
-    fn send_result(&self, result: ResultMsg) {
-        send_to_client_tx(self.client_tx.as_ref(), &ServerMsg::Result(result));
+    async fn send_result(&self, result: ResultMsg) {
+        send_to_client_tx(&self.client_tx, &ServerMsg::Result(result));
     }
 }
 
 /// Send a message to the client via the channel. Returns false if no client.
 fn send_to_client_tx(
-    client_tx: Option<&mpsc::UnboundedSender<Vec<u8>>>,
+    client_tx: &Option<mpsc::UnboundedSender<Vec<u8>>>,
     msg: &ServerMsg,
 ) -> bool {
     let Some(tx) = client_tx else {
         return false;
     };
-    let Ok(mut payload) = serde_json::to_vec(msg) else {
-        return false;
+    let mut payload = match serde_json::to_vec(msg) {
+        Ok(p) => p,
+        Err(_) => return false,
     };
     payload.push(b'\n');
     tx.send(payload).is_ok()
 }
 
-/// Open a log file for stdio capture, rotating if the current file exceeds 10 MB.
-fn open_log_file(log_dir: &Path, name: &str, stream: &str) -> Option<std::fs::File> {
-    const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
-    const MAX_ROTATIONS: u32 = 3;
-
-    let path = log_dir.join(format!("{name}.{stream}.log"));
-
-    if let Ok(meta) = std::fs::metadata(&path)
-        && meta.len() > MAX_LOG_SIZE
-    {
-        for i in (1..MAX_ROTATIONS).rev() {
-            let from = log_dir.join(format!("{name}.{stream}.log.{i}"));
-            let to = log_dir.join(format!("{}.{}.log.{}", name, stream, i + 1));
-            std::fs::rename(&from, &to).ok();
-        }
-        let rotated = log_dir.join(format!("{name}.{stream}.log.1"));
-        std::fs::rename(&path, &rotated).ok();
-    }
-
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        Ok(f) => Some(f),
-        Err(e) => {
-            warn!("Failed to open log file {}: {}", path.display(), e);
-            None
-        }
-    }
-}
-
-/// Write a line to the log file with a timestamp prefix.
-fn log_line(file: &mut std::fs::File, line: &str) {
-    use std::io::Write;
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
-    let _ = writeln!(file, "[{now}] {line}");
-}
-
-/// Relay stdout from a child process. Reads JSON lines and sends them as `RelayMsg`.
+/// Relay stdout from a child process. Reads JSON lines and sends them as RelayMsg.
 async fn relay_stdout(
     name: String,
     stdout: tokio::process::ChildStdout,
     tx: mpsc::UnboundedSender<RelayMsg>,
-    mut log_file: Option<std::fs::File>,
 ) {
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
@@ -684,9 +632,6 @@ async fn relay_stdout(
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;
-                }
-                if let Some(f) = log_file.as_mut() {
-                    log_line(f, &line);
                 }
                 match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(data) => {
@@ -741,23 +686,25 @@ async fn relay_stderr(
     name: String,
     stderr: tokio::process::ChildStderr,
     tx: mpsc::UnboundedSender<RelayMsg>,
-    mut log_file: Option<std::fs::File>,
 ) {
     let reader = BufReader::new(stderr);
     let mut lines = reader.lines();
 
-    while let Ok(Some(line)) = lines.next_line().await {
-        let text = line.trim().to_string();
-        if text.is_empty() {
-            continue;
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let text = line.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                tx.send(RelayMsg::Stderr {
+                    name: name.clone(),
+                    text,
+                })
+                .ok();
+            }
+            Ok(None) => break,
+            Err(_) => break,
         }
-        if let Some(f) = log_file.as_mut() {
-            log_line(f, &text);
-        }
-        tx.send(RelayMsg::Stderr {
-            name: name.clone(),
-            text,
-        })
-        .ok();
     }
 }
