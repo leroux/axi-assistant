@@ -1211,15 +1211,20 @@ async def skip_agent(interaction: discord.Interaction, agent_name: str | None = 
     ).end()
 
     queued = len(session.message_queue)
+    activity = session.activity
+    tool_suffix = ""
+    if activity.phase == "waiting" and activity.tool_name:
+        tool_suffix = f" (was {tool_display(activity.tool_name)})"
+
     try:
         await _interrupt_agent(session)
         if queued:
             msg = (
-                f"*System:* Skipped current query for **{agent_name}**. "
+                f"*System:* Skipped current query for **{agent_name}**{tool_suffix}. "
                 f"{queued} queued message{'s' if queued != 1 else ''} will continue processing."
             )
         else:
-            msg = f"*System:* Skipped current query for **{agent_name}**. No queued messages."
+            msg = f"*System:* Skipped current query for **{agent_name}**{tool_suffix}. No queued messages."
         if trace_tag:
             msg += f"\n-# Skipped turn {trace_tag}"
         await interaction.followup.send(msg)
@@ -1407,15 +1412,20 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
             return True
 
         try:
+            activity = session.activity
+            tool_suffix = ""
+            if activity.phase == "waiting" and activity.tool_name:
+                tool_suffix = f" (was {tool_display(activity.tool_name)})"
+
             await _interrupt_agent(session)
             queued = len(session.message_queue)
             if queued:
                 msg = (
-                    f"Skipped current query for **{agent_name}**. "
+                    f"Skipped current query for **{agent_name}**{tool_suffix}. "
                     f"{queued} queued message{'s' if queued != 1 else ''} will continue processing."
                 )
             else:
-                msg = f"Skipped current query for **{agent_name}**. No queued messages."
+                msg = f"Skipped current query for **{agent_name}**{tool_suffix}. No queued messages."
             await agents.send_system(channel, msg)
         except Exception as e:
             log.exception("Failed to skip agent '%s'", agent_name)

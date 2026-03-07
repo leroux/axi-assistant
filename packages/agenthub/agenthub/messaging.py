@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from opentelemetry import trace
 
 from agenthub import lifecycle
-from claudewire.events import ActivityState, as_stream
+from claudewire.events import ActivityState, as_stream, tool_display
 
 if TYPE_CHECKING:
     from agenthub.hub import AgentHub
@@ -327,18 +327,24 @@ async def receive_user_message(
                 "Will process after compaction completes.",
             )
         else:
+            # Describe what the agent is currently doing
+            activity = session.activity
+            tool_suffix = ""
+            if activity.phase == "waiting" and activity.tool_name:
+                tool_suffix = f" (currently {tool_display(activity.tool_name)})"
+
             interrupted = await graceful_interrupt(session)
             if interrupted:
                 await hub.callbacks.post_system(
                     session.name,
                     f"Agent **{session.name}** is busy — message queued (position {position}). "
-                    "Interrupting current task.",
+                    f"Interrupting current task.{tool_suffix}",
                 )
             else:
                 await hub.callbacks.post_system(
                     session.name,
                     f"Agent **{session.name}** is busy — message queued (position {position}). "
-                    "Will process after current turn.",
+                    f"Will process after current turn.{tool_suffix}",
                 )
         return ReceiveResult(status="queued")
 
