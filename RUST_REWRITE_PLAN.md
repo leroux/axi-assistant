@@ -205,6 +205,7 @@ Each phase produces testable artifacts:
 | axi-bot | 16 MB | Discord bot with event handlers, slash commands, scheduler |
 | axi-supervisor | 1.8 MB | Process supervisor with crash detection and rollback |
 | procmux | 2.8 MB | Process multiplexer (Unix socket server) |
+| discordquery | ~5 MB | Discord message history query CLI |
 
 ## Crate Summary
 
@@ -216,8 +217,9 @@ Each phase produces testable artifacts:
 | axi-hub | lib | 2 | Agent session management, lifecycle, rate limits |
 | axi-mcp | lib | 8 | MCP tool servers — protocol, tools, schedules |
 | axi-bot | bin | 53 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions, todos, frontend, startup |
+| discordquery | bin | 5 | Discord message history query CLI (guilds, channels, history, search, wait) |
 | axi-supervisor | bin | 0 | Process supervisor (tested via integration) |
-| **Total** | | **90** | |
+| **Total** | | **95** | |
 
 ## Migration Plan
 

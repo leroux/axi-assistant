@@ -8,6 +8,7 @@ members = [
     "crates/axi-hub",
     "crates/axi-bot",
     "crates/axi-mcp",
+    "crates/discordquery",
 ]
 
 [workspace.package]
