@@ -76,7 +76,7 @@ async fn spawn_echo_and_read_stdout() {
     }
 
     // Clean up
-    conn.close().await;
+    conn.close();
 
     // Kill the server
     server_handle.abort();
@@ -145,7 +145,7 @@ async fn spawn_and_stdin_stdout_roundtrip() {
     assert!(kill_result.ok);
 
     // Clean up
-    conn.close().await;
+    conn.close();
     server_handle.abort();
     let _ = std::fs::remove_file(socket_path);
 }
@@ -200,7 +200,7 @@ async fn list_and_status() {
     // Kill
     conn.send_simple_command("kill", "test-sleep").await.unwrap();
 
-    conn.close().await;
+    conn.close();
     server_handle.abort();
     let _ = std::fs::remove_file(socket_path);
 }

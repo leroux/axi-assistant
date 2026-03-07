@@ -1,4 +1,4 @@
-//! AgentHub — multi-agent session orchestrator.
+//! `AgentHub` — multi-agent session orchestrator.
 //!
 //! Thin state holder. Logic lives in lifecycle, registry, messaging,
 //! reconnect modules. Methods are thin delegation to module functions.
@@ -18,7 +18,7 @@ use crate::scheduler::Scheduler;
 use crate::tasks::BackgroundTaskSet;
 use crate::types::{AgentSession, MessageContent};
 
-/// Factory: create a client for an agent. (name, resume_session_id) -> client
+/// Factory: create a client for an agent. (name, `resume_session_id`) -> client
 pub type CreateClientFn = Arc<
     dyn Fn(
             &str,

@@ -1,8 +1,8 @@
 //! Process bridge — connects agent sessions to Claude CLI via procmux.
 //!
-//! Creates BridgeTransport instances for each agent, wiring procmux process
+//! Creates `BridgeTransport` instances for each agent, wiring procmux process
 //! I/O to the claudewire stream protocol. Provides factory functions for
-//! the AgentHub's create_client, disconnect_client, and send_query callbacks,
+//! the `AgentHub`'s `create_client`, `disconnect_client`, and `send_query` callbacks,
 //! plus the stream handler that reads events and renders to Discord.
 
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ use crate::streaming;
 // Transport registry
 // ---------------------------------------------------------------------------
 
-/// Shared per-agent BridgeTransport storage.
+/// Shared per-agent `BridgeTransport` storage.
 pub type TransportMap = Mutex<HashMap<String, Arc<Mutex<BridgeTransport>>>>;
 
 /// Create a new empty transport map.
@@ -37,7 +37,7 @@ pub fn new_transport_map() -> TransportMap {
 
 /// Create a Claude CLI session for an agent via procmux.
 ///
-/// Spawns a process, sets up event translation, creates a BridgeTransport,
+/// Spawns a process, sets up event translation, creates a `BridgeTransport`,
 /// and stores it in the transport map.
 pub async fn create_client(
     state: &BotState,
@@ -60,7 +60,7 @@ pub async fn create_client(
         let sessions = hub.sessions.lock().await;
         let session = sessions
             .get(name)
-            .ok_or_else(|| anyhow::anyhow!("Session not found: {}", name))?;
+            .ok_or_else(|| anyhow::anyhow!("Session not found: {name}"))?;
         (
             session.cwd.clone(),
             session.system_prompt.clone(),
@@ -211,7 +211,7 @@ pub async fn send_query(state: &BotState, name: &str, content: &MessageContent) 
         MessageContent::Blocks(blocks) => serde_json::Value::Array(blocks.clone()),
     };
 
-    let msg = events::make_user_message(json_content);
+    let msg = events::make_user_message(&json_content);
     let msg_str = serde_json::to_string(&msg).unwrap_or_default();
 
     let mut transport = transport.lock().await;
@@ -224,7 +224,7 @@ pub async fn send_query(state: &BotState, name: &str, content: &MessageContent) 
 // Stream handler
 // ---------------------------------------------------------------------------
 
-/// Create a StreamHandlerFn that reads claudewire events and renders to Discord.
+/// Create a `StreamHandlerFn` that reads claudewire events and renders to Discord.
 pub fn make_stream_handler(
     state: Arc<BotState>,
 ) -> axi_hub::messaging::StreamHandlerFn {
@@ -235,26 +235,24 @@ pub fn make_stream_handler(
     })
 }
 
-/// Read stream events from a BridgeTransport and render to Discord.
+/// Read stream events from a `BridgeTransport` and render to Discord.
 ///
 /// Returns None on success, Some(error) on transient error (triggers retry).
+#[allow(unused_assignments)]
 async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
     let transport = {
         let transports = state.transports.lock().await;
         transports.get(agent_name).cloned()
     };
 
-    let transport = match transport {
-        Some(t) => t,
-        None => {
-            warn!("No transport for agent '{}', cannot stream", agent_name);
-            return Some("No transport available".to_string());
-        }
+    let transport = if let Some(t) = transport { t } else {
+        warn!("No transport for agent '{}', cannot stream", agent_name);
+        return Some("No transport available".to_string());
     };
 
     let channel_id = state.channel_for_agent(agent_name).await;
     let streaming_enabled = state.config.streaming_discord && channel_id.is_some();
-    let mut ctx = streaming::StreamContext::new(channel_id.map(|c| c.get()), streaming_enabled);
+    let mut ctx = streaming::StreamContext::new(channel_id.map(serenity::all::ChannelId::get), streaming_enabled);
 
     let mut current_block_type: Option<String> = None;
     let mut got_result = false;
@@ -265,17 +263,14 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
             transport.read_message().await
         };
 
-        let event = match event {
-            Some(e) => e,
-            None => {
-                if !got_result {
-                    warn!(
-                        "Stream ended unexpectedly for agent '{}'",
-                        agent_name
-                    );
-                }
-                break;
+        let event = if let Some(e) = event { e } else {
+            if !got_result {
+                warn!(
+                    "Stream ended unexpectedly for agent '{}'",
+                    agent_name
+                );
             }
+            break;
         };
 
         let top_type = event
@@ -398,7 +393,7 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                 // Check for error result
                 if event
                     .get("is_error")
-                    .and_then(|v| v.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
                     let error_msg = event
@@ -536,8 +531,8 @@ fn build_cli_args(
 }
 
 /// Build environment variables for the CLI process.
-fn build_env() -> std::collections::HashMap<String, String> {
-    let mut env = std::collections::HashMap::new();
+fn build_env() -> HashMap<String, String> {
+    let mut env = HashMap::new();
 
     // Pass through relevant env vars
     for key in &[
@@ -567,21 +562,21 @@ async fn record_usage(state: &BotState, agent_name: &str, result: &serde_json::V
         .get("session_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let cost_usd = result.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let num_turns = result.get("num_turns").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cost_usd = result.get("cost_usd").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    let num_turns = result.get("num_turns").and_then(serde_json::Value::as_u64).unwrap_or(0);
     let duration_ms = result
         .get("duration_ms")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let input_tokens = result
         .get("usage")
         .and_then(|u| u.get("input_tokens"))
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let output_tokens = result
         .get("usage")
         .and_then(|u| u.get("output_tokens"))
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
     if !session_id.is_empty() {

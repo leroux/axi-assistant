@@ -82,22 +82,22 @@ pub fn parse_rate_limit_seconds(text: &str) -> u64 {
 
 pub fn format_time_remaining(seconds: u64) -> String {
     if seconds < 60 {
-        format!("{}s", seconds)
+        format!("{seconds}s")
     } else if seconds < 3600 {
         let minutes = seconds / 60;
         let secs = seconds % 60;
         if secs > 0 {
-            format!("{}m {}s", minutes, secs)
+            format!("{minutes}m {secs}s")
         } else {
-            format!("{}m", minutes)
+            format!("{minutes}m")
         }
     } else {
         let hours = seconds / 3600;
         let minutes = (seconds % 3600) / 60;
         if minutes > 0 {
-            format!("{}h {}m", hours, minutes)
+            format!("{hours}h {minutes}m")
         } else {
-            format!("{}h", hours)
+            format!("{hours}h")
         }
     }
 }
@@ -120,17 +120,17 @@ pub fn is_rate_limited(tracker: &mut RateLimitTracker) -> bool {
 pub fn rate_limit_remaining_seconds(tracker: &RateLimitTracker) -> u64 {
     tracker
         .rate_limited_until
-        .map(|until| {
+        .map_or(0, |until| {
             let remaining = (until - Utc::now()).num_seconds();
             remaining.max(0) as u64
         })
-        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
 // Usage recording
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub fn record_session_usage(
     tracker: &mut RateLimitTracker,
     agent_name: &str,

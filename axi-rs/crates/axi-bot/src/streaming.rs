@@ -4,7 +4,6 @@
 //! periodically flushed to Discord via REST message edits. This gives
 //! the user real-time feedback without waiting for the full response.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use axi_config::DiscordClient;
@@ -43,7 +42,7 @@ impl LiveEditState {
             channel_id,
             message_id: None,
             content: String::new(),
-            last_edit_time: Instant::now() - std::time::Duration::from_secs(10), // allow immediate first edit
+            last_edit_time: Instant::now().checked_sub(std::time::Duration::from_secs(10)).unwrap(), // allow immediate first edit
             edit_pending: false,
             finalized: false,
         }
@@ -97,7 +96,7 @@ async fn live_edit_post(
             le.message_id = resp
                 .get("id")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(ToString::to_string);
             le.content = content.to_string();
             le.last_edit_time = Instant::now();
             le.edit_pending = false;
@@ -161,7 +160,7 @@ async fn live_edit_update(
     }
 }
 
-/// Called on each text_delta. Posts or edits the message if enough time has passed.
+/// Called on each `text_delta`. Posts or edits the message if enough time has passed.
 pub async fn live_edit_tick(
     ctx: &mut StreamContext,
     discord: &DiscordClient,
@@ -179,7 +178,7 @@ pub async fn live_edit_tick(
 
     // First message: post immediately
     if le.message_id.is_none() {
-        let content = format!("{}{}", text, STREAMING_CURSOR);
+        let content = format!("{text}{STREAMING_CURSOR}");
         live_edit_post(le, &content, discord, agent_name).await;
         return;
     }
@@ -200,7 +199,7 @@ pub async fn live_edit_tick(
 
         let remainder = ctx.text_buffer.trim_start().to_string();
         if !remainder.is_empty() {
-            let content = format!("{}{}", remainder, STREAMING_CURSOR);
+            let content = format!("{remainder}{STREAMING_CURSOR}");
             live_edit_post(le, &content, discord, agent_name).await;
         }
         return;
@@ -208,7 +207,7 @@ pub async fn live_edit_tick(
 
     // Throttled edit
     if le.last_edit_time.elapsed().as_secs_f64() >= EDIT_INTERVAL {
-        let content = format!("{}{}", text, STREAMING_CURSOR);
+        let content = format!("{text}{STREAMING_CURSOR}");
         live_edit_update(le, &content, discord, agent_name).await;
     }
 }
@@ -242,7 +241,7 @@ pub async fn live_edit_finalize(
                     ctx.last_flushed_msg_id = resp
                         .get("id")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                        .map(ToString::to_string);
                     ctx.last_flushed_channel_id = Some(le.channel_id);
                     ctx.last_flushed_content = chunk.clone();
                 }
@@ -255,7 +254,7 @@ pub async fn live_edit_finalize(
                 ctx.last_flushed_msg_id = resp
                     .get("id")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                    .map(ToString::to_string);
                 ctx.last_flushed_channel_id = Some(le.channel_id);
                 ctx.last_flushed_content = chunk;
             }

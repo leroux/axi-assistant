@@ -14,14 +14,14 @@ use axi_hub::AgentHub;
 use crate::bridge;
 use crate::channels::GuildInfrastructure;
 
-/// Bot state stored in serenity's TypeMap.
+/// Bot state stored in serenity's `TypeMap`.
 pub struct BotState {
     pub config: Config,
     pub discord_client: DiscordClient,
     pub startup_complete: std::sync::atomic::AtomicBool,
     pub start_time: Instant,
 
-    /// AgentHub — initialized during on_ready.
+    /// `AgentHub` — initialized during `on_ready`.
     pub hub: RwLock<Option<Arc<AgentHub>>>,
 
     /// Channel ID → agent name mapping, rebuilt on startup and updated on spawn/kill.
@@ -30,10 +30,10 @@ pub struct BotState {
     /// Agent name → channel ID (reverse lookup).
     pub agent_channels: RwLock<HashMap<String, ChannelId>>,
 
-    /// Guild infrastructure (categories), set during on_ready.
+    /// Guild infrastructure (categories), set during `on_ready`.
     pub infra: RwLock<Option<GuildInfrastructure>>,
 
-    /// Per-agent BridgeTransport storage.
+    /// Per-agent `BridgeTransport` storage.
     pub transports: bridge::TransportMap,
 }
 
@@ -101,5 +101,5 @@ impl BotState {
 }
 
 impl TypeMapKey for BotState {
-    type Value = Arc<BotState>;
+    type Value = Arc<Self>;
 }

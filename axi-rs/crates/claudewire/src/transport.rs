@@ -1,30 +1,30 @@
-//! BridgeTransport — routes messages through a process event queue.
+//! `BridgeTransport` — routes messages through a process event queue.
 //!
 //! Implements the transport interface for Claude CLI communication.
-//! For reconnecting agents, intercepts the initialize control_request and
+//! For reconnecting agents, intercepts the initialize `control_request` and
 //! fakes a success response — the CLI is already initialized.
 //!
 //! This module has NO dependency on procmux. It works with any backend that
-//! sends ProcessEvents through a tokio mpsc channel.
+//! sends `ProcessEvents` through a tokio mpsc channel.
 
 use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::schema::is_bare_stream_type;
-use crate::types::*;
+use crate::types::{ProcessEvent, StdoutEvent, ExitEvent};
 
 /// Callback type for stderr output.
 pub type StderrCallback = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Function to send stdin to a process.
 pub type SendStdinFn =
-    Box<dyn Fn(String, serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> + Send + Sync>;
+    Box<dyn Fn(String, serde_json::Value) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> + Send + Sync>;
 
 /// Function to kill a process.
 pub type KillFn =
-    Box<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> + Send + Sync>;
+    Box<dyn Fn(String) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> + Send + Sync>;
 
-/// BridgeTransport routes Claude CLI messages through a process connection.
+/// `BridgeTransport` routes Claude CLI messages through a process connection.
 pub struct BridgeTransport {
     name: String,
     reconnecting: bool,
@@ -40,6 +40,7 @@ pub struct BridgeTransport {
 }
 
 impl BridgeTransport {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         rx: mpsc::UnboundedReceiver<ProcessEvent>,
@@ -74,36 +75,35 @@ impl BridgeTransport {
         let msg: serde_json::Value = serde_json::from_str(data)?;
 
         // Intercept initialize for reconnecting agents — fake success
-        if self.reconnecting {
-            if let Some("control_request") = msg.get("type").and_then(|v| v.as_str()) {
-                if let Some("initialize") = msg
-                    .get("request")
-                    .and_then(|r| r.get("subtype"))
-                    .and_then(|v| v.as_str())
-                {
-                    let request_id = msg
-                        .get("request_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let fake_response = serde_json::json!({
-                        "type": "control_response",
-                        "response": {
-                            "subtype": "success",
-                            "request_id": request_id,
-                            "response": {},
-                        },
-                    });
-                    if let Some(tx) = &self.tx {
-                        tx.send(ProcessEvent::Stdout(StdoutEvent {
-                            name: self.name.clone(),
-                            data: fake_response,
-                        }))
-                        .ok();
-                    }
-                    self.reconnecting = false;
-                    return Ok(());
-                }
+        if self.reconnecting
+            && msg.get("type").and_then(|v| v.as_str()) == Some("control_request")
+            && msg
+                .get("request")
+                .and_then(|r| r.get("subtype"))
+                .and_then(|v| v.as_str())
+                == Some("initialize")
+        {
+            let request_id = msg
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let fake_response = serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {},
+                },
+            });
+            if let Some(tx) = &self.tx {
+                tx.send(ProcessEvent::Stdout(StdoutEvent {
+                    name: self.name.clone(),
+                    data: fake_response,
+                }))
+                .ok();
             }
+            self.reconnecting = false;
+            return Ok(());
         }
 
         // Inject OTel trace context (placeholder — will wire up later)
@@ -202,15 +202,15 @@ impl BridgeTransport {
         self.ready = false;
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub const fn is_ready(&self) -> bool {
         self.ready
     }
 
-    pub fn cli_exited(&self) -> bool {
+    pub const fn cli_exited(&self) -> bool {
         self.cli_exited
     }
 
-    pub fn exit_code(&self) -> Option<i32> {
+    pub const fn exit_code(&self) -> Option<i32> {
         self.exit_code
     }
 

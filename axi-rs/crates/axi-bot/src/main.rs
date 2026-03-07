@@ -1,7 +1,10 @@
 //! Axi Discord Bot — event handlers, slash commands, and agent orchestration.
 //!
-//! Thin layer wiring Discord events to the AgentHub. All agent state and
+//! Thin layer wiring Discord events to the `AgentHub`. All agent state and
 //! operations live in axi-hub; Discord-specific rendering lives here.
+
+// Many items are written for runtime use but not yet wired — suppress until fully integrated.
+#![allow(dead_code)]
 
 mod bridge;
 mod channels;

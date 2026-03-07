@@ -152,7 +152,7 @@ impl McpServer {
     pub async fn call_tool(&self, name: &str, args: ToolArgs) -> ToolResult {
         match self.handlers.get(name) {
             Some(handler) => handler(args).await,
-            None => ToolResult::error(format!("Unknown tool: {}", name)),
+            None => ToolResult::error(format!("Unknown tool: {name}")),
         }
     }
 }

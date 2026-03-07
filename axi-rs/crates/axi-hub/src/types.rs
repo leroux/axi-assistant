@@ -1,6 +1,6 @@
 //! Core types for agent orchestration.
 //!
-//! AgentSession is a flat data container — lifecycle operations are
+//! `AgentSession` is a flat data container — lifecycle operations are
 //! module-level functions in lifecycle.rs, registry.rs, etc.
 
 use std::collections::VecDeque;
@@ -21,14 +21,14 @@ pub enum MessageContent {
 impl MessageContent {
     pub fn preview(&self, max_len: usize) -> String {
         match self {
-            MessageContent::Text(s) => {
+            Self::Text(s) => {
                 if s.len() <= max_len {
                     s.clone()
                 } else {
                     format!("{}...", &s[..max_len])
                 }
             }
-            MessageContent::Blocks(blocks) => {
+            Self::Blocks(blocks) => {
                 let s = serde_json::to_string(blocks).unwrap_or_default();
                 if s.len() <= max_len {
                     s
@@ -126,7 +126,7 @@ pub struct SessionUsage {
 }
 
 impl SessionUsage {
-    pub fn new(agent_name: String) -> Self {
+    pub const fn new(agent_name: String) -> Self {
         Self {
             agent_name,
             queries: 0,

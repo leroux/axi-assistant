@@ -3,7 +3,7 @@
 //! Leaf module — no project imports. All env vars, paths, constants live here.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// All configuration for the Axi bot, loaded once at startup.
@@ -70,9 +70,7 @@ impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let bot_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let bot_worktrees_dir = bot_dir
-            .parent()
-            .map(|p| p.join("axi-tests"))
-            .unwrap_or_else(|| PathBuf::from("/home/ubuntu/axi-tests"));
+            .parent().map_or_else(|| PathBuf::from("/home/ubuntu/axi-tests"), |p| p.join("axi-tests"));
 
         let home = dirs_home();
         let axi_user_data = env_path("AXI_USER_DATA", home.join("axi-user-data"));
@@ -184,9 +182,7 @@ pub enum ConfigError {
 // ---------------------------------------------------------------------------
 
 fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+    std::env::var("HOME").map_or_else(|_| PathBuf::from("/tmp"), PathBuf::from)
 }
 
 fn env_required(key: &str) -> Result<String, ConfigError> {
@@ -219,12 +215,12 @@ fn env_path_list(key: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn real_path(p: &PathBuf) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())
+fn real_path(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Resolve Discord token from env or test slot reservation.
-fn resolve_discord_token(bot_dir: &PathBuf) -> Result<String, ConfigError> {
+fn resolve_discord_token(bot_dir: &Path) -> Result<String, ConfigError> {
     if let Ok(token) = std::env::var("DISCORD_TOKEN") {
         return Ok(token);
     }
@@ -276,9 +272,9 @@ fn resolve_discord_token(bot_dir: &PathBuf) -> Result<String, ConfigError> {
         .and_then(|b| b.get(token_id))
         .and_then(|b| b.get("token"))
         .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .ok_or_else(|| {
-            ConfigError::TokenError(format!("Cannot resolve token for bot '{}'", token_id))
+            ConfigError::TokenError(format!("Cannot resolve token for bot '{token_id}'"))
         })
 }
 

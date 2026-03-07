@@ -1,6 +1,6 @@
 //! Todo list rendering and persistence for Discord display.
 //!
-//! When an agent calls TodoWrite, the todo list is formatted with status
+//! When an agent calls `TodoWrite`, the todo list is formatted with status
 //! icons and posted to the agent's Discord channel.
 
 use std::path::{Path, PathBuf};
@@ -61,7 +61,7 @@ pub fn format_todo_message(todos: &[Value]) -> String {
 
 /// Path to the persisted todo state file for an agent.
 pub fn todo_path(log_dir: &Path, agent_name: &str) -> PathBuf {
-    log_dir.join(format!("{}.todo.json", agent_name))
+    log_dir.join(format!("{agent_name}.todo.json"))
 }
 
 /// Save todo items to disk.

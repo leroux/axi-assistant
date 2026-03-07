@@ -6,10 +6,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use serenity::all::{
-    ChannelId, ChannelType, CreateChannel, EditChannel, GuildChannel, GuildId,
-    PermissionOverwrite, PermissionOverwriteType, Permissions,
-};
+use serenity::all::{ChannelId, ChannelType, CreateChannel, EditChannel, GuildChannel, GuildId};
 use serenity::client::Context;
 use tracing::{info, warn};
 
@@ -49,7 +46,7 @@ pub fn status_emoji(status: &str) -> Option<&'static str> {
 /// Strip status emoji prefix from a channel name for matching.
 pub fn strip_status_prefix(name: &str) -> &str {
     for emoji in STATUS_PREFIXES.values() {
-        let prefix = format!("{}-", emoji);
+        let prefix = format!("{emoji}-");
         if let Some(stripped) = name.strip_prefix(&prefix) {
             return stripped;
         }
@@ -80,20 +77,20 @@ pub fn format_channel_topic(
 ) -> String {
     let mut parts = vec![format!("cwd: {}", cwd)];
     if let Some(sid) = session_id {
-        parts.push(format!("session: {}", sid));
+        parts.push(format!("session: {sid}"));
     }
     if let Some(hash) = prompt_hash {
-        parts.push(format!("prompt_hash: {}", hash));
+        parts.push(format!("prompt_hash: {hash}"));
     }
     if let Some(atype) = agent_type {
         if atype != "flowcoder" {
-            parts.push(format!("type: {}", atype));
+            parts.push(format!("type: {atype}"));
         }
     }
     parts.join(" | ")
 }
 
-/// Parse cwd, session_id, prompt_hash, and agent_type from a channel topic.
+/// Parse cwd, `session_id`, `prompt_hash`, and `agent_type` from a channel topic.
 pub fn parse_channel_topic(
     topic: Option<&str>,
 ) -> (
@@ -233,7 +230,7 @@ pub async fn ensure_agent_channel(
     let channels = guild_id.channels(&ctx.http).await?;
 
     // Look for existing channel
-    for (_id, channel) in &channels {
+    for channel in channels.values() {
         if channel.kind == ChannelType::Text
             && match_channel_name(&channel.name, &normalized, status_enabled)
         {
@@ -280,7 +277,7 @@ pub async fn set_channel_status(
 ) -> anyhow::Result<()> {
     let normalized = normalize_channel_name(agent_name);
     let new_name = if let Some(emoji) = status_emoji(status) {
-        format!("{}-{}", emoji, normalized)
+        format!("{emoji}-{normalized}")
     } else {
         normalized
     };
@@ -316,7 +313,7 @@ pub async fn reconstruct_channel_map(
         }
 
         // Only process channels in our categories
-        let in_managed_category = channel.parent_id.map_or(false, |parent| {
+        let in_managed_category = channel.parent_id.is_some_and(|parent| {
             Some(parent) == active_category_id
                 || Some(parent) == axi_category_id
                 || Some(parent) == killed_category_id

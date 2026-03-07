@@ -35,6 +35,10 @@ impl BackgroundTaskSet {
         tasks.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
+
     /// Abort all running tasks.
     pub async fn abort_all(&self) {
         let mut tasks = self.tasks.lock().await;

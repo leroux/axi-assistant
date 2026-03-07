@@ -15,9 +15,9 @@ use tracing::{info, warn};
 /// A system prompt preset for Claude Code agents.
 #[derive(Debug, Clone)]
 pub struct SystemPromptPreset {
-    /// Always "claude_code" for preset type.
+    /// Always "`claude_code`" for preset type.
     pub preset: String,
-    /// Appended to the default claude_code system prompt.
+    /// Appended to the default `claude_code` system prompt.
     pub append: String,
 }
 
@@ -46,7 +46,7 @@ fn load_prompt_file(path: &Path, variables: &HashMap<&str, &str>) -> String {
     match std::fs::read_to_string(path) {
         Ok(mut content) => {
             for (key, val) in variables {
-                content = content.replace(&format!("%({})s", key), val);
+                content = content.replace(&format!("%({key})s"), val);
             }
             content
         }
@@ -75,7 +75,7 @@ fn load_packs(packs_dir: &Path, variables: &HashMap<&str, &str>) -> HashMap<Stri
     };
 
     let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
@@ -125,7 +125,7 @@ pub struct PromptBuilder {
 }
 
 impl PromptBuilder {
-    /// Create a new PromptBuilder loading SOUL.md, dev_context.md, and packs/.
+    /// Create a new `PromptBuilder` loading SOUL.md, `dev_context.md`, and packs/.
     pub fn new(bot_dir: &Path, user_data_dir: &Path, worktrees_dir: Option<&Path>) -> Self {
         let variables: HashMap<&str, &str> = HashMap::from([
             ("axi_user_data", user_data_dir.to_str().unwrap_or("")),
@@ -162,7 +162,7 @@ impl PromptBuilder {
             dev_context,
             packs,
             bot_dir: bot_dir.to_path_buf(),
-            worktrees_dir: worktrees_dir.map(|p| p.to_path_buf()),
+            worktrees_dir: worktrees_dir.map(Path::to_path_buf),
             agent_context_prompt,
         }
     }
@@ -245,7 +245,7 @@ impl PromptBuilder {
     }
 }
 
-/// Load SYSTEM_PROMPT.md from an agent's working directory.
+/// Load `SYSTEM_PROMPT.md` from an agent's working directory.
 ///
 /// Returns (content, mode) where mode is "append" (default) or "overwrite".
 fn load_cwd_prompt(cwd: &str) -> Option<(String, String)> {

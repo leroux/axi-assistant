@@ -1,6 +1,6 @@
 //! MCP tool implementations — agent management, Discord, and utilities.
 //!
-//! Each function creates an McpServer with the appropriate tools registered.
+//! Each function creates an `McpServer` with the appropriate tools registered.
 //! Tool handlers capture shared state via Arc closures.
 
 use std::sync::Arc;
@@ -32,12 +32,6 @@ fn get_opt_str(args: &ToolArgs, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn get_bool(args: &ToolArgs, key: &str) -> bool {
-    args.get(key)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
 /// Parse a Discord snowflake ID from a string or number value.
 fn parse_id(args: &ToolArgs, key: &str) -> Option<u64> {
     args.get(key).and_then(|v| {
@@ -53,7 +47,7 @@ fn parse_id(args: &ToolArgs, key: &str) -> Option<u64> {
 /// Create the utils MCP server (date/time, file upload, status).
 pub fn create_utils_server(config: Arc<Config>, discord: Arc<DiscordClient>) -> McpServer {
     let mut server = McpServer::new("utils", "1.0.0");
-    let cfg = config.clone();
+    let cfg = config;
 
     // get_date_and_time
     server.add_tool(
@@ -69,7 +63,7 @@ pub fn create_utils_server(config: Arc<Config>, discord: Arc<DiscordClient>) -> 
                 let now = Local::now();
 
                 // Logical date: if before boundary hour, still "yesterday"
-                let logical = if (now.hour() as u32) < boundary {
+                let logical = if now.hour() < boundary {
                     now - chrono::Duration::days(1)
                 } else {
                     now
@@ -88,7 +82,7 @@ pub fn create_utils_server(config: Arc<Config>, discord: Arc<DiscordClient>) -> 
 
                 let boundary_display = match boundary {
                     0 => "12:00 AM (midnight)".to_string(),
-                    h if h < 12 => format!("{}:00 AM", h),
+                    h if h < 12 => format!("{h}:00 AM"),
                     12 => "12:00 PM (noon)".to_string(),
                     h => format!("{}:00 PM", h - 12),
                 };
@@ -111,7 +105,7 @@ pub fn create_utils_server(config: Arc<Config>, discord: Arc<DiscordClient>) -> 
     );
 
     // discord_send_file
-    let discord_for_file = discord.clone();
+    let discord_for_file = discord;
     server.add_tool(
         "discord_send_file",
         "Send a file as a Discord message attachment to your own channel or another channel. \
@@ -142,7 +136,7 @@ pub fn create_utils_server(config: Arc<Config>, discord: Arc<DiscordClient>) -> 
 
                 let path = std::path::Path::new(&file_path);
                 if !path.is_file() {
-                    return ToolResult::error(format!("Error: file not found: {}", file_path));
+                    return ToolResult::error(format!("Error: file not found: {file_path}"));
                 }
 
                 let filename = path
@@ -161,14 +155,13 @@ pub fn create_utils_server(config: Arc<Config>, discord: Arc<DiscordClient>) -> 
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown");
                                 ToolResult::text(format!(
-                                    "File '{}' sent (msg id: {})",
-                                    filename, msg_id
+                                    "File '{filename}' sent (msg id: {msg_id})"
                                 ))
                             }
-                            Err(e) => ToolResult::error(format!("Error: {}", e)),
+                            Err(e) => ToolResult::error(format!("Error: {e}")),
                         }
                     }
-                    Err(e) => ToolResult::error(format!("Error reading file: {}", e)),
+                    Err(e) => ToolResult::error(format!("Error reading file: {e}")),
                 }
             }
         },
@@ -195,8 +188,7 @@ pub fn create_utils_server(config: Arc<Config>, discord: Arc<DiscordClient>) -> 
             // TODO: set status via hub/channels
             info!("Agent status set to: {}", status);
             ToolResult::text(format!(
-                "Status set to '{}'. Channel will update shortly.",
-                status
+                "Status set to '{status}'. Channel will update shortly."
             ))
         },
     );
@@ -249,7 +241,7 @@ pub fn create_discord_server(discord: Arc<DiscordClient>) -> McpServer {
                     Ok(channels) => ToolResult::text(
                         serde_json::to_string_pretty(&channels).unwrap_or_default(),
                     ),
-                    Err(e) => ToolResult::error(format!("Error: {}", e)),
+                    Err(e) => ToolResult::error(format!("Error: {e}")),
                 }
             }
         },
@@ -277,7 +269,7 @@ pub fn create_discord_server(discord: Arc<DiscordClient>) -> McpServer {
                 };
                 let limit = args
                     .get("limit")
-                    .and_then(|v| v.as_u64())
+                    .and_then(Value::as_u64)
                     .unwrap_or(20)
                     .min(100) as u32;
 
@@ -302,19 +294,19 @@ pub fn create_discord_server(discord: Arc<DiscordClient>) -> McpServer {
                                     .get("timestamp")
                                     .and_then(|t| t.as_str())
                                     .unwrap_or("");
-                                format!("[{}] {}: {}", timestamp, author, content)
+                                format!("[{timestamp}] {author}: {content}")
                             })
                             .collect();
                         ToolResult::text(formatted.join("\n"))
                     }
-                    Err(e) => ToolResult::error(format!("Error: {}", e)),
+                    Err(e) => ToolResult::error(format!("Error: {e}")),
                 }
             }
         },
     );
 
     // discord_send_message
-    let dc3 = discord.clone();
+    let dc3 = discord;
     server.add_tool(
         "discord_send_message",
         "Send a message to a Discord channel OTHER than your own. Your text responses are \
@@ -346,9 +338,9 @@ pub fn create_discord_server(discord: Arc<DiscordClient>) -> McpServer {
                             .get("id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
-                        ToolResult::text(format!("Message sent (id: {})", msg_id))
+                        ToolResult::text(format!("Message sent (id: {msg_id})"))
                     }
-                    Err(e) => ToolResult::error(format!("Error: {}", e)),
+                    Err(e) => ToolResult::error(format!("Error: {e}")),
                 }
             }
         },
@@ -396,8 +388,7 @@ pub fn create_master_server(_config: Arc<Config>) -> McpServer {
             // TODO: delegate to hub.spawn_agent
             info!("Spawn agent request: name={}, prompt_len={}", name, prompt.len());
             ToolResult::text(format!(
-                "Agent '{}' spawn initiated. The agent's channel will be notified when it's ready.",
-                name
+                "Agent '{name}' spawn initiated. The agent's channel will be notified when it's ready."
             ))
         },
     );
@@ -421,7 +412,7 @@ pub fn create_master_server(_config: Arc<Config>) -> McpServer {
 
             // TODO: delegate to hub.end_session
             info!("Kill agent request: {}", name);
-            ToolResult::text(format!("Agent '{}' killed.", name))
+            ToolResult::text(format!("Agent '{name}' killed."))
         },
     );
 
@@ -457,8 +448,7 @@ pub fn create_master_server(_config: Arc<Config>) -> McpServer {
             // TODO: delegate to hub.rebuild_session
             info!("Restart agent request: {}", name);
             ToolResult::text(format!(
-                "Agent '{}' restarted. System prompt refreshed.",
-                name
+                "Agent '{name}' restarted. System prompt refreshed."
             ))
         },
     );
@@ -488,7 +478,7 @@ pub fn create_master_server(_config: Arc<Config>) -> McpServer {
 
             // TODO: delegate to hub.deliver_inter_agent_message
             info!("Inter-agent message to '{}': {}", target, &content[..content.len().min(100)]);
-            ToolResult::text(format!("Message delivered to '{}'.", target))
+            ToolResult::text(format!("Message delivered to '{target}'."))
         },
     );
 
@@ -520,7 +510,7 @@ pub fn create_agent_server(_config: Arc<Config>) -> McpServer {
                 return ToolResult::error("Error: 'name' is required.");
             }
             // TODO: delegate to hub
-            ToolResult::text(format!("Agent '{}' spawn initiated.", name))
+            ToolResult::text(format!("Agent '{name}' spawn initiated."))
         },
     );
 
@@ -539,7 +529,7 @@ pub fn create_agent_server(_config: Arc<Config>) -> McpServer {
             if name.is_empty() {
                 return ToolResult::error("Error: 'name' is required.");
             }
-            ToolResult::text(format!("Agent '{}' killed.", name))
+            ToolResult::text(format!("Agent '{name}' killed."))
         },
     );
 
@@ -558,7 +548,7 @@ pub fn create_agent_server(_config: Arc<Config>) -> McpServer {
             if name.is_empty() {
                 return ToolResult::error("Error: 'name' is required.");
             }
-            ToolResult::text(format!("Agent '{}' restarted.", name))
+            ToolResult::text(format!("Agent '{name}' restarted."))
         },
     );
 

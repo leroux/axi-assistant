@@ -26,3 +26,6 @@ procmux = { path = "../procmux" }
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

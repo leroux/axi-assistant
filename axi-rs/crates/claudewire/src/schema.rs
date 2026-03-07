@@ -155,7 +155,7 @@ pub struct MessageInner {
     pub msg_type: Option<String>,
 }
 
-/// Stream events from the Anthropic API (inside stream_event wrapper).
+/// Stream events from the Anthropic API (inside `stream_event` wrapper).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEvent {
@@ -426,7 +426,7 @@ pub enum OutboundMsg {
 // Bare stream event types
 // ---------------------------------------------------------------------------
 
-/// The CLI emits every stream event twice: once wrapped in stream_event and
+/// The CLI emits every stream event twice: once wrapped in `stream_event` and
 /// once bare. These are the bare types to filter.
 pub const BARE_STREAM_TYPES: &[&str] = &[
     "message_start",

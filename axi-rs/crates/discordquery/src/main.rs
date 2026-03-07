@@ -11,6 +11,7 @@
 //!   discordquery wait <channel_id> [options]
 
 use std::collections::HashSet;
+use std::fmt::Write;
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
@@ -18,7 +19,7 @@ use serde_json::{json, Value};
 
 use axi_config::DiscordClient;
 
-const DISCORD_EPOCH_MS: i64 = 1420070400000;
+const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
 const MAX_PER_REQUEST: u32 = 100;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 500;
@@ -80,7 +81,7 @@ enum QuerySubcommand {
     },
     /// Fetch message history from a channel
     History {
-        /// Channel ID, or guild_id:channel_name
+        /// Channel ID, or `guild_id:channel_name`
         channel: String,
         /// Number of messages (default 50, max 500)
         #[arg(long, default_value_t = DEFAULT_LIMIT)]
@@ -101,7 +102,7 @@ enum QuerySubcommand {
         guild_id: String,
         /// Search term (case-insensitive substring match)
         query: String,
-        /// Limit search to this channel (ID or guild_id:channel_name)
+        /// Limit search to this channel (ID or `guild_id:channel_name`)
         #[arg(long)]
         channel: Option<String>,
         /// Filter by author username
@@ -123,7 +124,7 @@ enum QuerySubcommand {
 // Snowflake / datetime helpers
 // ---------------------------------------------------------------------------
 
-fn datetime_to_snowflake(dt: &DateTime<Utc>) -> u64 {
+const fn datetime_to_snowflake(dt: &DateTime<Utc>) -> u64 {
     let ms = dt.timestamp_millis();
     ((ms - DISCORD_EPOCH_MS) as u64) << 22
 }
@@ -139,7 +140,7 @@ fn resolve_snowflake(value: &str) -> u64 {
         let utc = dt.and_utc();
         return datetime_to_snowflake(&utc);
     }
-    eprintln!("Error: Cannot parse '{}' as snowflake or datetime.", value);
+    eprintln!("Error: Cannot parse '{value}' as snowflake or datetime.");
     std::process::exit(1);
 }
 
@@ -153,23 +154,21 @@ fn format_message(msg: &Value, fmt: &str) -> String {
     let author_name = author["username"].as_str().unwrap_or("unknown");
     let author_id = author["id"].as_str().unwrap_or("");
     let content = msg["content"].as_str().unwrap_or("");
-    let attachments = msg["attachments"].as_array().map(|a| a.len()).unwrap_or(0);
-    let embeds = msg["embeds"].as_array().map(|a| a.len()).unwrap_or(0);
+    let attachments = msg["attachments"].as_array().map_or(0, Vec::len);
+    let embeds = msg["embeds"].as_array().map_or(0, Vec::len);
 
     if fmt == "text" {
-        let ts_str = DateTime::parse_from_rfc3339(ts)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-            .unwrap_or_else(|_| ts.to_string());
-        let mut line = format!("[{}] {}: {}", ts_str, author_name, content);
+        let ts_str = DateTime::parse_from_rfc3339(ts).map_or_else(|_| ts.to_string(), |dt| dt.format("%Y-%m-%d %H:%M UTC").to_string());
+        let mut line = format!("[{ts_str}] {author_name}: {content}");
         let mut extras = Vec::new();
         if attachments > 0 {
-            extras.push(format!("{} attachment(s)", attachments));
+            extras.push(format!("{attachments} attachment(s)"));
         }
         if embeds > 0 {
-            extras.push(format!("{} embed(s)", embeds));
+            extras.push(format!("{embeds} embed(s)"));
         }
         if !extras.is_empty() {
-            line.push_str(&format!("  [{}]", extras.join(", ")));
+            let _ = write!(line, "  [{}]", extras.join(", "));
         }
         line
     } else {
@@ -202,8 +201,7 @@ fn format_wait_message(msg: &Value) -> String {
 fn is_system_message(msg: &Value) -> bool {
     msg["content"]
         .as_str()
-        .map(|c| c.starts_with("*System:*"))
-        .unwrap_or(false)
+        .is_some_and(|c| c.starts_with("*System:*"))
 }
 
 // ---------------------------------------------------------------------------
@@ -217,22 +215,21 @@ async fn resolve_channel(client: &DiscordClient, channel_arg: &str) -> u64 {
 
     let Some((guild_str, channel_name)) = channel_arg.split_once(':') else {
         eprintln!(
-            "Error: '{}' is not a valid channel ID or guild_id:channel_name pair.",
-            channel_arg
+            "Error: '{channel_arg}' is not a valid channel ID or guild_id:channel_name pair."
         );
         std::process::exit(1);
     };
 
     let guild_id: u64 = guild_str.parse().unwrap_or_else(|_| {
-        eprintln!("Error: '{}' is not a valid guild ID.", guild_str);
+        eprintln!("Error: '{guild_str}' is not a valid guild ID.");
         std::process::exit(1);
     });
 
     let channels = client
-        .get(&format!("/guilds/{}/channels", guild_id))
+        .get(&format!("/guilds/{guild_id}/channels"))
         .await
         .unwrap_or_else(|e| {
-            eprintln!("Error fetching channels: {}", e);
+            eprintln!("Error fetching channels: {e}");
             std::process::exit(1);
         });
 
@@ -254,8 +251,7 @@ async fn resolve_channel(client: &DiscordClient, channel_arg: &str) -> u64 {
     }
 
     eprintln!(
-        "Error: No text channel named '{}' in guild {}.",
-        channel_name, guild_id
+        "Error: No text channel named '{channel_name}' in guild {guild_id}."
     );
     std::process::exit(1);
 }
@@ -266,7 +262,7 @@ async fn resolve_channel(client: &DiscordClient, channel_arg: &str) -> u64 {
 
 async fn cmd_guilds(client: &DiscordClient) {
     let guilds = client.list_guilds().await.unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     });
 
@@ -289,7 +285,7 @@ async fn cmd_channels(client: &DiscordClient, guild_id: &str) {
     });
 
     let channels = client.list_channels(gid).await.unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     });
 
@@ -310,8 +306,8 @@ async fn cmd_history(
     let limit = limit.min(MAX_LIMIT);
 
     let mut collected: u32 = 0;
-    let mut before_id = before.map(|b| resolve_snowflake(b));
-    let mut after_id = after.map(|a| resolve_snowflake(a));
+    let mut before_id = before.map(resolve_snowflake);
+    let mut after_id = after.map(resolve_snowflake);
     let use_after = after_id.is_some();
     let mut messages: Vec<Value> = Vec::new();
 
@@ -321,7 +317,7 @@ async fn cmd_history(
             .get_messages(channel_id, batch_size, before_id, after_id)
             .await
             .unwrap_or_else(|e| {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             });
 
@@ -350,6 +346,7 @@ async fn cmd_history(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_search(
     client: &DiscordClient,
     guild_id: &str,
@@ -367,13 +364,13 @@ async fn cmd_search(
 
     let limit = limit.min(MAX_LIMIT);
     let query_lower = query.to_lowercase();
-    let author_lower = author.map(|a| a.to_lowercase());
+    let author_lower = author.map(str::to_lowercase);
 
     let channel_ids: Vec<u64> = if let Some(ch) = channel {
         vec![resolve_channel(client, ch).await]
     } else {
         let channels = client.list_channels(gid).await.unwrap_or_else(|e| {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             std::process::exit(1);
         });
         channels
@@ -448,6 +445,7 @@ async fn cmd_search(
 // Wait command
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_wait(
     client: &DiscordClient,
     channel_id_str: &str,
@@ -471,7 +469,7 @@ async fn cmd_wait(
             .get_messages(channel_id, 1, None, None)
             .await
             .unwrap_or_else(|e| {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             });
         let msgs = result.as_array().cloned().unwrap_or_default();

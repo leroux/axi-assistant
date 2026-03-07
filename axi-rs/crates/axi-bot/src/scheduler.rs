@@ -95,7 +95,7 @@ fn part_matches(part: &str, value: u32, min_val: u32, max_val: u32) -> bool {
         };
         // Check if value is in range and on a step boundary
         if value >= range_start && value <= range_end {
-            return (value - range_start) % step == 0;
+            return (value - range_start).is_multiple_of(step);
         }
         return false;
     }
@@ -138,7 +138,7 @@ fn load_schedules(path: &Path) -> Vec<Value> {
 
 fn save_schedules(path: &Path, entries: &[Value]) {
     if let Ok(data) = serde_json::to_string_pretty(entries) {
-        let _ = std::fs::write(path, format!("{}\n", data));
+        let _ = std::fs::write(path, format!("{data}\n"));
     }
 }
 
@@ -151,7 +151,7 @@ fn load_history(path: &Path) -> Vec<Value> {
 
 fn save_history(path: &Path, entries: &[Value]) {
     if let Ok(data) = serde_json::to_string_pretty(entries) {
-        let _ = std::fs::write(path, format!("{}\n", data));
+        let _ = std::fs::write(path, format!("{data}\n"));
     }
 }
 
@@ -169,7 +169,7 @@ fn schedule_key(entry: &Value) -> String {
     if owner.is_empty() {
         name.to_string()
     } else {
-        format!("{}/{}", owner, name)
+        format!("{owner}/{name}")
     }
 }
 
@@ -226,8 +226,7 @@ fn prune_history(history_path: &Path) {
             h.get("fired_at")
                 .and_then(|v| v.as_str())
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt > cutoff)
-                .unwrap_or(true)
+                .is_none_or(|dt| dt > cutoff)
         })
         .collect();
     save_history(history_path, &pruned);
@@ -281,19 +280,17 @@ pub async fn check_and_fire(
 
         let agent_cwd = entry
             .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
+            .and_then(|v| v.as_str()).map_or_else(|| {
                 user_data_dir
                     .join("agents")
                     .join(&agent_name)
                     .to_string_lossy()
                     .to_string()
-            });
+            }, ToString::to_string);
 
         let reset_context = entry
             .get("reset_context")
-            .and_then(|v| v.as_bool())
+            .and_then(Value::as_bool)
             .unwrap_or(false);
 
         // Recurring (cron) schedule
@@ -345,12 +342,9 @@ pub async fn check_and_fire(
                 Ok(dt) => dt.with_timezone(&Utc),
                 Err(_) => {
                     // Try parsing as naive datetime and assume UTC
-                    match NaiveDateTime::parse_from_str(at_str, "%Y-%m-%dT%H:%M:%S") {
-                        Ok(ndt) => Utc.from_utc_datetime(&ndt),
-                        Err(_) => {
-                            warn!("Invalid datetime for one-off schedule '{}': {}", name, at_str);
-                            continue;
-                        }
+                    if let Ok(ndt) = NaiveDateTime::parse_from_str(at_str, "%Y-%m-%dT%H:%M:%S") { Utc.from_utc_datetime(&ndt) } else {
+                        warn!("Invalid datetime for one-off schedule '{}': {}", name, at_str);
+                        continue;
                     }
                 }
             };
@@ -448,7 +442,7 @@ where
 // High-level: run scheduler with hub integration
 // ---------------------------------------------------------------------------
 
-/// Start the scheduler loop connected to the AgentHub.
+/// Start the scheduler loop connected to the `AgentHub`.
 /// Fired schedules are routed as messages to their owner agent.
 pub async fn run_scheduler(
     state: std::sync::Arc<crate::state::BotState>,
@@ -462,7 +456,7 @@ pub async fn run_scheduler(
             .config
             .idle_reminder_thresholds
             .iter()
-            .map(|d| d.as_secs())
+            .map(std::time::Duration::as_secs)
             .collect(),
         auto_sleep_secs: 14400, // 4 hours default
     };
@@ -471,7 +465,7 @@ pub async fn run_scheduler(
         let hub = hub.clone();
         let prompt = fired.prompt.clone();
         let agent = fired.agent_name.clone();
-        let schedule_name = fired.schedule_name.clone();
+        let schedule_name = fired.schedule_name;
 
         tokio::spawn(async move {
             info!(
@@ -488,7 +482,7 @@ pub async fn run_scheduler(
             if !exists {
                 // Create a session for the agent
                 let default_cwd = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+                    .unwrap_or_else(|_| PathBuf::from("/tmp"))
                     .to_string_lossy()
                     .to_string();
                 axi_hub::registry::spawn_agent(

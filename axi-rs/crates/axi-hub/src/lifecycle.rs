@@ -1,6 +1,6 @@
 //! Agent lifecycle — wake, sleep, and transport management.
 //!
-//! Functions that operate on hub + session. AgentHub delegates to these.
+//! Functions that operate on hub + session. `AgentHub` delegates to these.
 
 use chrono::Utc;
 use tracing::{debug, info, warn};
@@ -137,33 +137,28 @@ pub async fn wake_agent(hub: &AgentHub, name: &str) -> Result<(), HubError> {
                 "Failed to resume agent '{}' with session_id={:?}, retrying fresh",
                 name, resume_id
             );
-            match (hub.create_client)(name, None).await {
-                Ok(client) => {
-                    let mut sessions = hub.sessions.lock().await;
-                    if let Some(session) = sessions.get_mut(name) {
-                        session.client = Some(client);
-                        session.last_failed_resume_id = resume_id.clone();
-                        session.session_id = None;
-                    }
-                    warn!(
-                        "Agent '{}' woke with fresh session (previous context lost)",
-                        name
-                    );
+            if let Ok(client) = (hub.create_client)(name, None).await {
+                let mut sessions = hub.sessions.lock().await;
+                if let Some(session) = sessions.get_mut(name) {
+                    session.client = Some(client);
+                    session.last_failed_resume_id = resume_id.clone();
+                    session.session_id = None;
                 }
-                Err(_) => {
-                    hub.scheduler.release_slot(name).await;
-                    return Err(HubError::Other(format!(
-                        "Failed to create client for agent '{}'",
-                        name
-                    )));
-                }
+                warn!(
+                    "Agent '{}' woke with fresh session (previous context lost)",
+                    name
+                );
+            } else {
+                hub.scheduler.release_slot(name).await;
+                return Err(HubError::Other(format!(
+                    "Failed to create client for agent '{name}'"
+                )));
             }
         }
         Err(_) => {
             hub.scheduler.release_slot(name).await;
             return Err(HubError::Other(format!(
-                "Failed to create client for agent '{}'",
-                name
+                "Failed to create client for agent '{name}'"
             )));
         }
     }

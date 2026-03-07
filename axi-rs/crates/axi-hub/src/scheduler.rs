@@ -134,28 +134,25 @@ impl Scheduler {
 
         // Wait for notification
         let timeout = tokio::time::Duration::from_secs_f64(timeout_secs);
-        match tokio::time::timeout(timeout, notify.notified()).await {
-            Ok(_) => {
-                // Slot was granted by release_slot
-                info!(
-                    "Slot granted to '{}' from wait queue",
-                    agent_name
-                );
-                Ok(())
+        if tokio::time::timeout(timeout, notify.notified()).await == Ok(()) {
+            // Slot was granted by release_slot
+            info!(
+                "Slot granted to '{}' from wait queue",
+                agent_name
+            );
+            Ok(())
+        } else {
+            // Timeout — remove from waiters
+            let slots = self.slots.lock().await;
+            if slots.contains(agent_name) {
+                return Ok(());
             }
-            Err(_) => {
-                // Timeout — remove from waiters
-                let slots = self.slots.lock().await;
-                if slots.contains(agent_name) {
-                    return Ok(());
-                }
-                let mut waiters = self.waiters.lock().await;
-                waiters.retain(|(name, _)| name != agent_name);
-                Err(HubError::ConcurrencyLimit(format!(
-                    "Cannot wake agent '{}': all {} slots busy after {:.0}s wait",
-                    agent_name, self.max_slots, timeout_secs
-                )))
-            }
+            let mut waiters = self.waiters.lock().await;
+            waiters.retain(|(name, _)| name != agent_name);
+            Err(HubError::ConcurrencyLimit(format!(
+                "Cannot wake agent '{}': all {} slots busy after {:.0}s wait",
+                agent_name, self.max_slots, timeout_secs
+            )))
         }
     }
 
@@ -312,8 +309,7 @@ impl Scheduler {
             }
             let busy_secs = s
                 .query_started
-                .map(|qs| (Utc::now() - qs).num_seconds() as f64)
-                .unwrap_or(0.0);
+                .map_or(0.0, |qs| (Utc::now() - qs).num_seconds() as f64);
             if interactive.contains(&s.name) {
                 interactive_candidates.push((busy_secs, s.name.clone()));
             } else {

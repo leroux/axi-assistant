@@ -1,6 +1,7 @@
 //! Crash analysis on startup — reads marker files left by the supervisor
 //! and generates prompts for a crash-handler agent.
 
+use std::fmt::Write;
 use std::path::Path;
 
 use serde_json::Value;
@@ -42,14 +43,10 @@ pub fn crash_notification(marker: &Value, enable_handler: bool) -> String {
     if is_rollback(marker) {
         let exit_code = marker
             .get("exit_code")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+            .and_then(Value::as_i64).map_or_else(|| "unknown".to_string(), |v| v.to_string());
         let uptime = marker
             .get("uptime_seconds")
-            .and_then(|v| v.as_u64())
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "?".to_string());
+            .and_then(Value::as_u64).map_or_else(|| "?".to_string(), |v| v.to_string());
         let timestamp = marker
             .get("timestamp")
             .and_then(|v| v.as_str())
@@ -76,7 +73,7 @@ pub fn crash_notification(marker: &Value, enable_handler: bool) -> String {
             ),
         ];
         if !details.is_empty() {
-            lines.push(format!("Actions taken: {}.", details));
+            lines.push(format!("Actions taken: {details}."));
         }
         if !pre_commit.is_empty()
             && !crashed_commit.is_empty()
@@ -102,14 +99,10 @@ pub fn crash_notification(marker: &Value, enable_handler: bool) -> String {
     } else {
         let exit_code = marker
             .get("exit_code")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+            .and_then(Value::as_i64).map_or_else(|| "unknown".to_string(), |v| v.to_string());
         let uptime = marker
             .get("uptime_seconds")
-            .and_then(|v| v.as_u64())
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "?".to_string());
+            .and_then(Value::as_u64).map_or_else(|| "?".to_string(), |v| v.to_string());
         let timestamp = marker
             .get("timestamp")
             .and_then(|v| v.as_str())
@@ -118,8 +111,7 @@ pub fn crash_notification(marker: &Value, enable_handler: bool) -> String {
         let mut msg = format!(
             "Ow... I think I just blacked out for a second there. What happened?\n\n\
              *System:* **Runtime crash detected.**\n\
-             Axi crashed after {}s of uptime (exit code {}) at {}.",
-            uptime, exit_code, timestamp
+             Axi crashed after {uptime}s of uptime (exit code {exit_code}) at {timestamp}."
         );
         if enable_handler {
             msg.push_str("\nSpawning crash analysis agent...");
@@ -132,14 +124,10 @@ pub fn crash_notification(marker: &Value, enable_handler: bool) -> String {
 pub fn crash_analysis_prompt(marker: &Value) -> String {
     let exit_code = marker
         .get("exit_code")
-        .and_then(|v| v.as_i64())
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .and_then(Value::as_i64).map_or_else(|| "unknown".to_string(), |v| v.to_string());
     let uptime = marker
         .get("uptime_seconds")
-        .and_then(|v| v.as_u64())
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "?".to_string());
+        .and_then(Value::as_u64).map_or_else(|| "?".to_string(), |v| v.to_string());
     let timestamp = marker
         .get("timestamp")
         .and_then(|v| v.as_str())
@@ -166,17 +154,18 @@ pub fn crash_analysis_prompt(marker: &Value) -> String {
 
         let mut rollback_ctx = String::new();
         if !details.is_empty() {
-            rollback_ctx.push_str(&format!("- Rollback actions: {}\n", details));
+            let _ = writeln!(rollback_ctx, "- Rollback actions: {details}");
         }
         if !pre_commit.is_empty()
             && !crashed_commit.is_empty()
             && pre_commit != crashed_commit
         {
-            rollback_ctx.push_str(&format!(
-                "- Reverted from commit {} to {}\n",
+            let _ = writeln!(
+                rollback_ctx,
+                "- Reverted from commit {} to {}",
                 &crashed_commit[..7.min(crashed_commit.len())],
                 &pre_commit[..7.min(pre_commit.len())]
-            ));
+            );
         }
         if details.contains("stashed") {
             rollback_ctx

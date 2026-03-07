@@ -12,7 +12,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
-use crate::protocol::*;
+use crate::protocol::{StdoutMsg, StderrMsg, ExitMsg, ResultMsg, ServerMsg, ClientMsg, CmdMsg, StdinMsg};
 
 /// Message types that flow through per-process queues.
 #[derive(Debug)]
@@ -27,7 +27,7 @@ pub enum ProcessMsg {
 pub struct ProcmuxConnection {
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
     process_queues: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ProcessMsg>>>>,
-    cmd_response_tx: mpsc::UnboundedSender<ResultMsg>,
+    _cmd_response_tx: mpsc::UnboundedSender<ResultMsg>,
     cmd_response_rx: Arc<Mutex<mpsc::UnboundedReceiver<ResultMsg>>>,
     cmd_lock: Arc<Mutex<()>>,
     demux_task: tokio::task::JoinHandle<()>,
@@ -122,7 +122,7 @@ impl ProcmuxConnection {
         Ok(Self {
             writer,
             process_queues,
-            cmd_response_tx,
+            _cmd_response_tx: cmd_response_tx,
             cmd_response_rx,
             cmd_lock: Arc::new(Mutex::new(())),
             demux_task,
@@ -169,7 +169,7 @@ impl ProcmuxConnection {
         }
     }
 
-    /// Send a simple command (no cli_args/env/cwd).
+    /// Send a simple command (no `cli_args/env/cwd`).
     pub async fn send_simple_command(
         &self,
         cmd: &str,
@@ -215,7 +215,7 @@ impl ProcmuxConnection {
     }
 
     /// Close the connection to procmux.
-    pub async fn close(self) {
+    pub fn close(self) {
         self.closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.demux_task.abort();

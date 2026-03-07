@@ -1,7 +1,7 @@
 //! Slash command registration and handlers.
 //!
 //! All Discord slash commands are defined and registered here. Each command
-//! handler extracts bot state from serenity's TypeMap and delegates to
+//! handler extracts bot state from serenity's `TypeMap` and delegates to
 //! the appropriate hub/config module.
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use serenity::all::{
     CreateCommand, CreateCommandOption, CreateInteractionResponse,
     CreateInteractionResponseMessage,
 };
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::state::BotState;
 
@@ -215,12 +215,9 @@ pub async fn register_commands(ctx: &Context) -> anyhow::Result<()> {
 /// Dispatch a slash command interaction to its handler.
 pub async fn handle_command(ctx: &Context, command: &CommandInteraction) {
     let data = ctx.data.read().await;
-    let state = match data.get::<BotState>() {
-        Some(s) => Arc::clone(s),
-        None => {
-            error!("BotState not found in TypeMap");
-            return;
-        }
+    let state = if let Some(s) = data.get::<BotState>() { Arc::clone(s) } else {
+        error!("BotState not found in TypeMap");
+        return;
     };
     drop(data);
 
@@ -280,7 +277,7 @@ fn get_string_option(command: &CommandInteraction, name: &str) -> Option<String>
         .iter()
         .find(|o| o.name == name)
         .and_then(|o| o.value.as_str())
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
 }
 
 fn get_bool_option(command: &CommandInteraction, name: &str) -> Option<bool> {
@@ -303,8 +300,7 @@ async fn handle_ping(ctx: &Context, command: &CommandInteraction, state: &BotSta
     let seconds = uptime_secs % 60;
 
     let msg = format!(
-        "Pong! | Bot uptime: {}h {}m {}s",
-        hours, minutes, seconds
+        "Pong! | Bot uptime: {hours}h {minutes}m {seconds}s"
     );
 
     let _ = command
@@ -324,11 +320,11 @@ async fn handle_model(ctx: &Context, command: &CommandInteraction, state: &BotSt
         let result = axi_config::model::set_model(&state.config.config_path, &model_name);
         match result {
             None => format!("*System:* Model set to **{}**.", model_name.to_lowercase()),
-            Some(e) => format!("*System:* {}", e),
+            Some(e) => format!("*System:* {e}"),
         }
     } else {
         let current = axi_config::model::get_model(&state.config.config_path);
-        format!("Current model: **{}**", current)
+        format!("Current model: **{current}**")
     };
 
     let _ = command
@@ -389,7 +385,7 @@ async fn handle_list_agents(ctx: &Context, command: &CommandInteraction, state: 
             .as_deref()
             .map(|s| format!(" `{}`", &s[..8.min(s.len())]))
             .unwrap_or_default();
-        lines.push(format!("- **{}** — {}{}", name, status, sid));
+        lines.push(format!("- **{name}** — {status}{sid}"));
     }
 
     let msg = format!("**Active agents ({}):**\n{}", sessions.len(), lines.join("\n"));
@@ -408,21 +404,18 @@ async fn handle_list_agents(ctx: &Context, command: &CommandInteraction, state: 
 }
 
 async fn handle_status(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    let agent_name = match resolve_agent_name(command, state).await {
-        Some(n) => n,
-        None => {
-            let _ = command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Could not determine agent. Specify a name or use in an agent channel.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        }
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await { n } else {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Could not determine agent. Specify a name or use in an agent channel.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
     };
 
     let hub = state.hub().await;
@@ -448,7 +441,7 @@ async fn handle_status(ctx: &Context, command: &CommandInteraction, state: &BotS
             agent_name, status, sid, queued, session.cwd
         )
     } else {
-        format!("Agent '{}' not found.", agent_name)
+        format!("Agent '{agent_name}' not found.")
     };
 
     let _ = command
@@ -464,21 +457,18 @@ async fn handle_status(ctx: &Context, command: &CommandInteraction, state: &BotS
 }
 
 async fn handle_kill_agent(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    let agent_name = match resolve_agent_name(command, state).await {
-        Some(n) => n,
-        None => {
-            let _ = command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Could not determine agent.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        }
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await { n } else {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Could not determine agent.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
     };
 
     if agent_name == state.config.master_agent_name {
@@ -508,7 +498,7 @@ async fn handle_kill_agent(ctx: &Context, command: &CommandInteraction, state: &
 
     let sid_text = session_id
         .as_deref()
-        .map(|s| format!(" (session: `{}`)", s))
+        .map(|s| format!(" (session: `{s}`)"))
         .unwrap_or_default();
 
     let _ = command
@@ -516,28 +506,25 @@ async fn handle_kill_agent(ctx: &Context, command: &CommandInteraction, state: &
             &ctx.http,
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
-                    .content(format!("Agent **{}** killed.{}", agent_name, sid_text)),
+                    .content(format!("Agent **{agent_name}** killed.{sid_text}")),
             ),
         )
         .await;
 }
 
 async fn handle_stop(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    let agent_name = match resolve_agent_name(command, state).await {
-        Some(n) => n,
-        None => {
-            let _ = command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Could not determine agent.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        }
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await { n } else {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Could not determine agent.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
     };
 
     let hub = state.hub().await;
@@ -548,28 +535,25 @@ async fn handle_stop(ctx: &Context, command: &CommandInteraction, state: &BotSta
             &ctx.http,
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
-                    .content(format!("Interrupted agent **{}**.", agent_name)),
+                    .content(format!("Interrupted agent **{agent_name}**.")),
             ),
         )
         .await;
 }
 
 async fn handle_skip(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    let agent_name = match resolve_agent_name(command, state).await {
-        Some(n) => n,
-        None => {
-            let _ = command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Could not determine agent.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        }
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await { n } else {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Could not determine agent.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
     };
 
     let hub = state.hub().await;
@@ -582,8 +566,7 @@ async fn handle_skip(ctx: &Context, command: &CommandInteraction, state: &BotSta
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
                     .content(format!(
-                        "Skipped current query for **{}** (will process queue).",
-                        agent_name
+                        "Skipped current query for **{agent_name}** (will process queue)."
                     )),
             ),
         )
@@ -591,21 +574,18 @@ async fn handle_skip(ctx: &Context, command: &CommandInteraction, state: &BotSta
 }
 
 async fn handle_reset_context(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    let agent_name = match resolve_agent_name(command, state).await {
-        Some(n) => n,
-        None => {
-            let _ = command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Could not determine agent.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        }
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await { n } else {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Could not determine agent.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
     };
 
     let cwd = get_string_option(command, "working_dir");
@@ -614,7 +594,7 @@ async fn handle_reset_context(ctx: &Context, command: &CommandInteraction, state
 
     let cwd_msg = cwd
         .as_deref()
-        .map(|c| format!(" (new cwd: `{}`)", c))
+        .map(|c| format!(" (new cwd: `{c}`)"))
         .unwrap_or_default();
 
     let _ = command
@@ -623,8 +603,7 @@ async fn handle_reset_context(ctx: &Context, command: &CommandInteraction, state
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
                     .content(format!(
-                        "Context reset for **{}**.{}",
-                        agent_name, cwd_msg
+                        "Context reset for **{agent_name}**.{cwd_msg}"
                     )),
             ),
         )
@@ -632,38 +611,32 @@ async fn handle_reset_context(ctx: &Context, command: &CommandInteraction, state
 }
 
 async fn handle_send(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    let agent_name = match get_string_option(command, "agent_name") {
-        Some(n) => n,
-        None => {
-            let _ = command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Agent name required.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        }
+    let agent_name = if let Some(n) = get_string_option(command, "agent_name") { n } else {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Agent name required.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
     };
 
-    let message = match get_string_option(command, "message") {
-        Some(m) => m,
-        None => {
-            let _ = command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Message required.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        }
+    let message = if let Some(m) = get_string_option(command, "message") { m } else {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Message required.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
     };
 
     let hub = state.hub().await;
@@ -680,7 +653,7 @@ async fn handle_send(ctx: &Context, command: &CommandInteraction, state: &BotSta
                 &ctx.http,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
-                        .content(format!("Agent '{}' not found.", agent_name))
+                        .content(format!("Agent '{agent_name}' not found."))
                         .ephemeral(true),
                 ),
             )

@@ -1,7 +1,7 @@
 //! Graceful shutdown coordinator for agent sessions.
 //!
-//! - graceful_shutdown(): waits for busy agents to finish, then sleeps all and exits.
-//! - force_shutdown(): skips the wait and exits immediately.
+//! - `graceful_shutdown()`: waits for busy agents to finish, then sleeps all and exits.
+//! - `force_shutdown()`: skips the wait and exits immediately.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,7 +23,7 @@ pub struct ShutdownCoordinator {
 }
 
 impl ShutdownCoordinator {
-    pub fn new(hub: AgentHub, bridge_mode: bool) -> Self {
+    pub const fn new(hub: AgentHub, bridge_mode: bool) -> Self {
         Self {
             hub,
             requested: AtomicBool::new(false),
@@ -40,7 +40,7 @@ impl ShutdownCoordinator {
         sessions
             .iter()
             .filter(|(name, session)| {
-                lifecycle::is_processing(session) && skip.map_or(true, |s| s != name.as_str())
+                lifecycle::is_processing(session) && (skip != Some(name.as_str()))
             })
             .map(|(name, _)| name.clone())
             .collect()
@@ -52,7 +52,7 @@ impl ShutdownCoordinator {
             sessions
                 .iter()
                 .filter(|(name, session)| {
-                    session.client.is_some() && skip.map_or(true, |s| s != name.as_str())
+                    session.client.is_some() && (skip != Some(name.as_str()))
                 })
                 .map(|(name, _)| name.clone())
                 .collect()
@@ -115,8 +115,7 @@ impl ShutdownCoordinator {
                 .post_system(
                     name,
                     &format!(
-                        "Restart pending — waiting for **{}** to finish current task...",
-                        name
+                        "Restart pending — waiting for **{name}** to finish current task..."
                     ),
                 )
                 .await;
@@ -151,8 +150,7 @@ impl ShutdownCoordinator {
                         .post_system(
                             name,
                             &format!(
-                                "Still waiting for **{}** to finish... ({}s)",
-                                name, elapsed
+                                "Still waiting for **{name}** to finish... ({elapsed}s)"
                             ),
                         )
                         .await;

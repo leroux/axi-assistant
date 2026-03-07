@@ -1,8 +1,8 @@
 //! CWD-based tool permission callback.
 //!
-//! Restricts file-writing tools (Edit, Write, MultiEdit, NotebookEdit) to
+//! Restricts file-writing tools (Edit, Write, `MultiEdit`, `NotebookEdit`) to
 //! the agent's working directory and the user data directory. Other tools
-//! are allowed by default, except explicitly forbidden ones (Skill, EnterWorktree, Task).
+//! are allowed by default, except explicitly forbidden ones (Skill, `EnterWorktree`, Task).
 
 use std::path::{Path, PathBuf};
 
@@ -34,7 +34,7 @@ pub struct PermissionConfig {
     pub worktrees_dir: Option<PathBuf>,
     /// Additional writable directories for admin agents.
     pub admin_extra_dirs: Vec<PathBuf>,
-    /// Whether this is a "code agent" (CWD is within bot_dir or worktrees).
+    /// Whether this is a "code agent" (CWD is within `bot_dir` or worktrees).
     pub is_code_agent: bool,
 }
 
@@ -54,8 +54,7 @@ impl PermissionConfig {
         let is_code_agent = starts_with_or_eq(&allowed_cwd, &bot_dir)
             || worktrees_dir
                 .as_ref()
-                .map(|wt| starts_with_or_eq(&allowed_cwd, wt))
-                .unwrap_or(false);
+                .is_some_and(|wt| starts_with_or_eq(&allowed_cwd, wt));
 
         Self {
             allowed_cwd,
@@ -92,8 +91,7 @@ pub fn check_permission(
     // Forbidden tools
     if FORBIDDEN_TOOLS.contains(&tool_name) {
         return PermissionResult::Deny(format!(
-            "{} is not compatible with Discord-based agent mode. Use text messages instead.",
-            tool_name
+            "{tool_name} is not compatible with Discord-based agent mode. Use text messages instead."
         ));
     }
 

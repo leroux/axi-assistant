@@ -1,6 +1,6 @@
 //! Bot startup sequence — hub initialization, channel reconstruction, master agent.
 //!
-//! Called from the on_ready event handler. Sets up the AgentHub, discovers
+//! Called from the `on_ready` event handler. Sets up the `AgentHub`, discovers
 //! guild infrastructure, reconstructs channel-to-agent mappings, registers
 //! the master agent, and starts the cron scheduler.
 
@@ -22,7 +22,7 @@ use crate::crash_handler;
 use crate::frontend::DiscordFrontend;
 use crate::state::BotState;
 
-/// Full startup sequence. Called from on_ready.
+/// Full startup sequence. Called from `on_ready`.
 pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
     info!("Starting initialization sequence...");
 
@@ -78,7 +78,7 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
     let create_client: CreateClientFn = Arc::new(move |name, resume| {
         let state = state_for_create.clone();
         let name = name.to_string();
-        let resume = resume.map(|s| s.to_string());
+        let resume = resume.map(ToString::to_string);
         Box::pin(async move {
             crate::bridge::create_client(&state, &name, resume.as_deref()).await?;
             Ok(Box::new(()) as Box<dyn std::any::Any + Send + Sync>)
@@ -219,7 +219,7 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
     // 6. Check for crash analysis marker
     if state.config.enable_crash_handler {
         if let Some(marker) = crash_handler::consume_marker(
-            &state.config.crash_analysis_marker_path.parent().unwrap_or(std::path::Path::new(".")),
+            state.config.crash_analysis_marker_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
         ) {
             let notification = crash_handler::crash_notification(&marker, true);
             let _ = state

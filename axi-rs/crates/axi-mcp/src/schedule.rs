@@ -35,7 +35,7 @@ fn load_schedules(path: &Path) -> Vec<serde_json::Value> {
 
 fn save_schedules(path: &Path, entries: &[serde_json::Value]) {
     if let Ok(data) = serde_json::to_string_pretty(entries) {
-        let _ = std::fs::write(path, format!("{}\n", data));
+        let _ = std::fs::write(path, format!("{data}\n"));
     }
 }
 
@@ -49,7 +49,7 @@ fn is_valid_name(name: &str) -> bool {
         && name
             .chars()
             .next()
-            .map_or(false, |c| c.is_ascii_alphanumeric())
+            .is_some_and(|c| c.is_ascii_alphanumeric())
 }
 
 /// Get schedules owned by a specific agent.
@@ -115,7 +115,7 @@ pub fn create_schedule_server(
                             item["at"] = at.clone();
                         }
                         if e.get("reset_context")
-                            .and_then(|v| v.as_bool())
+                            .and_then(serde_json::Value::as_bool)
                             .unwrap_or(false)
                         {
                             item["reset_context"] = json!(true);
@@ -132,7 +132,7 @@ pub fn create_schedule_server(
     // schedule_create
     let name2 = agent_name.clone();
     let path2 = schedules_path.clone();
-    let cwd2 = agent_cwd.clone();
+    let cwd2 = agent_cwd;
 
     server.add_tool(
         "schedule_create",
@@ -187,14 +187,13 @@ pub fn create_schedule_server(
                     .to_string();
                 let reset_context = args
                     .get("reset_context")
-                    .and_then(|v| v.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
 
                 // Validate name
                 if !is_valid_name(&sched_name) {
                     return ToolResult::error(format!(
-                        "Invalid name: must be 1-{} chars, lowercase alphanumeric and hyphens.",
-                        MAX_NAME_LEN
+                        "Invalid name: must be 1-{MAX_NAME_LEN} chars, lowercase alphanumeric and hyphens."
                     ));
                 }
 
@@ -226,8 +225,7 @@ pub fn create_schedule_server(
                     e.get("name").and_then(|v| v.as_str()) == Some(&sched_name)
                 }) {
                     return ToolResult::error(format!(
-                        "Schedule '{}' already exists. Delete it first or use a different name.",
-                        sched_name
+                        "Schedule '{sched_name}' already exists. Delete it first or use a different name."
                     ));
                 }
 
@@ -257,8 +255,7 @@ pub fn create_schedule_server(
                         );
                     }
                     // Basic cron validation (5 fields)
-                    let fields: Vec<&str> = cron_expr.split_whitespace().collect();
-                    if fields.len() != 5 {
+                    if cron_expr.split_whitespace().count() != 5 {
                         return ToolResult::error(
                             "Invalid cron expression. Must have 5 fields (min hour dom mon dow).",
                         );
@@ -287,22 +284,21 @@ pub fn create_schedule_server(
                 );
 
                 let type_detail = if stype == "recurring" {
-                    format!("recurring ({})", cron_expr)
+                    format!("recurring ({cron_expr})")
                 } else {
-                    format!("one-off at {}", at_str)
+                    format!("one-off at {at_str}")
                 };
 
                 ToolResult::text(format!(
-                    "Schedule '{}' created successfully ({}).",
-                    sched_name, type_detail
+                    "Schedule '{sched_name}' created successfully ({type_detail})."
                 ))
             }
         },
     );
 
     // schedule_delete
-    let name3 = agent_name.clone();
-    let path3 = schedules_path.clone();
+    let name3 = agent_name;
+    let path3 = schedules_path;
 
     server.add_tool(
         "schedule_delete",
@@ -348,14 +344,13 @@ pub fn create_schedule_server(
 
                 if entries.len() == original_len {
                     return ToolResult::error(format!(
-                        "Schedule '{}' not found.",
-                        sched_name
+                        "Schedule '{sched_name}' not found."
                     ));
                 }
 
                 save_schedules(&path, &entries);
                 info!("Schedule '{}' deleted by agent '{}'", sched_name, name);
-                ToolResult::text(format!("Schedule '{}' deleted.", sched_name))
+                ToolResult::text(format!("Schedule '{sched_name}' deleted."))
             }
         },
     );

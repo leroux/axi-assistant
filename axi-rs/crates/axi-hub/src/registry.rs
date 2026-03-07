@@ -40,8 +40,7 @@ pub async fn end_session(hub: &AgentHub, name: &str) {
         let sessions = hub.sessions.lock().await;
         sessions
             .get(name)
-            .map(|s| s.client.is_some())
-            .unwrap_or(false)
+            .is_some_and(|s| s.client.is_some())
     };
 
     if has_client {

@@ -47,12 +47,12 @@ impl Default for ActivityState {
 impl std::fmt::Display for Phase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Phase::Idle => write!(f, "idle"),
-            Phase::Thinking => write!(f, "thinking"),
-            Phase::Writing => write!(f, "writing"),
-            Phase::ToolUse => write!(f, "tool_use"),
-            Phase::Waiting => write!(f, "waiting"),
-            Phase::Starting => write!(f, "starting"),
+            Self::Idle => write!(f, "idle"),
+            Self::Thinking => write!(f, "thinking"),
+            Self::Writing => write!(f, "writing"),
+            Self::ToolUse => write!(f, "tool_use"),
+            Self::Waiting => write!(f, "waiting"),
+            Self::Starting => write!(f, "starting"),
         }
     }
 }
@@ -63,8 +63,7 @@ pub fn tool_display(name: &str) -> String {
         "Bash" => "running bash command".into(),
         "Read" => "reading file".into(),
         "Write" => "writing file".into(),
-        "Edit" => "editing file".into(),
-        "MultiEdit" => "editing file".into(),
+        "Edit" | "MultiEdit" => "editing file".into(),
         "Glob" => "searching for files".into(),
         "Grep" => "searching code".into(),
         "WebSearch" => "searching the web".into(),
@@ -73,12 +72,12 @@ pub fn tool_display(name: &str) -> String {
         "NotebookEdit" => "editing notebook".into(),
         "TodoWrite" => "updating tasks".into(),
         other => {
-            if let Some(rest) = other.strip_prefix("mcp__") {
-                if let Some((server, tool)) = rest.split_once("__") {
-                    return format!("{}: {}", server, tool);
-                }
+            if let Some(rest) = other.strip_prefix("mcp__")
+                && let Some((server, tool)) = rest.split_once("__")
+            {
+                return format!("{server}: {tool}");
             }
-            format!("using {}", other)
+            format!("using {other}")
         }
     }
 }
@@ -132,11 +131,11 @@ pub fn update_activity(activity: &mut ActivityState, event: &serde_json::Value) 
                     }
                 }
                 "input_json_delta" => {
-                    if activity.tool_input_preview.len() < 200 {
-                        if let Some(pj) = delta.get("partial_json").and_then(|v| v.as_str()) {
-                            activity.tool_input_preview.push_str(pj);
-                            activity.tool_input_preview.truncate(200);
-                        }
+                    if activity.tool_input_preview.len() < 200
+                        && let Some(pj) = delta.get("partial_json").and_then(|v| v.as_str())
+                    {
+                        activity.tool_input_preview.push_str(pj);
+                        activity.tool_input_preview.truncate(200);
                     }
                 }
                 _ => {}
@@ -184,7 +183,7 @@ pub struct ParsedRateLimit {
     pub utilization: Option<f64>,
 }
 
-/// Parse a rate_limit_event from raw JSON.
+/// Parse a `rate_limit_event` from raw JSON.
 pub fn parse_rate_limit_event(data: &serde_json::Value) -> Option<ParsedRateLimit> {
     if data.get("type")?.as_str()? != "rate_limit_event" {
         return None;
@@ -205,7 +204,7 @@ pub fn parse_rate_limit_event(data: &serde_json::Value) -> Option<ParsedRateLimi
             .unwrap_or("unknown")
             .to_string(),
         resets_at,
-        utilization: info.get("utilization").and_then(|v| v.as_f64()),
+        utilization: info.get("utilization").and_then(serde_json::Value::as_f64),
     })
 }
 
@@ -214,7 +213,7 @@ pub fn parse_rate_limit_event(data: &serde_json::Value) -> Option<ParsedRateLimi
 // ---------------------------------------------------------------------------
 
 /// Create a user message for the SDK streaming interface.
-pub fn make_user_message(content: serde_json::Value) -> serde_json::Value {
+pub fn make_user_message(content: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "type": "user",
         "session_id": "",

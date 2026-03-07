@@ -1,6 +1,6 @@
-//! Discord frontend callbacks for AgentHub.
+//! Discord frontend callbacks for `AgentHub`.
 //!
-//! Implements the FrontendCallbacks trait, translating hub lifecycle events
+//! Implements the `FrontendCallbacks` trait, translating hub lifecycle events
 //! into Discord messages (channel posts, status updates, channel moves).
 
 use std::sync::Arc;
@@ -23,7 +23,7 @@ pub struct DiscordFrontend {
 }
 
 impl DiscordFrontend {
-    pub fn new(state: Arc<BotState>) -> Self {
+    pub const fn new(state: Arc<BotState>) -> Self {
         Self { state }
     }
 
@@ -64,17 +64,17 @@ impl FrontendCallbacks for DiscordFrontend {
         let text = text.to_string();
         let state = self.state.clone();
         Box::pin(async move {
-            let frontend = DiscordFrontend::new(state);
+            let frontend = Self::new(state);
             frontend.send_to_agent(&name, &text).await;
         })
     }
 
     fn post_system(&self, agent_name: &str, text: &str) -> CallbackResult {
         let name = agent_name.to_string();
-        let msg = format!("*System:* {}", text);
+        let msg = format!("*System:* {text}");
         let state = self.state.clone();
         Box::pin(async move {
-            let frontend = DiscordFrontend::new(state);
+            let frontend = Self::new(state);
             frontend.send_to_agent(&name, &msg).await;
         })
     }
@@ -157,24 +157,24 @@ impl FrontendCallbacks for DiscordFrontend {
         let state = self.state.clone();
         Box::pin(async move {
             info!("Agent '{}' spawned", name);
-            let frontend = DiscordFrontend::new(state);
+            let frontend = Self::new(state);
             frontend
-                .send_to_agent(&name, &format!("*System:* Agent **{}** spawned.", name))
+                .send_to_agent(&name, &format!("*System:* Agent **{name}** spawned."))
                 .await;
         })
     }
 
     fn on_kill(&self, agent_name: &str, session_id: Option<&str>) -> CallbackResult {
         let name = agent_name.to_string();
-        let sid = session_id.map(|s| s.to_string());
+        let sid = session_id.map(ToString::to_string);
         let state = self.state.clone();
         Box::pin(async move {
             let sid_text = sid
                 .as_deref()
-                .map(|s| format!(" (session: `{}`)", s))
+                .map(|s| format!(" (session: `{s}`)"))
                 .unwrap_or_default();
-            let msg = format!("*System:* Agent **{}** killed.{}", name, sid_text);
-            let frontend = DiscordFrontend::new(state.clone());
+            let msg = format!("*System:* Agent **{name}** killed.{sid_text}");
+            let frontend = Self::new(state.clone());
             frontend.send_to_agent(&name, &msg).await;
 
             // Move channel to Killed category
@@ -215,10 +215,9 @@ impl FrontendCallbacks for DiscordFrontend {
         let state = self.state.clone();
         Box::pin(async move {
             let msg = format!(
-                "*System:* Agent **{}** has been idle for {:.0} minutes.",
-                name, idle_minutes
+                "*System:* Agent **{name}** has been idle for {idle_minutes:.0} minutes."
             );
-            let frontend = DiscordFrontend::new(state);
+            let frontend = Self::new(state);
             frontend.send_to_agent(&name, &msg).await;
         })
     }
@@ -229,13 +228,12 @@ impl FrontendCallbacks for DiscordFrontend {
         Box::pin(async move {
             let msg = if was_mid_task {
                 format!(
-                    "*System:* Agent **{}** reconnected (was mid-task, resuming).",
-                    name
+                    "*System:* Agent **{name}** reconnected (was mid-task, resuming)."
                 )
             } else {
-                format!("*System:* Agent **{}** reconnected.", name)
+                format!("*System:* Agent **{name}** reconnected.")
             };
-            let frontend = DiscordFrontend::new(state);
+            let frontend = Self::new(state);
             frontend.send_to_agent(&name, &msg).await;
         })
     }

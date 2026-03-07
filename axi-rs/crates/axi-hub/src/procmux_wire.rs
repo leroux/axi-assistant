@@ -1,6 +1,6 @@
 //! Adapter wiring procmux to claudewire's process connection protocol.
 //!
-//! Wraps a ProcmuxConnection so claudewire's BridgeTransport can use it
+//! Wraps a `ProcmuxConnection` so claudewire's `BridgeTransport` can use it
 //! without importing procmux directly.
 
 use std::collections::HashMap;
@@ -10,9 +10,8 @@ use claudewire::types::{CommandResult, ExitEvent, ProcessEvent, StderrEvent, Std
 use procmux::client::{ProcessMsg, ProcmuxConnection};
 
 /// Helper: extract agents list from procmux's Option<Value> to Vec<String>.
-fn extract_agents(agents: &Option<serde_json::Value>) -> Vec<String> {
+fn extract_agents(agents: Option<&serde_json::Value>) -> Vec<String> {
     agents
-        .as_ref()
         .and_then(|v| v.as_object())
         .map(|obj| obj.keys().cloned().collect())
         .unwrap_or_default()
@@ -53,7 +52,7 @@ impl ProcmuxProcessConnection {
             replayed: result.replayed,
             status: result.status,
             idle: result.idle,
-            agents: extract_agents(&result.agents),
+            agents: extract_agents(result.agents.as_ref()),
         })
     }
 
@@ -66,7 +65,7 @@ impl ProcmuxProcessConnection {
             replayed: result.replayed,
             status: result.status,
             idle: result.idle,
-            agents: extract_agents(&result.agents),
+            agents: extract_agents(result.agents.as_ref()),
         })
     }
 
@@ -96,7 +95,7 @@ impl ProcmuxProcessConnection {
             replayed: None,
             status: None,
             idle: None,
-            agents: extract_agents(&result.agents),
+            agents: extract_agents(result.agents.as_ref()),
         })
     }
 
@@ -107,7 +106,7 @@ impl ProcmuxProcessConnection {
     pub async fn register_process(
         &self,
         name: &str,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<procmux::client::ProcessMsg> {
+    ) -> tokio::sync::mpsc::UnboundedReceiver<ProcessMsg> {
         self.conn.register_process(name).await
     }
 
@@ -129,7 +128,7 @@ impl ProcmuxProcessConnection {
     }
 }
 
-/// Translate a procmux ProcessMsg to a claudewire ProcessEvent.
+/// Translate a procmux `ProcessMsg` to a claudewire `ProcessEvent`.
 pub fn translate_process_msg(msg: ProcessMsg) -> Option<ProcessEvent> {
     match msg {
         ProcessMsg::Stdout(m) => Some(ProcessEvent::Stdout(StdoutEvent {

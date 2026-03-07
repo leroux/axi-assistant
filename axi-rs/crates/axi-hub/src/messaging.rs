@@ -1,6 +1,6 @@
 //! Message processing — query dispatch, retry, timeout, interrupt.
 //!
-//! StreamHandlerFn: async (agent_name) -> Option<String>
+//! `StreamHandlerFn`: async (`agent_name`) -> Option<String>
 //!   Returns None on success, or an error string for transient errors.
 
 use std::future::Future;
@@ -106,7 +106,7 @@ async fn stream_with_retry(
     );
 
     for attempt in 2..=hub.max_retries {
-        let delay = hub.retry_base_delay * 2f64.powi((attempt - 2) as i32);
+        let delay = hub.retry_base_delay * 2f64.powi((attempt - 2).cast_signed());
         warn!(
             "Agent '{}' retrying in {:.0}s (attempt {}/{})",
             name, delay, attempt, hub.max_retries
@@ -169,13 +169,11 @@ pub async fn handle_query_timeout(hub: &AgentHub, name: &str) {
 
     let msg = if old_session_id.is_some() {
         format!(
-            "Agent **{}** timed out and was recovered (sleeping). Context preserved.",
-            name
+            "Agent **{name}** timed out and was recovered (sleeping). Context preserved."
         )
     } else {
         format!(
-            "Agent **{}** timed out and was reset (sleeping). Context lost.",
-            name
+            "Agent **{name}** timed out and was reset (sleeping). Context lost."
         )
     };
     hub.callbacks.post_system(name, &msg).await;
@@ -207,14 +205,14 @@ pub async fn run_initial_prompt(
         // Wake if needed
         let awake = {
             let sessions = hub.sessions.lock().await;
-            sessions.get(name).map(|s| s.is_awake()).unwrap_or(false)
+            sessions.get(name).is_some_and(super::types::AgentSession::is_awake)
         };
 
         if !awake {
             if let Err(e) = lifecycle::wake_agent(hub, name).await {
                 warn!("Failed to wake agent '{}' for initial prompt: {}", name, e);
                 hub.callbacks
-                    .post_system(name, &format!("Failed to wake agent **{}**.", name))
+                    .post_system(name, &format!("Failed to wake agent **{name}**."))
                     .await;
                 return;
             }
@@ -247,7 +245,7 @@ pub async fn run_initial_prompt(
             Ok(Err(e)) => {
                 warn!("Handler error for '{}' initial prompt: {}", name, e);
                 hub.callbacks
-                    .post_system(name, &format!("Error: {}", e))
+                    .post_system(name, &format!("Error: {e}"))
                     .await;
             }
             Err(_) => {
@@ -265,7 +263,7 @@ pub async fn run_initial_prompt(
 
     debug!("Initial prompt completed for '{}'", name);
     hub.callbacks
-        .post_system(name, &format!("Agent **{}** finished initial task.", name))
+        .post_system(name, &format!("Agent **{name}** finished initial task."))
         .await;
 
     // Process queue or sleep
@@ -311,8 +309,7 @@ pub async fn process_message_queue(
                 let sessions = hub.sessions.lock().await;
                 sessions
                     .get(name)
-                    .map(|s| s.message_queue.len())
-                    .unwrap_or(0)
+                    .map_or(0, |s| s.message_queue.len())
             };
             info!(
                 "Scheduler yield: '{}' deferring {} queued messages",
@@ -327,11 +324,10 @@ pub async fn process_message_queue(
             let sessions = hub.sessions.lock().await;
             sessions
                 .get(name)
-                .map(|s| s.message_queue.len())
-                .unwrap_or(0)
+                .map_or(0, |s| s.message_queue.len())
         };
         let remaining_str = if remaining > 0 {
-            format!(" ({} more in queue)", remaining)
+            format!(" ({remaining} more in queue)")
         } else {
             String::new()
         };
@@ -339,7 +335,7 @@ pub async fn process_message_queue(
         hub.callbacks
             .post_system(
                 name,
-                &format!("Processing queued message{}:\n> {}", remaining_str, preview),
+                &format!("Processing queued message{remaining_str}:\n> {preview}"),
             )
             .await;
 
@@ -354,7 +350,7 @@ pub async fn process_message_queue(
             // Wake if needed
             let awake = {
                 let sessions = hub.sessions.lock().await;
-                sessions.get(name).map(|s| s.is_awake()).unwrap_or(false)
+                sessions.get(name).is_some_and(super::types::AgentSession::is_awake)
             };
 
             if !awake {
@@ -367,8 +363,7 @@ pub async fn process_message_queue(
                         .post_system(
                             name,
                             &format!(
-                                "Failed to wake agent **{}** — dropping queued messages.",
-                                name
+                                "Failed to wake agent **{name}** — dropping queued messages."
                             ),
                         )
                         .await;
@@ -423,22 +418,20 @@ pub async fn deliver_inter_agent_message(
     hub.callbacks
         .post_system(
             target_name,
-            &format!("Message from {}:\n> {}", sender_name, content),
+            &format!("Message from {sender_name}:\n> {content}"),
         )
         .await;
 
     let ts_prefix = Utc::now().format("[%Y-%m-%d %H:%M:%S UTC] ").to_string();
     let prompt = MessageContent::Text(format!(
-        "{}[Inter-agent message from {}] {}",
-        ts_prefix, sender_name, content
+        "{ts_prefix}[Inter-agent message from {sender_name}] {content}"
     ));
 
     let is_busy = {
         let sessions = hub.sessions.lock().await;
         sessions
             .get(target_name)
-            .map(|s| lifecycle::is_processing(s))
-            .unwrap_or(false)
+            .is_some_and(lifecycle::is_processing)
     };
 
     if is_busy {
@@ -458,8 +451,7 @@ pub async fn deliver_inter_agent_message(
         );
         interrupt_session(hub, target_name).await;
         format!(
-            "delivered to busy agent '{}' (interrupted, will process next)",
-            target_name
+            "delivered to busy agent '{target_name}' (interrupted, will process next)"
         )
     } else {
         // Fire and forget — wake and process
@@ -469,6 +461,6 @@ pub async fn deliver_inter_agent_message(
         tokio::spawn(async move {
             run_initial_prompt(&hub_ref, &target, prompt, &handler).await;
         });
-        format!("delivered to agent '{}'", target_name)
+        format!("delivered to agent '{target_name}'")
     }
 }

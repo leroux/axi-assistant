@@ -63,7 +63,7 @@ fn kill_bridge(dir: &Path) {
     let mut killed_pids = Vec::new();
     if let Ok(output) = result {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let my_pid = std::process::id() as i32;
+        let my_pid = std::process::id().cast_signed();
         for pid_str in stdout.split_whitespace() {
             if let Ok(pid) = pid_str.parse::<i32>() {
                 if pid == my_pid {
@@ -109,7 +109,7 @@ fn git(dir: &Path, args: &[&str]) -> std::process::Output {
         .stderr(Stdio::piped())
         .output()
         .unwrap_or_else(|_| {
-            panic!("Failed to run git {:?}", args)
+            panic!("Failed to run git {args:?}")
         })
 }
 
@@ -134,9 +134,7 @@ fn is_git_repo(dir: &Path) -> bool {
 }
 
 fn ensure_default_files(dir: &Path) {
-    let user_data = std::env::var("AXI_USER_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs_home().join("axi-user-data"));
+    let user_data = std::env::var("AXI_USER_DATA").map_or_else(|_| dirs_home().join("axi-user-data"), PathBuf::from);
     fs::create_dir_all(&user_data).ok();
 
     let profile = dir.join("USER_PROFILE.md");
@@ -158,9 +156,7 @@ fn ensure_default_files(dir: &Path) {
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+    std::env::var("HOME").map_or_else(|_| PathBuf::from("/tmp"), PathBuf::from)
 }
 
 fn tail_log(dir: &Path, n: usize) -> String {
@@ -189,6 +185,7 @@ fn write_crash_marker(dir: &Path, code: i32, elapsed: u64, crash_log: &str) {
     .ok();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_rollback_marker(
     dir: &Path,
     code: i32,
@@ -216,7 +213,7 @@ fn write_rollback_marker(
     .ok();
 }
 
-/// Run the bot process, teeing output to LOG_FILE. Returns exit code.
+/// Run the bot process, teeing output to `LOG_FILE`. Returns exit code.
 fn run_bot(dir: &Path) -> i32 {
     let mut child = Command::new("uv")
         .args(["run", "python", "-m", "axi.main"])
@@ -227,7 +224,7 @@ fn run_bot(dir: &Path) -> i32 {
         .expect("Failed to spawn bot process");
 
     // Store child PID for signal forwarding
-    let child_pid = child.id() as i32;
+    let child_pid = child.id().cast_signed();
 
     // Register the child PID so signal handlers can forward
     CHILD_PID.store(child_pid, Ordering::SeqCst);
@@ -269,12 +266,10 @@ fn run_bot(dir: &Path) -> i32 {
     if let Some(stderr) = stderr {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.split(b'\n') {
-                if let Ok(raw_line) = line {
-                    let mut stderr_out = std::io::stderr().lock();
-                    stderr_out.write_all(&raw_line).ok();
-                    stderr_out.write_all(b"\n").ok();
-                }
+            for raw_line in reader.split(b'\n').flatten() {
+                let mut stderr_out = std::io::stderr().lock();
+                stderr_out.write_all(&raw_line).ok();
+                stderr_out.write_all(b"\n").ok();
             }
         });
     }
@@ -321,13 +316,11 @@ fn main() {
     // Determine working directory
     let dir = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
 
     // Use BOT_DIR env var if set, otherwise current directory
-    let dir = std::env::var("BOT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or(dir));
+    let dir = std::env::var("BOT_DIR").map_or_else(|_| std::env::current_dir().unwrap_or(dir), PathBuf::from);
 
     std::env::set_current_dir(&dir).ok();
     ensure_default_files(&dir);
@@ -337,6 +330,9 @@ fn main() {
         .unwrap_or(false);
 
     // Register signal handlers
+    // SAFETY: Signal handlers only set atomic flags (AtomicBool), which is
+    // async-signal-safe. No heap allocation or complex logic in handlers.
+    #[allow(unsafe_code)]
     unsafe {
         nix::libc::signal(nix::libc::SIGTERM, stop_handler as *const () as nix::libc::sighandler_t);
         nix::libc::signal(nix::libc::SIGINT, stop_handler as *const () as nix::libc::sighandler_t);
@@ -473,7 +469,7 @@ fn main() {
                     "push",
                     "--include-untracked",
                     "-m",
-                    &format!("auto-rollback: crash with exit code {}", code),
+                    &format!("auto-rollback: crash with exit code {code}"),
                 ],
             );
             stash_output = String::from_utf8_lossy(&r.stdout).to_string()
@@ -490,7 +486,7 @@ fn main() {
                 &[
                     "rev-list",
                     "--count",
-                    &format!("{}..{}", pre_launch_commit, current_commit),
+                    &format!("{pre_launch_commit}..{current_commit}"),
                 ],
             );
             let new_commits = if r.status.success() {
@@ -505,11 +501,11 @@ fn main() {
                 new_commits
             );
             git(&dir, &["reset", "--hard", &pre_launch_commit]);
-            let detail = format!("{} commit(s) reverted", new_commits);
+            let detail = format!("{new_commits} commit(s) reverted");
             if rollback_details.is_empty() {
                 rollback_details = detail;
             } else {
-                rollback_details = format!("{} + {}", rollback_details, detail);
+                rollback_details = format!("{rollback_details} + {detail}");
             }
         }
 

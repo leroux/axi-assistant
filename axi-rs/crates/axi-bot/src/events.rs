@@ -1,7 +1,7 @@
 //! Discord event handlers — message routing, interaction dispatch, reactions.
 //!
 //! Thin layer that routes Discord events to the appropriate handler. All agent
-//! state lives in the AgentHub; Discord-specific rendering lives here.
+//! state lives in the `AgentHub`; Discord-specific rendering lives here.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serenity::all::{ChannelId, Message, Reaction};
 use serenity::client::Context;
 use serenity::model::application::Interaction;
+use serenity::model::channel::MessageType;
 use tracing::{debug, info, warn};
 
 use crate::commands;
@@ -79,7 +80,6 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
     }
 
     // Only process regular messages and replies
-    use serenity::model::channel::MessageType;
     if msg.kind != MessageType::Regular && msg.kind != MessageType::InlineReply {
         return;
     }
@@ -124,22 +124,19 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
     );
 
     // Look up agent for this channel
-    let agent_name = match state.agent_for_channel(msg.channel_id).await {
-        Some(name) => name,
-        None => {
-            debug!(
-                "No agent mapped to channel {}, ignoring message",
-                msg.channel_id
-            );
-            return;
-        }
+    let agent_name = if let Some(name) = state.agent_for_channel(msg.channel_id).await { name } else {
+        debug!(
+            "No agent mapped to channel {}, ignoring message",
+            msg.channel_id
+        );
+        return;
     };
 
     // Add timestamp prefix (matches Python behavior)
     let ts_prefix = chrono::Utc::now()
         .format("[%Y-%m-%d %H:%M:%S UTC] ")
         .to_string();
-    let message_content = axi_hub::MessageContent::Text(format!("{}{}", ts_prefix, content));
+    let message_content = axi_hub::MessageContent::Text(format!("{ts_prefix}{content}"));
 
     // Mark agent as interactive (user-facing)
     let hub = state.hub().await;
@@ -197,7 +194,7 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
                         warn!("Query error for '{}': {}", name, e);
                         hub_ref
                             .callbacks
-                            .post_system(&name, &format!("Error: {}", e))
+                            .post_system(&name, &format!("Error: {e}"))
                             .await;
                     }
                     Err(_) => {
@@ -356,7 +353,7 @@ pub fn extract_message_content(msg: &Message) -> String {
     // Add embed descriptions
     for embed in &msg.embeds {
         if let Some(desc) = &embed.description {
-            parts.push(format!("[Embed: {}]", desc));
+            parts.push(format!("[Embed: {desc}]"));
         }
     }
 
@@ -378,7 +375,7 @@ fn content_preview(content: &str, max_len: usize) -> String {
 
 /// Send a system message to a channel (prefixed with *System:*).
 pub async fn send_system(ctx: &Context, channel_id: ChannelId, text: &str) {
-    let msg = format!("*System:* {}", text);
+    let msg = format!("*System:* {text}");
     if let Err(e) = channel_id.say(&ctx.http, &msg).await {
         warn!("Failed to send system message to {}: {}", channel_id, e);
     }
@@ -396,11 +393,11 @@ pub async fn send_long(ctx: &Context, channel_id: ChannelId, text: &str) {
     // Split on newlines, grouping into chunks that fit
     let mut chunk = String::new();
     for line in text.lines() {
-        if chunk.len() + line.len() + 1 > MAX_LEN {
-            if !chunk.is_empty() {
-                let _ = channel_id.say(&ctx.http, &chunk).await;
-                chunk.clear();
-            }
+        if chunk.len() + line.len() + 1 > MAX_LEN
+            && !chunk.is_empty()
+        {
+            let _ = channel_id.say(&ctx.http, &chunk).await;
+            chunk.clear();
         }
         if !chunk.is_empty() {
             chunk.push('\n');

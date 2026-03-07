@@ -35,7 +35,7 @@ impl DiscordClient {
                 let mut headers = reqwest::header::HeaderMap::new();
                 headers.insert(
                     reqwest::header::AUTHORIZATION,
-                    reqwest::header::HeaderValue::from_str(&format!("Bot {}", token))
+                    reqwest::header::HeaderValue::from_str(&format!("Bot {token}"))
                         .expect("invalid token"),
                 );
                 headers
@@ -75,7 +75,7 @@ impl DiscordClient {
                 let retry_body = resp.json::<Value>().await.unwrap_or_default();
                 let retry_after = retry_body
                     .get("retry_after")
-                    .and_then(|v| v.as_f64())
+                    .and_then(Value::as_f64)
                     .unwrap_or(1.0);
                 warn!(
                     "Rate limited on {} {}, waiting {:.1}s...",
@@ -134,7 +134,7 @@ impl DiscordClient {
                 let retry_body = resp.json::<Value>().await.unwrap_or_default();
                 let retry_after = retry_body
                     .get("retry_after")
-                    .and_then(|v| v.as_f64())
+                    .and_then(Value::as_f64)
                     .unwrap_or(1.0);
                 tokio::time::sleep(std::time::Duration::from_secs_f64(retry_after)).await;
                 continue;
@@ -188,7 +188,7 @@ impl DiscordClient {
 
     pub async fn list_channels(&self, guild_id: u64) -> Result<Vec<Value>, DiscordError> {
         let channels: Vec<Value> = self
-            .get(&format!("/guilds/{}/channels", guild_id))
+            .get(&format!("/guilds/{guild_id}/channels"))
             .await?
             .as_array()
             .cloned()
@@ -196,7 +196,7 @@ impl DiscordClient {
 
         let categories: HashMap<String, String> = channels
             .iter()
-            .filter(|c| c.get("type").and_then(|t| t.as_u64()) == Some(4))
+            .filter(|c| c.get("type").and_then(Value::as_u64) == Some(4))
             .filter_map(|c| {
                 let id = c.get("id")?.as_str()?.to_string();
                 let name = c.get("name")?.as_str()?.to_string();
@@ -207,11 +207,11 @@ impl DiscordClient {
         let mut result: Vec<Value> = channels
             .iter()
             .filter(|c| {
-                let t = c.get("type").and_then(|t| t.as_u64()).unwrap_or(0);
+                let t = c.get("type").and_then(Value::as_u64).unwrap_or(0);
                 t == 0 || t == 5
             })
             .map(|ch| {
-                let ch_type = if ch.get("type").and_then(|t| t.as_u64()) == Some(5) {
+                let ch_type = if ch.get("type").and_then(Value::as_u64) == Some(5) {
                     "announcement"
                 } else {
                     "text"
@@ -227,12 +227,12 @@ impl DiscordClient {
                     "name": ch.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                     "type": ch_type,
                     "category": category,
-                    "position": ch.get("position").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "position": ch.get("position").and_then(Value::as_u64).unwrap_or(0),
                 })
             })
             .collect();
 
-        result.sort_by_key(|c| c.get("position").and_then(|v| v.as_u64()).unwrap_or(0));
+        result.sort_by_key(|c| c.get("position").and_then(Value::as_u64).unwrap_or(0));
         Ok(result)
     }
 
@@ -254,7 +254,7 @@ impl DiscordClient {
         if let Some(a) = after {
             params.push(("after", a.to_string()));
         }
-        self.get_with_params(&format!("/channels/{}/messages", channel_id), &params)
+        self.get_with_params(&format!("/channels/{channel_id}/messages"), &params)
             .await
     }
 
@@ -264,7 +264,7 @@ impl DiscordClient {
         content: &str,
     ) -> Result<Value, DiscordError> {
         self.post(
-            &format!("/channels/{}/messages", channel_id),
+            &format!("/channels/{channel_id}/messages"),
             serde_json::json!({ "content": content }),
         )
         .await
@@ -277,7 +277,7 @@ impl DiscordClient {
         content: &str,
     ) -> Result<Value, DiscordError> {
         self.patch(
-            &format!("/channels/{}/messages/{}", channel_id, message_id),
+            &format!("/channels/{channel_id}/messages/{message_id}"),
             serde_json::json!({ "content": content }),
         )
         .await
@@ -289,8 +289,7 @@ impl DiscordClient {
         message_id: u64,
     ) -> Result<(), DiscordError> {
         self.delete(&format!(
-            "/channels/{}/messages/{}",
-            channel_id, message_id
+            "/channels/{channel_id}/messages/{message_id}"
         ))
         .await
     }
@@ -334,8 +333,7 @@ impl DiscordClient {
     ) -> Result<(), DiscordError> {
         let encoded = urlencoding::encode(emoji);
         self.put(&format!(
-            "/channels/{}/messages/{}/reactions/{}/@me",
-            channel_id, message_id, encoded
+            "/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me"
         ))
         .await
     }
@@ -348,8 +346,7 @@ impl DiscordClient {
     ) -> Result<(), DiscordError> {
         let encoded = urlencoding::encode(emoji);
         self.delete(&format!(
-            "/channels/{}/messages/{}/reactions/{}/@me",
-            channel_id, message_id, encoded
+            "/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me"
         ))
         .await
     }
@@ -365,7 +362,7 @@ impl DiscordClient {
         channel_type: u32,
     ) -> Result<Value, DiscordError> {
         self.post(
-            &format!("/guilds/{}/channels", guild_id),
+            &format!("/guilds/{guild_id}/channels"),
             serde_json::json!({ "name": name, "type": channel_type }),
         )
         .await
@@ -377,7 +374,7 @@ impl DiscordClient {
         name: &str,
     ) -> Result<Value, DiscordError> {
         self.patch(
-            &format!("/channels/{}", channel_id),
+            &format!("/channels/{channel_id}"),
             serde_json::json!({ "name": name }),
         )
         .await
@@ -389,7 +386,7 @@ impl DiscordClient {
         topic: &str,
     ) -> Result<Value, DiscordError> {
         self.patch(
-            &format!("/channels/{}", channel_id),
+            &format!("/channels/{channel_id}"),
             serde_json::json!({ "topic": topic }),
         )
         .await
@@ -401,7 +398,7 @@ impl DiscordClient {
         category_id: u64,
     ) -> Result<Value, DiscordError> {
         self.patch(
-            &format!("/channels/{}", channel_id),
+            &format!("/channels/{channel_id}"),
             serde_json::json!({ "parent_id": category_id.to_string() }),
         )
         .await
@@ -413,7 +410,7 @@ impl DiscordClient {
         name: &str,
     ) -> Result<Option<Value>, DiscordError> {
         let channels: Vec<Value> = self
-            .get(&format!("/guilds/{}/channels", guild_id))
+            .get(&format!("/guilds/{guild_id}/channels"))
             .await?
             .as_array()
             .cloned()
@@ -421,7 +418,7 @@ impl DiscordClient {
 
         let lower_name = name.to_lowercase();
         Ok(channels.into_iter().find(|ch| {
-            let t = ch.get("type").and_then(|v| v.as_u64()).unwrap_or(0);
+            let t = ch.get("type").and_then(Value::as_u64).unwrap_or(0);
             let ch_name = ch
                 .get("name")
                 .and_then(|v| v.as_str())
