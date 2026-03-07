@@ -1,7 +1,7 @@
 //! Process IO protocol for claudewire.
 //!
 //! Defines event types and the command result struct that any process
-//! transport uses. The `ProcessConnection` trait is defined here but
+//! transport uses. The ProcessConnection trait is defined here but
 //! implemented by backends (procmux adapter, direct subprocess, etc.).
 
 // ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ pub struct CommandResult {
 }
 
 impl CommandResult {
-    pub const fn success() -> Self {
+    pub fn success() -> Self {
         Self {
             ok: true,
             error: None,

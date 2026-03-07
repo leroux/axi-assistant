@@ -22,11 +22,6 @@ pub enum ContentBlock {
     ToolUse(ToolUseBlock),
     #[serde(rename = "thinking")]
     Thinking(ThinkingBlock),
-    #[serde(rename = "server_tool_use")]
-    ServerToolUse(ServerToolUseBlock),
-    /// Unknown content block types (`web_search_20250305`, `mcp_tools`, etc.).
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,15 +44,6 @@ pub struct ThinkingBlock {
     pub signature: String,
 }
 
-/// Server-side tool use (e.g. web search).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerToolUseBlock {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub input: serde_json::Value,
-}
-
 // ---------------------------------------------------------------------------
 // Deltas (inside content_block_delta)
 // ---------------------------------------------------------------------------
@@ -73,9 +59,6 @@ pub enum Delta {
     Thinking(ThinkingDelta),
     #[serde(rename = "signature_delta")]
     Signature(SignatureDelta),
-    /// Unknown delta types (`citations_delta`, etc.).
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,7 +155,7 @@ pub struct MessageInner {
     pub msg_type: Option<String>,
 }
 
-/// Stream events from the Anthropic API (inside `stream_event` wrapper).
+/// Stream events from the Anthropic API (inside stream_event wrapper).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEvent {
@@ -408,42 +391,6 @@ pub enum InboundMsg {
         uuid: String,
         session_id: String,
     },
-    #[serde(rename = "tool_progress")]
-    ToolProgress {
-        tool_use_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tool_name: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        elapsed_time_seconds: Option<f64>,
-        #[serde(flatten)]
-        extra: HashMap<String, serde_json::Value>,
-    },
-    #[serde(rename = "tool_use_summary")]
-    ToolUseSummary {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        summary: Option<String>,
-        #[serde(flatten)]
-        extra: HashMap<String, serde_json::Value>,
-    },
-    #[serde(rename = "keep_alive")]
-    KeepAlive {},
-    #[serde(rename = "auth_status")]
-    AuthStatus {
-        #[serde(flatten)]
-        extra: HashMap<String, serde_json::Value>,
-    },
-    #[serde(rename = "prompt_suggestion")]
-    PromptSuggestion {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        suggestion: Option<String>,
-        #[serde(flatten)]
-        extra: HashMap<String, serde_json::Value>,
-    },
-    #[serde(rename = "control_cancel_request")]
-    ControlCancelRequest {
-        #[serde(flatten)]
-        extra: HashMap<String, serde_json::Value>,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -473,17 +420,13 @@ pub enum OutboundMsg {
     ControlResponse {
         response: ControlResponseInner,
     },
-    #[serde(rename = "update_environment_variables")]
-    UpdateEnvironmentVariables {
-        variables: HashMap<String, String>,
-    },
 }
 
 // ---------------------------------------------------------------------------
 // Bare stream event types
 // ---------------------------------------------------------------------------
 
-/// The CLI emits every stream event twice: once wrapped in `stream_event` and
+/// The CLI emits every stream event twice: once wrapped in stream_event and
 /// once bare. These are the bare types to filter.
 pub const BARE_STREAM_TYPES: &[&str] = &[
     "message_start",
@@ -703,99 +646,6 @@ mod tests {
         assert!(is_bare_stream_type("message_start"));
         assert!(!is_bare_stream_type("stream_event"));
         assert!(!is_bare_stream_type("result"));
-    }
-
-    #[test]
-    fn parse_tool_progress() {
-        let json = r#"{
-            "type": "tool_progress",
-            "tool_use_id": "toolu_123",
-            "tool_name": "Bash",
-            "elapsed_time_seconds": 12.5,
-            "session_id": "sess-1",
-            "uuid": "u1"
-        }"#;
-        let msg: InboundMsg = serde_json::from_str(json).unwrap();
-        match msg {
-            InboundMsg::ToolProgress {
-                tool_use_id,
-                tool_name,
-                elapsed_time_seconds,
-                ..
-            } => {
-                assert_eq!(tool_use_id, "toolu_123");
-                assert_eq!(tool_name.as_deref(), Some("Bash"));
-                assert!((elapsed_time_seconds.unwrap() - 12.5).abs() < f64::EPSILON);
-            }
-            _ => panic!("expected ToolProgress"),
-        }
-    }
-
-    #[test]
-    fn parse_keep_alive() {
-        let json = r#"{"type": "keep_alive"}"#;
-        let msg: InboundMsg = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, InboundMsg::KeepAlive {}));
-    }
-
-    #[test]
-    fn parse_server_tool_use_block() {
-        let json = r#"{
-            "type": "stream_event",
-            "uuid": "u1",
-            "session_id": "s1",
-            "event": {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {
-                    "type": "server_tool_use",
-                    "id": "stu_123",
-                    "name": "web_search",
-                    "input": {"query": "rust serde"}
-                }
-            }
-        }"#;
-        let msg: InboundMsg = serde_json::from_str(json).unwrap();
-        match msg {
-            InboundMsg::StreamEvent { event, .. } => match event {
-                StreamEvent::ContentBlockStart {
-                    content_block: ContentBlock::ServerToolUse(st),
-                    ..
-                } => {
-                    assert_eq!(st.name, "web_search");
-                }
-                _ => panic!("expected ContentBlockStart with ServerToolUse"),
-            },
-            _ => panic!("expected StreamEvent"),
-        }
-    }
-
-    #[test]
-    fn parse_unknown_content_block() {
-        let json = r#"{
-            "type": "stream_event",
-            "uuid": "u1",
-            "session_id": "s1",
-            "event": {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {
-                    "type": "web_search_20250305",
-                    "id": "ws_123"
-                }
-            }
-        }"#;
-        let msg: InboundMsg = serde_json::from_str(json).unwrap();
-        match msg {
-            InboundMsg::StreamEvent { event, .. } => match event {
-                StreamEvent::ContentBlockStart {
-                    content_block: ContentBlock::Unknown,
-                    ..
-                } => {}
-                _ => panic!("expected ContentBlockStart with Unknown"),
-            },
-            _ => panic!("expected StreamEvent"),
-        }
     }
 
     #[test]

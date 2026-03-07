@@ -12,6 +12,3 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 nix = { workspace = true }
-
-[lints]
-workspace = true
