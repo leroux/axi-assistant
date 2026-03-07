@@ -11,7 +11,7 @@ use claudewire::events::ActivityState;
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-pub fn is_awake(session: &AgentSession) -> bool {
+pub const fn is_awake(session: &AgentSession) -> bool {
     session.awake
 }
 
@@ -191,6 +191,57 @@ pub async fn wake_or_queue(
         Err(e) => {
             warn!("Failed to wake agent '{}': {}", name, e);
             false
+        }
+    }
+}
+
+/// Queue a message for the agent and ensure it gets processed.
+/// Always queues first, then wakes the agent if sleeping and spawns
+/// a processing task. Safe to call whether the agent is awake or not.
+pub async fn queue_and_wake(
+    state: &std::sync::Arc<BotState>,
+    name: &str,
+    content: crate::types::MessageContent,
+    metadata: Option<serde_json::Value>,
+) {
+    let already_awake = {
+        let mut sessions = state.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(name) {
+            session
+                .message_queue
+                .push_back(QueuedMessage { content, metadata });
+            session.awake
+        } else {
+            return;
+        }
+    };
+
+    if already_awake {
+        // Agent is already running — the message is queued and will be picked
+        // up by process_message_queue after the current response finishes.
+        debug!("Agent '{}' already awake, voice message queued", name);
+        return;
+    }
+
+    // Agent was sleeping — wake it and spawn a task to drain the queue.
+    match wake_agent(state, name).await {
+        Ok(()) => {
+            info!("Agent '{}' woke up (voice)", name);
+            let state = std::sync::Arc::clone(state);
+            let name = name.to_string();
+            tokio::spawn(async move {
+                let stream_handler =
+                    crate::bridge::make_stream_handler(std::sync::Arc::clone(&state));
+
+                // process_message_queue handles its own query_lock internally
+                crate::messaging::process_message_queue(&state, &name, &stream_handler)
+                    .await;
+
+                sleep_agent(&state, &name, false).await;
+            });
+        }
+        Err(e) => {
+            warn!("Failed to wake agent '{}' for voice: {}", name, e);
         }
     }
 }

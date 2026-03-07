@@ -105,7 +105,7 @@ impl AgentSession {
         }
     }
 
-    pub fn is_awake(&self) -> bool {
+    pub const fn is_awake(&self) -> bool {
         self.awake
     }
 }

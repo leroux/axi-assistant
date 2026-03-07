@@ -198,13 +198,26 @@ pub async fn register_commands(ctx: &Context) -> anyhow::Result<()> {
                 )
                 .required(true),
             ),
+        CreateCommand::new("voice-join")
+            .description("Join your voice channel and start the voice interface.")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::Channel,
+                    "channel",
+                    "Voice channel to join (defaults to your current VC)",
+                )
+                .required(false),
+            ),
+        CreateCommand::new("voice-leave")
+            .description("Leave the voice channel and stop the voice interface."),
     ];
 
+    let num_commands = commands.len();
     guild_id
         .set_commands(&ctx.http, commands)
         .await?;
 
-    info!("Registered {} slash commands", 17);
+    info!("Registered {} slash commands", num_commands);
     Ok(())
 }
 
@@ -257,6 +270,8 @@ pub async fn handle_command(ctx: &Context, command: &CommandInteraction) {
         "clear" => handle_clear(ctx, command, &state).await,
         "claude-usage" => handle_claude_usage(ctx, command, &state).await,
         "restart-agent" => handle_restart_agent(ctx, command, &state).await,
+        "voice-join" => handle_voice_join(ctx, command, &state).await,
+        "voice-leave" => handle_voice_leave(ctx, command, &state).await,
         _ => {
             let _ = command
                 .create_response(
@@ -927,6 +942,137 @@ async fn handle_restart_agent(ctx: &Context, command: &CommandInteraction, state
         &format!("Restarted agent **{agent_name}** with fresh system prompt."),
     )
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// Voice commands
+// ---------------------------------------------------------------------------
+
+async fn handle_voice_join(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    // Check if already in a voice session
+    {
+        let session = state.voice_session.read().await;
+        if session.is_some() {
+            let _ = respond_ephemeral(ctx, command, "Already in a voice channel. Use `/voice-leave` first.").await;
+            return;
+        }
+    }
+
+    // Find the user's voice channel
+    let guild_id = if let Some(id) = command.guild_id { id } else {
+        let _ = respond_ephemeral(ctx, command, "This command must be used in a server.").await;
+        return;
+    };
+
+    // Check for explicit channel parameter first, then fall back to user's VC
+    let explicit_channel = command.data.options.iter().find_map(|opt| {
+        if opt.name == "channel" {
+            if let CommandDataOptionValue::Channel(ch) = &opt.value {
+                Some(*ch)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+
+    let voice_channel_id = if let Some(ch) = explicit_channel {
+        ch
+    } else {
+        // Extract voice channel ID from cache — the CacheRef is not Send,
+        // so we must drop it before any .await.
+        let vc = ctx
+            .cache
+            .guild(guild_id)
+            .and_then(|g| {
+                g.voice_states
+                    .get(&command.user.id)
+                    .and_then(|vs| vs.channel_id)
+            });
+
+        if let Some(id) = vc { id } else {
+            let _ = respond_ephemeral(ctx, command, "You must be in a voice channel first, or specify a channel.").await;
+            return;
+        }
+    };
+
+    // Check for required API keys
+    let deepgram_key = std::env::var("DEEPGRAM_API_KEY").unwrap_or_default();
+    if deepgram_key.is_empty() {
+        let _ = respond_ephemeral(
+            ctx,
+            command,
+            "Missing `DEEPGRAM_API_KEY` environment variable.",
+        )
+        .await;
+        return;
+    }
+
+    let _ = respond(ctx, command, "Joining voice channel...").await;
+
+    let stt = axi_voice::stt::DeepgramStt::new(deepgram_key);
+    let tts: Arc<dyn axi_voice::tts::TtsProvider> =
+        if let Ok(openai_key) = std::env::var("OPENAI_API_KEY") {
+            info!("Using OpenAI TTS");
+            Arc::new(axi_voice::tts::OpenAiTts::new(openai_key))
+        } else if let Ok(model) = std::env::var("PIPER_MODEL") {
+            info!(model = %model, "Using Piper TTS (local neural)");
+            Arc::new(axi_voice::tts::PiperTts::new(model))
+        } else {
+            info!("Using espeak-ng TTS (local)");
+            Arc::new(axi_voice::tts::EspeakTts::new())
+        };
+
+    // Create callback that routes voice transcripts through the master agent
+    let state_for_voice = {
+        let data = ctx.data.read().await;
+        Arc::clone(data.get::<BotState>().expect("BotState not found"))
+    };
+    let agent_name_for_voice = state.config.master_agent_name.clone();
+    let chat_send: axi_voice::gateway::ChatSendFn = Arc::new(move |text: String| {
+        let state = Arc::clone(&state_for_voice);
+        let name = agent_name_for_voice.clone();
+        Box::pin(async move {
+            let content = crate::types::MessageContent::Text(text);
+            crate::lifecycle::queue_and_wake(&state, &name, content, None).await;
+        })
+    });
+
+    match axi_voice::gateway::VoiceSession::join(
+        ctx,
+        guild_id,
+        voice_channel_id,
+        command.user.id,
+        &stt,
+        tts,
+        state.config.master_agent_name.clone(),
+        chat_send,
+    )
+    .await
+    {
+        Ok(session) => {
+            *state.voice_session.write().await = Some(session);
+            info!("Voice session started in channel {}", voice_channel_id);
+        }
+        Err(e) => {
+            error!("Failed to start voice session: {e}");
+            // Can't edit response easily, just log
+        }
+    }
+}
+
+async fn handle_voice_leave(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let session = state.voice_session.write().await.take();
+    match session {
+        Some(session) => {
+            session.leave(ctx).await;
+            let _ = respond(ctx, command, "Left voice channel.").await;
+        }
+        None => {
+            let _ = respond_ephemeral(ctx, command, "Not in a voice channel.").await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

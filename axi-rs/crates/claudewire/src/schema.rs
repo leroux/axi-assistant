@@ -24,7 +24,7 @@ pub enum ContentBlock {
     Thinking(ThinkingBlock),
     #[serde(rename = "server_tool_use")]
     ServerToolUse(ServerToolUseBlock),
-    /// Unknown content block types (web_search_20250305, mcp_tools, etc.).
+    /// Unknown content block types (`web_search_20250305`, `mcp_tools`, etc.).
     #[serde(other)]
     Unknown,
 }
@@ -73,7 +73,7 @@ pub enum Delta {
     Thinking(ThinkingDelta),
     #[serde(rename = "signature_delta")]
     Signature(SignatureDelta),
-    /// Unknown delta types (citations_delta, etc.).
+    /// Unknown delta types (`citations_delta`, etc.).
     #[serde(other)]
     Unknown,
 }

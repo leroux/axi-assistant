@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use serenity::all::GuildId;
+use serenity::all::{ChannelId, GuildId, UserId};
 use serenity::client::Context;
 use tracing::{error, info, warn};
 
@@ -186,6 +186,63 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
     tokio::spawn(async move {
         bridge_monitor_loop(state_for_bridge).await;
     });
+
+    // 11. Auto-join voice channel for testing (if VOICE_AUTO_JOIN_CHANNEL set)
+    if let Ok(vc_id_str) = std::env::var("VOICE_AUTO_JOIN_CHANNEL") {
+        if let Ok(vc_id) = vc_id_str.parse::<u64>() {
+            info!("Auto-joining voice channel {} for testing...", vc_id);
+            let guild_id = GuildId::new(state.config.discord_guild_id);
+            let channel_id = ChannelId::new(vc_id);
+            let deepgram_key = std::env::var("DEEPGRAM_API_KEY").unwrap_or_default();
+            let authorized_user = std::env::var("VOICE_AUTHORIZED_USER")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map_or(UserId::new(275_841_062_327_549_953), UserId::new); // default to user
+
+            let stt = axi_voice::stt::DeepgramStt::new(deepgram_key);
+            let tts: Arc<dyn axi_voice::tts::TtsProvider> =
+                if let Ok(openai_key) = std::env::var("OPENAI_API_KEY") {
+                    info!("Using OpenAI TTS");
+                    Arc::new(axi_voice::tts::OpenAiTts::new(openai_key))
+                } else if let Ok(model) = std::env::var("PIPER_MODEL") {
+                    info!(model = %model, "Using Piper TTS (local neural)");
+                    Arc::new(axi_voice::tts::PiperTts::new(model))
+                } else {
+                    info!("Using espeak-ng TTS (local)");
+                    Arc::new(axi_voice::tts::EspeakTts::new())
+                };
+
+            let state_for_voice = state.clone();
+            let agent_name_for_voice = state.config.master_agent_name.clone();
+            let chat_send: axi_voice::gateway::ChatSendFn = Arc::new(move |text: String| {
+                let s = Arc::clone(&state_for_voice);
+                let name = agent_name_for_voice.clone();
+                Box::pin(async move {
+                    let content = crate::types::MessageContent::Text(text);
+                    crate::lifecycle::queue_and_wake(&s, &name, content, None).await;
+                })
+            });
+
+            match axi_voice::gateway::VoiceSession::join(
+                ctx,
+                guild_id,
+                channel_id,
+                authorized_user,
+                &stt,
+                tts,
+                state.config.master_agent_name.clone(),
+                chat_send,
+            ).await {
+                Ok(session) => {
+                    *state.voice_session.write().await = Some(session);
+                    info!("Auto-joined voice channel {}", vc_id);
+                }
+                Err(e) => {
+                    error!("Failed to auto-join voice channel: {e}");
+                }
+            }
+        }
+    }
 }
 
 /// Connect to the procmux bridge server, retrying with backoff.
@@ -231,14 +288,29 @@ pub(crate) async fn is_bridge_down(state: &BotState) -> bool {
 }
 
 /// Background loop that monitors the procmux bridge connection.
+/// Only triggers restart if a bridge was previously connected and then lost.
+/// If no bridge was ever connected (standalone mode), this loop is a no-op.
 async fn bridge_monitor_loop(state: Arc<BotState>) {
     const CHECK_INTERVAL_SECS: u64 = 2;
     const GRACE_PERIOD_SECS: u64 = 3;
 
+    // Wait for initial connection attempt to complete before monitoring.
+    // If no bridge was ever connected, don't crash — run in standalone mode.
+    let mut had_bridge = false;
+
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
 
-        if !is_bridge_down(&state).await {
+        let bridge_down = is_bridge_down(&state).await;
+
+        if !bridge_down {
+            // Bridge is alive — remember that we had one.
+            had_bridge = true;
+            continue;
+        }
+
+        // Bridge is down. Only restart if we previously had a live connection.
+        if !had_bridge {
             continue;
         }
 

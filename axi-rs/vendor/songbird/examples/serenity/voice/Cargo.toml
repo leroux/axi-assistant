@@ -1,0 +1,15 @@
+[package]
+name = "voice"
+version = "0.1.0"
+authors = ["my name <my@email.address>"]
+edition = "2021"
+
+[dependencies]
+reqwest = { workspace = true }
+serenity = { workspace = true }
+songbird = { workspace = true, default-features = true }
+symphonia = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-futures = { workspace = true }

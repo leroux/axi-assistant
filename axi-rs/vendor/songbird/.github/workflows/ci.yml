@@ -1,0 +1,147 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rustfmt,clippy
+      - name: Setup cache
+        uses: Swatinem/rust-cache@v2
+      - name: Rustfmt
+        run: cargo +nightly fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --features full-doc
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        name:
+          - stable
+          - beta
+          - nightly
+          - macOS
+          - Windows
+          - driver only
+          - gateway only
+        include:
+          - name: beta
+            toolchain: beta
+          - name: nightly
+            toolchain: nightly
+          - name: macOS
+            os: macOS-latest
+            dont-test: true
+          - name: Windows
+            os: windows-latest
+            dont-test: true
+          - name: driver only
+            features: driver tungstenite rustls
+            dont-test: true
+          - name: gateway only
+            features: gateway serenity tungstenite rustls
+            dont-test: true
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain || 'stable' }}
+      - name: Setup cache
+        uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+      - name: Install yt-dlp (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          sudo wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+      - name: Install yt-dlp (Windows)
+        if: runner.os == 'Windows'
+        run: choco install yt-dlp
+      - name: Set RUSTFLAGS
+        if: runner.os != 'Windows'
+        run: echo "RUSTFLAGS=${{ matrix.rustflags || '' }}" >> $GITHUB_ENV
+      - name: Build all features
+        if: matrix.features == ''
+        run: cargo build --features full-doc
+      - name: Test all features
+        if: ${{ !matrix.dont-test && matrix.features == '' }}
+        run: cargo test --features full-doc
+      - name: Build some features
+        if: matrix.features
+        run: cargo build --no-default-features --features "${{ matrix.features }}"
+      - name: Test some features
+        if: ${{ !matrix.dont-test && matrix.features }}
+        run: cargo test --no-default-features --features "${{ matrix.features }}"
+
+  doc:
+    name: Build docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+      - name: Setup cache
+        uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev
+      - name: Build docs
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: |
+          cargo doc --no-deps --features full-doc
+
+  examples:
+    name: Examples
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Setup cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev
+
+      - name: Build serenity/voice
+        working-directory: examples
+        run: cargo build -p voice
+      - name: Build serenity/voice_events_queue
+        working-directory: examples
+        run: cargo build -p voice_events_queue
+      - name: Build serenity/voice_receive
+        working-directory: examples
+        run: cargo build -p voice_receive
+      - name: Build serenity/voice_cached_audio
+        working-directory: examples
+        run: cargo build -p voice_cached_audio
+      - name: Build twilight
+        working-directory: examples
+        run: cargo build -p twilight

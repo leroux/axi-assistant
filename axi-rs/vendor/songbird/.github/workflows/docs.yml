@@ -1,0 +1,57 @@
+name: Publish docs
+
+on:
+  push:
+    branches:
+      - current
+      - next
+
+jobs:
+  docs:
+    name: Publish docs
+    runs-on: ubuntu-latest
+    permissions:
+      # peaceiris/actions-gh-pages requires write permission
+      # as it pushes a new commit to the gh-pages branch
+      contents: write
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Setup cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev
+
+      - name: Build docs
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: |
+          cargo doc --no-deps --features full-doc
+
+      - name: Prepare docs
+        shell: bash -e -O extglob {0}
+        run: |
+          DIR=${GITHUB_REF/refs\/+(heads|tags)\//}
+          mkdir -p ./docs/$DIR
+          touch ./docs/.nojekyll
+          echo '<meta http-equiv="refresh" content="0;url=songbird/index.html">' > ./docs/$DIR/index.html
+          mv ./target/doc/* ./docs/$DIR/
+
+      - name: Deploy docs
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./docs
+          allow_empty_commit: false
+          keep_files: true

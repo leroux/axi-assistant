@@ -1,0 +1,55 @@
+[tasks.format]
+toolchain = "nightly"
+install_crate = { crate_name = "rustfmt-nightly", rustup_component_name = "rustfmt-preview", binary = "rustfmt", test_arg = "--help" }
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.build]
+args = ["build", "--features", "full-doc"]
+dependencies = ["format"]
+
+[tasks.build-examples]
+args = ["build", "--manifest-path", "./examples/Cargo.toml", "--workspace"]
+command = "cargo"
+dependencies = ["format"]
+
+[tasks.build-gateway]
+args = ["build", "--no-default-features", "--features", "gateway,serenity,rustls"]
+command = "cargo"
+dependencies = ["format"]
+
+[tasks.build-driver]
+args = ["build", "--no-default-features", "--features", "driver,rustls,tungstenite"]
+command = "cargo"
+dependencies = ["format"]
+
+[tasks.build-variants]
+dependencies = ["build", "build-gateway", "build-driver"]
+
+[tasks.check]
+args = ["check", "--features", "full-doc"]
+dependencies = ["format"]
+
+[tasks.clippy]
+args = ["clippy", "--features", "full-doc", "--", "-D", "warnings"]
+dependencies = ["format"]
+
+[tasks.test]
+args = ["test", "--features", "full-doc", "--", "--include-ignored"]
+
+[tasks.bench]
+description = "Runs performance benchmarks."
+category = "Test"
+command = "cargo"
+args = ["bench", "--features", "internals,full-doc"]
+
+[tasks.doc]
+command = "cargo"
+args = ["doc", "--features", "full-doc"]
+
+[tasks.doc-open]
+command = "cargo"
+args = ["doc", "--features", "full-doc", "--open"]
+
+[tasks.ready]
+dependencies = ["format", "test", "build-variants", "build-examples", "doc", "clippy"]

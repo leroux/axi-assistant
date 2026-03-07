@@ -46,20 +46,20 @@ fn parse_id(args: &ToolArgs, key: &str) -> Option<u64> {
 fn build_spawned_prompt(
     state: &BotState,
     cwd: &str,
-    packs: Option<Vec<String>>,
-    compact_instructions: Option<String>,
-) -> Option<Value> {
-    let pack_strs: Option<Vec<&str>> = packs.as_ref().map(|v| v.iter().map(String::as_str).collect());
+    packs: Option<&Vec<String>>,
+    compact_instructions: Option<&String>,
+) -> Value {
+    let pack_strs: Option<Vec<&str>> = packs.map(|v| v.iter().map(String::as_str).collect());
     let preset = state.prompt_builder.spawned_agent_prompt(
         cwd,
         pack_strs.as_deref(),
-        compact_instructions.as_deref(),
+        compact_instructions.map(String::as_str),
     );
-    Some(json!({
+    json!({
         "type": "custom_preset",
         "preset": preset.preset,
         "custom_instructions": preset.append,
-    }))
+    })
 }
 
 /// Build the MCP servers JSON config for an agent.
@@ -179,7 +179,7 @@ pub fn create_utils_server(state: Arc<BotState>) -> McpServer {
     let cfg = Arc::new(state.config.clone());
 
     // get_date_and_time
-    let cfg_dt = cfg.clone();
+    let cfg_dt = cfg;
     server.add_tool(
         "get_date_and_time",
         "Get the current date and time with logical day/week calculations. \
@@ -576,9 +576,9 @@ pub fn create_master_server(state: Arc<BotState>) -> McpServer {
                 let mcp_names_for_config = mcp_server_names.clone();
 
                 // Build system prompt
-                let system_prompt = build_spawned_prompt(
-                    &state, &cwd, packs, compact_instructions,
-                );
+                let system_prompt = Some(build_spawned_prompt(
+                    &state, &cwd, packs.as_ref(), compact_instructions.as_ref(),
+                ));
 
                 // Build MCP servers config
                 let mcp_servers_cfg = build_mcp_servers(&state, &name, &cwd, mcp_server_names);
@@ -757,7 +757,7 @@ pub fn create_master_server(state: Arc<BotState>) -> McpServer {
                 };
 
                 // Rebuild with fresh prompt but same session_id
-                let system_prompt = build_spawned_prompt(&state, &cwd, None, None);
+                let system_prompt = Some(build_spawned_prompt(&state, &cwd, None, None));
                 crate::registry::rebuild_session(
                     &state,
                     &name,
@@ -888,7 +888,7 @@ pub fn create_agent_server(state: Arc<BotState>) -> McpServer {
                 let cwd = get_opt_str(&args, "cwd")
                     .unwrap_or_else(|| default_agent_cwd(&state, &name));
 
-                let system_prompt = build_spawned_prompt(&state, &cwd, None, None);
+                let system_prompt = Some(build_spawned_prompt(&state, &cwd, None, None));
                 let mcp_servers_cfg = build_mcp_servers(&state, &name, &cwd, None);
 
                 if resume.is_some() {
@@ -1009,7 +1009,7 @@ pub fn create_agent_server(state: Arc<BotState>) -> McpServer {
                     }
                 };
 
-                let system_prompt = build_spawned_prompt(&state, &cwd, None, None);
+                let system_prompt = Some(build_spawned_prompt(&state, &cwd, None, None));
                 crate::registry::rebuild_session(
                     &state,
                     &name,

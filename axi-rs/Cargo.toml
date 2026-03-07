@@ -6,6 +6,7 @@ members = [
     "crates/axi-config",
     "crates/axi",
     "crates/discordquery",
+    "crates/axi-voice",
 ]
 
 [workspace.package]
@@ -63,3 +64,7 @@ thiserror = "2"
 anyhow = "1"
 nix = { version = "0.29", features = ["signal", "process"] }
 chrono = { version = "0.4", features = ["serde"] }
+songbird = { path = "vendor/songbird", features = ["serenity", "receive", "driver", "gateway", "rustls", "tungstenite"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+bytes = "1"
+bytemuck = { version = "1", features = ["derive"] }

@@ -24,7 +24,7 @@ pub struct ShutdownCoordinator {
 }
 
 impl ShutdownCoordinator {
-    pub fn new(state: Arc<BotState>, bridge_mode: bool) -> Self {
+    pub const fn new(state: Arc<BotState>, bridge_mode: bool) -> Self {
         Self {
             state,
             requested: AtomicBool::new(false),

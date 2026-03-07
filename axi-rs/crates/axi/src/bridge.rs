@@ -408,6 +408,20 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
 
             "content_block_stop" => {
                 if current_block_type.as_deref() == Some("text") {
+                    // Voice forwarding — speak text via TTS if voice session is active
+                    {
+                        let voice_text = ctx.text_buffer.clone();
+                        if !voice_text.is_empty() {
+                            let voice = state.voice_session.read().await;
+                            if let Some(ref vs) = *voice {
+                                let active = vs.active_agent.read().await;
+                                if *active == agent_name {
+                                    drop(active);
+                                    vs.speak(voice_text, 0, true).await;
+                                }
+                            }
+                        }
+                    }
                     streaming::live_edit_finalize(
                         &mut ctx,
                         &state.discord_client,
