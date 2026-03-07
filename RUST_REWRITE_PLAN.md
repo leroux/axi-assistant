@@ -70,18 +70,18 @@ Tasks:
 - [ ] Bare stream event deduplication
 - [ ] Unit tests for serde round-trips and event parsing
 
-### Phase 3: Supervisor [ ]
+### Phase 3: Supervisor [x]
 **Goal**: Rust process supervisor replacing supervisor.py.
 
 Tasks:
-- [ ] Signal handling: SIGTERM/SIGINT (full stop), SIGHUP (hot restart)
-- [ ] Bot process spawning and monitoring
-- [ ] Bridge (procmux) process spawning and monitoring
-- [ ] Crash detection with threshold and max runtime crashes
-- [ ] Optional git rollback on crash (ENABLE_ROLLBACK)
-- [ ] Exit code 42 = restart, other = crash
-- [ ] Log capture and ANSI stripping
-- [ ] Crash analysis marker file writing
+- [x] Signal handling: SIGTERM/SIGINT (full stop), SIGHUP (hot restart)
+- [x] Bot process spawning and monitoring
+- [x] Bridge (procmux) process spawning and monitoring
+- [x] Crash detection with threshold and max runtime crashes
+- [x] Optional git rollback on crash (ENABLE_ROLLBACK)
+- [x] Exit code 42 = restart, other = crash
+- [x] Log capture and ANSI stripping
+- [x] Crash analysis marker file writing
 
 ### Phase 4: Config & Tracing [ ]
 **Goal**: Centralized configuration and OpenTelemetry setup.
