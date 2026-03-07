@@ -217,6 +217,10 @@ def _build_mcp_servers(
     if _utils_mcp_server is not None:
         servers["utils"] = _utils_mcp_server
     servers["schedule"] = make_schedule_mcp_server(agent_name, config.SCHEDULES_PATH, cwd)
+    servers["playwright"] = {
+        "command": "npx",
+        "args": ["@playwright/mcp@latest", "--headless"],
+    }
     if extra_mcp_servers:
         servers.update(extra_mcp_servers)
     return servers

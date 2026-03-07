@@ -2072,6 +2072,10 @@ def _register_master_agent(resume_id: str | None, prompt_hash: str | None) -> Ag
     master_mcp["schedule"] = make_schedule_mcp_server(
         config.MASTER_AGENT_NAME, config.SCHEDULES_PATH, config.DEFAULT_CWD,
     )
+    master_mcp["playwright"] = {
+        "command": "npx",
+        "args": ["@playwright/mcp@latest", "--headless"],
+    }
     if os.path.isdir(config.BOT_WORKTREES_DIR):
         master_mcp["discord"] = tools.discord_mcp_server
     session = AgentSession(

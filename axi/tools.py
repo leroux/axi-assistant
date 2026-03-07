@@ -730,6 +730,10 @@ def sdk_mcp_servers_for_cwd(cwd: str, agent_name: str | None = None) -> dict[str
             config.SCHEDULES_PATH,
             cwd,
         )
+    servers["playwright"] = {
+        "command": "npx",
+        "args": ["@playwright/mcp@latest", "--headless"],
+    }
     if is_admin:
         servers["axi"] = axi_mcp_server
     return servers
