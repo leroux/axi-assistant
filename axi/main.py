@@ -7,12 +7,17 @@ All agent state and operations live in agents.py; MCP tools in tools.py.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import json
 import logging
 import os
 import re
+import signal
 import subprocess
+import sys
+import threading
 import time
+import traceback
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -47,6 +52,57 @@ from axi.tracing import init_tracing
 
 log = logging.getLogger("axi")
 _tracer = trace.get_tracer(__name__)
+
+# ---------------------------------------------------------------------------
+# Debug: dump all thread stacks on SIGUSR1, asyncio tasks on SIGUSR2
+# ---------------------------------------------------------------------------
+
+faulthandler.enable()  # dump traceback on SIGSEGV/SIGABRT/etc.
+
+
+def _dump_stacks(sig: int, frame: Any) -> None:
+    """Dump all thread stack traces to stderr on SIGUSR1."""
+    output = [f"\n{'=' * 60}", f"STACK DUMP (signal {sig})", f"{'=' * 60}"]
+    for tid, stack in sys._current_frames().items():  # pyright: ignore[reportPrivateUsage]
+        name = next((t.name for t in threading.enumerate() if t.ident == tid), f"thread-{tid}")
+        output.append(f"\n--- {name} (tid={tid}) ---")
+        output.append("".join(traceback.format_stack(stack)))
+    dump = "\n".join(output)
+    sys.stderr.write(dump)
+    # Also write to a file for easy retrieval
+    try:
+        with open(os.path.join(config.LOG_DIR, "stack-dump.txt"), "w") as f:
+            f.write(dump)
+    except Exception:
+        pass
+
+
+def _dump_asyncio_tasks(sig: int, frame: Any) -> None:
+    """Dump all asyncio tasks to stderr on SIGUSR2."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        sys.stderr.write("No running asyncio loop\n")
+        return
+    output = [f"\n{'=' * 60}", "ASYNCIO TASK DUMP", f"{'=' * 60}"]
+    for task in asyncio.all_tasks(loop):
+        output.append(f"\n--- {task.get_name()} (done={task.done()}) ---")
+        # Capture stack to string
+        import io
+        buf = io.StringIO()
+        task.print_stack(file=buf)
+        output.append(buf.getvalue())
+    dump = "\n".join(output)
+    sys.stderr.write(dump)
+    try:
+        with open(os.path.join(config.LOG_DIR, "asyncio-dump.txt"), "w") as f:
+            f.write(dump)
+    except Exception:
+        pass
+
+
+signal.signal(signal.SIGUSR1, _dump_stacks)
+signal.signal(signal.SIGUSR2, _dump_asyncio_tasks)
 
 
 # ---------------------------------------------------------------------------
