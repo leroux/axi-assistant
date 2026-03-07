@@ -17,3 +17,9 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: clippy
+        name: clippy
+        entry: cargo clippy --manifest-path axi-rs/Cargo.toml -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
