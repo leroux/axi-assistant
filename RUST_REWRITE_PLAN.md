@@ -139,15 +139,15 @@ Tasks:
 - [x] Utility tools: get_date_and_time, set_agent_status, clear_agent_status, discord_send_file
 - [ ] Permission callback for cwd-based tool access control
 
-### Phase 8: Scheduler & Advanced Features [ ]
+### Phase 8: Scheduler & Advanced Features [x]
 **Goal**: Cron scheduler, flowcoder integration, remaining features.
 
 Tasks:
-- [ ] Cron-based event scheduler (recurring + one-off)
-- [ ] Schedule persistence (JSON file)
+- [x] Cron-based event scheduler (recurring + one-off)
+- [x] Schedule persistence (JSON file)
 - [ ] Flowcoder agent type support (optional — may keep in Python)
 - [ ] Test instance system (axi_test.py equivalent or keep Python version)
-- [ ] Crash handler and analysis
+- [x] Crash handler and analysis
 - [ ] Hot restart end-to-end validation
 
 ### Phase 9: Integration Testing & Deployment [ ]
