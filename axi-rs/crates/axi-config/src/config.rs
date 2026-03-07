@@ -160,6 +160,55 @@ impl Config {
     }
 }
 
+impl Config {
+    /// Create a minimal `Config` suitable for integration tests.
+    ///
+    /// All paths point into `base_dir`, feature flags use sensible defaults,
+    /// and the Discord token / guild ID are placeholders.
+    pub fn for_test(base_dir: &Path) -> Self {
+        Self {
+            discord_token: "test-token".to_string(),
+            discord_guild_id: 1,
+            allowed_user_ids: HashSet::from([1]),
+            bot_dir: base_dir.to_path_buf(),
+            bot_worktrees_dir: base_dir.join("worktrees"),
+            axi_user_data: base_dir.join("user-data"),
+            default_cwd: base_dir.to_path_buf(),
+            log_dir: base_dir.join("logs"),
+            bridge_socket_path: base_dir.join(".bridge.sock"),
+            master_session_path: base_dir.join(".master_session_id"),
+            config_path: base_dir.join("config.json"),
+            schedules_path: base_dir.join("schedules.json"),
+            history_path: base_dir.join("schedule_history.json"),
+            rate_limit_history_path: base_dir.join("rate_limit_history.jsonl"),
+            usage_history_path: base_dir.join("usage_history.jsonl"),
+            mcp_servers_path: base_dir.join("mcp_servers.json"),
+            readme_content_path: base_dir.join("readme_content.md"),
+            flowcoder_enabled: false,
+            streaming_discord: true,
+            channel_status_enabled: false,
+            clean_tool_messages: false,
+            show_awaiting_input: false,
+            max_awake_agents: 7,
+            compact_threshold: 0.80,
+            streaming_edit_interval: 1.5,
+            query_timeout: Duration::from_secs(300),
+            interrupt_timeout: Duration::from_secs(15),
+            api_error_max_retries: 3,
+            api_error_base_delay: Duration::from_secs(5),
+            day_boundary_hour: 0,
+            schedule_timezone: "UTC".to_string(),
+            active_category_name: "Active".to_string(),
+            axi_category_name: "Axi".to_string(),
+            killed_category_name: "Killed".to_string(),
+            master_agent_name: "axi-master".to_string(),
+            idle_reminder_thresholds: vec![Duration::from_secs(1800)],
+            allowed_cwds: vec![base_dir.to_path_buf()],
+            admin_allowed_cwds: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("required environment variable {0} not set")]

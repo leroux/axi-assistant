@@ -11,20 +11,24 @@ use tracing::{debug, warn};
 
 /// Generate a trace ID for this request.
 ///
-/// If OpenTelemetry is active and has a valid trace context, uses the OTel
+/// If OpenTelemetry is active and has a valid trace context, uses the `OTel`
 /// trace ID (first 16 hex chars). Otherwise generates a random 16-char hex ID.
 fn generate_trace_id() -> String {
     use opentelemetry::trace::TraceContextExt;
     let ctx = opentelemetry::Context::current();
     let span_ref = ctx.span();
     let trace_id = span_ref.span_context().trace_id();
-    if trace_id != opentelemetry::trace::TraceId::INVALID {
-        // Use first 16 chars of the 32-char hex trace ID
-        format!("{trace_id}")[..16].to_string()
-    } else {
+    if trace_id == opentelemetry::trace::TraceId::INVALID {
         // No OTel context — generate random ID
         let bytes: [u8; 8] = rand_bytes();
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        bytes.iter().fold(String::with_capacity(16), |mut acc, b| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+    } else {
+        // Use first 16 chars of the 32-char hex trace ID
+        format!("{trace_id}")[..16].to_string()
     }
 }
 
@@ -430,33 +434,30 @@ pub async fn live_edit_finalize(
     discord: &DiscordClient,
     agent_name: &str,
 ) {
-    let le = match &mut ctx.live_edit {
-        Some(le) => le,
-        None => {
-            // Non-streaming mode: post accumulated text as regular message(s)
-            let text = ctx.text_buffer.trim().to_string();
-            if text.is_empty() {
-                return;
-            }
-            let channel_id = match ctx.channel_id {
-                Some(id) => id,
-                None => return,
-            };
-            for chunk in split_message(&text) {
-                if let Ok(resp) = discord.send_message(channel_id, &chunk).await {
-                    ctx.last_flushed_msg_id = resp
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .map(ToString::to_string);
-                    ctx.last_flushed_channel_id = Some(channel_id);
-                    ctx.last_flushed_content = chunk;
-                }
-            }
-            ctx.text_buffer.clear();
-            ctx.flush_count += 1;
-            debug!("NON_STREAM_POST[{}] len={}", agent_name, text.len());
+    let le = if let Some(le) = &mut ctx.live_edit { le } else {
+        // Non-streaming mode: post accumulated text as regular message(s)
+        let text = ctx.text_buffer.trim().to_string();
+        if text.is_empty() {
             return;
         }
+        let channel_id = match ctx.channel_id {
+            Some(id) => id,
+            None => return,
+        };
+        for chunk in split_message(&text) {
+            if let Ok(resp) = discord.send_message(channel_id, &chunk).await {
+                ctx.last_flushed_msg_id = resp
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                ctx.last_flushed_channel_id = Some(channel_id);
+                ctx.last_flushed_content = chunk;
+            }
+        }
+        ctx.text_buffer.clear();
+        ctx.flush_count += 1;
+        debug!("NON_STREAM_POST[{}] len={}", agent_name, text.len());
+        return;
     };
 
     let text = ctx.text_buffer.trim_start().to_string();
@@ -567,9 +568,10 @@ mod tests {
 
     #[test]
     fn split_on_newlines() {
+        use std::fmt::Write;
         let mut text = String::new();
         for i in 0..100 {
-            text.push_str(&format!("Line {} with some content here\n", i));
+            writeln!(text, "Line {i} with some content here").unwrap();
         }
         let chunks = split_message(&text);
         assert!(chunks.len() >= 2);
@@ -587,5 +589,352 @@ mod tests {
 
         let ctx_no_stream = StreamContext::new(Some(123), false);
         assert!(ctx_no_stream.live_edit.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests using wiremock (real HTTP, fake Discord)
+    // -----------------------------------------------------------------------
+
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Start a wiremock server and create a `DiscordClient` pointing at it.
+    /// Also mounts a default mock for POST /channels/*/messages.
+    async fn setup_discord() -> (MockServer, DiscordClient) {
+        let server = MockServer::start().await;
+
+        // Default: POST messages returns {"id": "111"}
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/channels/\d+/messages$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "111"})),
+            )
+            .expect(0..)
+            .mount(&server)
+            .await;
+
+        // Default: PATCH messages returns {"id": "111"}
+        Mock::given(method("PATCH"))
+            .and(path_regex(r"^/channels/\d+/messages/\d+$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "111"})),
+            )
+            .expect(0..)
+            .mount(&server)
+            .await;
+
+        // Default: DELETE messages returns 204
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/channels/\d+/messages/\d+$"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0..)
+            .mount(&server)
+            .await;
+
+        let discord = DiscordClient::with_base_url("test-token", server.uri());
+        (server, discord)
+    }
+
+    #[tokio::test]
+    async fn show_thinking_posts_message() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+
+        show_thinking(&mut ctx, &discord, "test-agent").await;
+
+        assert_eq!(ctx.thinking_msg_id.as_deref(), Some("111"));
+
+        // Verify the POST was made
+        let requests = server.received_requests().await.unwrap();
+        let post_reqs: Vec<_> = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::POST)
+            .collect();
+        assert_eq!(post_reqs.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&post_reqs[0].body).unwrap();
+        assert_eq!(body["content"], "*thinking...*");
+    }
+
+    #[tokio::test]
+    async fn show_thinking_noop_without_live_edit() {
+        let (_server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), false); // streaming disabled
+
+        show_thinking(&mut ctx, &discord, "test-agent").await;
+
+        assert!(ctx.thinking_msg_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn hide_thinking_deletes_message() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        ctx.thinking_msg_id = Some("222".to_string());
+
+        hide_thinking(&mut ctx, &discord, "test-agent").await;
+
+        assert!(ctx.thinking_msg_id.is_none());
+
+        let requests = server.received_requests().await.unwrap();
+        let delete_reqs: Vec<_> = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::DELETE)
+            .collect();
+        assert_eq!(delete_reqs.len(), 1);
+        assert!(delete_reqs[0]
+            .url
+            .path()
+            .contains("/messages/222"));
+    }
+
+    #[tokio::test]
+    async fn hide_thinking_noop_without_msg() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        // thinking_msg_id is None by default
+
+        hide_thinking(&mut ctx, &discord, "test-agent").await;
+
+        let requests = server.received_requests().await.unwrap();
+        let delete_count = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::DELETE)
+            .count();
+        assert_eq!(delete_count, 0);
+    }
+
+    #[tokio::test]
+    async fn show_tool_progress_noop_when_disabled() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        ctx.clean_tool_messages = false;
+
+        show_tool_progress(&mut ctx, &discord, "test-agent", "Bash").await;
+
+        assert!(ctx.tool_progress_msg_ids.is_empty());
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn show_tool_progress_posts_when_enabled() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        ctx.clean_tool_messages = true;
+
+        show_tool_progress(&mut ctx, &discord, "test-agent", "Bash").await;
+
+        assert_eq!(ctx.tool_progress_msg_ids.len(), 1);
+        assert_eq!(ctx.tool_progress_msg_ids[0], (100, "111".to_string()));
+
+        let requests = server.received_requests().await.unwrap();
+        let post_reqs: Vec<_> = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::POST)
+            .collect();
+        assert_eq!(post_reqs.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&post_reqs[0].body).unwrap();
+        // Should contain the tool display name
+        let content = body["content"].as_str().unwrap();
+        assert!(content.contains("..."), "expected progress format, got: {content}");
+    }
+
+    #[tokio::test]
+    async fn delete_tool_progress_cleans_up() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        ctx.tool_progress_msg_ids = vec![
+            (100, "333".to_string()),
+            (100, "444".to_string()),
+        ];
+
+        delete_tool_progress(&mut ctx, &discord, "test-agent").await;
+
+        assert!(ctx.tool_progress_msg_ids.is_empty());
+
+        let requests = server.received_requests().await.unwrap();
+        let delete_count = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::DELETE)
+            .count();
+        assert_eq!(delete_count, 2);
+    }
+
+    #[tokio::test]
+    async fn append_timing_edits_last_message() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        ctx.last_flushed_msg_id = Some("555".to_string());
+        ctx.last_flushed_channel_id = Some(100);
+        ctx.last_flushed_content = "Hello world".to_string();
+        // Force elapsed > 0.5s by backdating start_time
+        ctx.start_time = Instant::now().checked_sub(std::time::Duration::from_secs(3)).unwrap();
+
+        append_timing(&ctx, &discord, "test-agent").await;
+
+        let requests = server.received_requests().await.unwrap();
+        let patch_reqs: Vec<_> = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::PATCH)
+            .collect();
+        assert_eq!(patch_reqs.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&patch_reqs[0].body).unwrap();
+        let content = body["content"].as_str().unwrap();
+        assert!(content.starts_with("Hello world\n-# "));
+        assert!(content.contains('s')); // timing suffix
+    }
+
+    #[tokio::test]
+    async fn append_timing_skips_fast_response() {
+        let (server, discord) = setup_discord().await;
+        let ctx = StreamContext::new(Some(100), true);
+        // start_time is now(), so elapsed < 0.5s
+
+        append_timing(&ctx, &discord, "test-agent").await;
+
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn append_timing_noop_without_last_msg() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        ctx.start_time = Instant::now().checked_sub(std::time::Duration::from_secs(3)).unwrap();
+        // last_flushed_msg_id is None
+
+        append_timing(&ctx, &discord, "test-agent").await;
+
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_edit_tick_first_call_posts_with_cursor() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        ctx.text_buffer = "Hello world".to_string();
+
+        live_edit_tick(&mut ctx, &discord, "test-agent").await;
+
+        let le = ctx.live_edit.as_ref().unwrap();
+        assert_eq!(le.message_id.as_deref(), Some("111"));
+        assert!(le.content.ends_with(STREAMING_CURSOR));
+
+        let requests = server.received_requests().await.unwrap();
+        let post_reqs: Vec<_> = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::POST)
+            .collect();
+        assert_eq!(post_reqs.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&post_reqs[0].body).unwrap();
+        let content = body["content"].as_str().unwrap();
+        assert!(content.starts_with("Hello world"));
+        assert!(content.ends_with(STREAMING_CURSOR));
+    }
+
+    #[tokio::test]
+    async fn live_edit_tick_empty_buffer_noop() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        // text_buffer is empty
+
+        live_edit_tick(&mut ctx, &discord, "test-agent").await;
+
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_edit_tick_throttles_within_interval() {
+        let (_server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        ctx.text_buffer = "Hello".to_string();
+
+        // First tick: posts the message
+        live_edit_tick(&mut ctx, &discord, "test-agent").await;
+        assert!(ctx.live_edit.as_ref().unwrap().message_id.is_some());
+
+        // Add more text
+        ctx.text_buffer.push_str(" world");
+
+        // Second tick immediately: should NOT edit (within EDIT_INTERVAL)
+        let le = ctx.live_edit.as_mut().unwrap();
+        le.last_edit_time = Instant::now(); // just posted
+
+        live_edit_tick(&mut ctx, &discord, "test-agent").await;
+        // Content should NOT have been updated (still has cursor from first post)
+    }
+
+    #[tokio::test]
+    async fn live_edit_finalize_removes_cursor() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), true);
+        ctx.text_buffer = "Hello world".to_string();
+
+        // First tick: posts with cursor
+        live_edit_tick(&mut ctx, &discord, "test-agent").await;
+
+        // Finalize: should edit to remove cursor
+        live_edit_finalize(&mut ctx, &discord, "test-agent").await;
+
+        assert!(ctx.text_buffer.is_empty());
+        assert_eq!(ctx.flush_count, 1);
+        assert_eq!(ctx.last_flushed_content, "Hello world");
+
+        let requests = server.received_requests().await.unwrap();
+        let patch_reqs: Vec<_> = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::PATCH)
+            .collect();
+        assert_eq!(patch_reqs.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&patch_reqs[0].body).unwrap();
+        let content = body["content"].as_str().unwrap();
+        assert_eq!(content, "Hello world");
+        assert!(!content.contains(STREAMING_CURSOR));
+    }
+
+    #[tokio::test]
+    async fn live_edit_finalize_non_streaming_posts_full_text() {
+        let (server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), false); // streaming disabled
+        ctx.text_buffer = "Full response text".to_string();
+
+        live_edit_finalize(&mut ctx, &discord, "test-agent").await;
+
+        assert!(ctx.text_buffer.is_empty());
+        assert_eq!(ctx.flush_count, 1);
+        assert_eq!(ctx.last_flushed_content, "Full response text");
+
+        let requests = server.received_requests().await.unwrap();
+        let post_count = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::POST)
+            .count();
+        assert_eq!(post_count, 1);
+    }
+
+    #[tokio::test]
+    async fn live_edit_finalize_splits_long_text() {
+        use std::fmt::Write;
+        let (_server, discord) = setup_discord().await;
+        let mut ctx = StreamContext::new(Some(100), false);
+        // Generate text > 1900 chars with newlines
+        let mut text = String::new();
+        for i in 0..100 {
+            writeln!(text, "Line {i} with some content to fill up space.").unwrap();
+        }
+        assert!(text.len() > 1900);
+        ctx.text_buffer = text;
+
+        live_edit_finalize(&mut ctx, &discord, "test-agent").await;
+
+        assert!(ctx.text_buffer.is_empty());
+        assert_eq!(ctx.flush_count, 1);
     }
 }

@@ -669,6 +669,21 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
     None
 }
 
+/// Check if context utilization exceeds the compact threshold.
+///
+/// Returns `Some(utilization)` if compact should trigger, `None` otherwise.
+fn should_auto_compact(context_tokens: u64, context_window: u64, threshold: f64) -> Option<f64> {
+    if context_window == 0 || context_tokens == 0 {
+        return None;
+    }
+    let utilization = context_tokens as f64 / context_window as f64;
+    if utilization >= threshold {
+        Some(utilization)
+    } else {
+        None
+    }
+}
+
 /// Check if context usage exceeds threshold and trigger compact if needed.
 async fn check_auto_compact(
     state: &BotState,
@@ -684,14 +699,10 @@ async fn check_auto_compact(
         }
     };
 
-    if context_window == 0 || context_tokens == 0 {
-        return;
-    }
-
-    let utilization = context_tokens as f64 / context_window as f64;
-    if utilization < state.config.compact_threshold {
-        return;
-    }
+    let utilization = match should_auto_compact(context_tokens, context_window, state.config.compact_threshold) {
+        Some(u) => u,
+        None => return,
+    };
 
     info!(
         "Auto-compact for '{}': {:.0}% context used ({}/{})",
@@ -1136,6 +1147,51 @@ fn is_transient_error(msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use serenity::all::ChannelId;
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::state::{BotState, QuestionAnswer};
+
+    /// Create a `BotState` backed by wiremock for permission callback tests.
+    ///
+    /// Pre-registers agent "test-agent" → channel 100.
+    async fn setup_state() -> (MockServer, Arc<BotState>) {
+        let server = MockServer::start().await;
+
+        // POST messages returns {"id": "999"}
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/channels/\d+/messages$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "999"})),
+            )
+            .expect(0..)
+            .mount(&server)
+            .await;
+
+        // PUT reactions returns 204
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/channels/\d+/messages/\d+/reactions/"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0..)
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = axi_config::Config::for_test(tmp.path());
+        let discord = axi_config::DiscordClient::with_base_url("test-token", server.uri());
+        let state = Arc::new(BotState::new(config, discord));
+
+        // Register test agent channel
+        state.register_channel(ChannelId::new(100), "test-agent").await;
+
+        // Leak the tmpdir so it lives as long as the test
+        std::mem::forget(tmp);
+
+        (server, state)
+    }
 
     #[test]
     fn cli_args_fresh() {
@@ -1187,5 +1243,302 @@ mod tests {
         assert!(is_transient_error("HTTP 529 error"));
         assert!(!is_transient_error("Invalid API key"));
         assert!(!is_transient_error("Permission denied"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Permission callback tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ask_user_question_empty_questions_auto_allows() {
+        let (_server, state) = setup_state().await;
+        let tool_input = serde_json::json!({"questions": []});
+
+        let result = handle_ask_user_question(
+            &state, "test-agent", "req-1", &tool_input, 100,
+        ).await;
+
+        assert_eq!(result["response"]["permission"], "allow");
+        assert!(result.get("response").unwrap().get("updated_input").is_none());
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_posts_formatted_question() {
+        let (server, state) = setup_state().await;
+        let tool_input = serde_json::json!({
+            "questions": [{
+                "question": "Which database?",
+                "header": "DB",
+                "multiSelect": false,
+                "options": [
+                    {"label": "PostgreSQL", "description": "Relational"},
+                    {"label": "MongoDB", "description": "Document store"},
+                ]
+            }]
+        });
+
+        // Spawn the handler and immediately resolve the oneshot
+        let state_clone = state.clone();
+        let handle = tokio::spawn(async move {
+            handle_ask_user_question(
+                &state_clone, "test-agent", "req-2", &tool_input, 100,
+            ).await
+        });
+
+        // Wait briefly for the question to be posted
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Resolve the pending question with a selection
+        {
+            let mut pending = state.pending_questions.lock().await;
+            if let Some(q) = pending.remove("999") {
+                q.sender.send(QuestionAnswer::Selection(1)).ok();
+            }
+        }
+
+        let result = handle.await.unwrap();
+        assert_eq!(result["response"]["permission"], "allow");
+        assert!(result["response"]["updated_input"].is_object());
+
+        // Verify POST was made with question content
+        let requests = server.received_requests().await.unwrap();
+        let post_reqs: Vec<_> = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::POST)
+            .collect();
+        assert!(!post_reqs.is_empty());
+        let body: serde_json::Value =
+            serde_json::from_slice(&post_reqs[0].body).unwrap();
+        let content = body["content"].as_str().unwrap();
+        assert!(content.contains("Which database?"));
+        assert!(content.contains("PostgreSQL"));
+        assert!(content.contains("MongoDB"));
+
+        // Verify reactions were added (PUT requests)
+        let put_count = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::PUT)
+            .count();
+        assert_eq!(put_count, 2); // two options → two emoji reactions
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_selection_answer() {
+        let (_server, state) = setup_state().await;
+        let tool_input = serde_json::json!({
+            "questions": [{
+                "question": "Pick a color?",
+                "header": "Color",
+                "multiSelect": false,
+                "options": [
+                    {"label": "Red", "description": "Warm"},
+                    {"label": "Blue", "description": "Cool"},
+                ]
+            }]
+        });
+
+        let state_clone = state.clone();
+        let handle = tokio::spawn(async move {
+            handle_ask_user_question(
+                &state_clone, "test-agent", "req-3", &tool_input, 100,
+            ).await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        {
+            let mut pending = state.pending_questions.lock().await;
+            if let Some(q) = pending.remove("999") {
+                q.sender.send(QuestionAnswer::Selection(0)).ok();
+            }
+        }
+
+        let result = handle.await.unwrap();
+        let updated = &result["response"]["updated_input"];
+        let answers = &updated["answers"];
+        assert_eq!(answers["Pick a color?"], "Red");
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_text_answer() {
+        let (_server, state) = setup_state().await;
+        let tool_input = serde_json::json!({
+            "questions": [{
+                "question": "What name?",
+                "header": "Name",
+                "multiSelect": false,
+                "options": [
+                    {"label": "Alice", "description": "Name A"},
+                    {"label": "Bob", "description": "Name B"},
+                ]
+            }]
+        });
+
+        let state_clone = state.clone();
+        let handle = tokio::spawn(async move {
+            handle_ask_user_question(
+                &state_clone, "test-agent", "req-4", &tool_input, 100,
+            ).await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        {
+            let mut pending = state.pending_questions.lock().await;
+            if let Some(q) = pending.remove("999") {
+                q.sender.send(QuestionAnswer::Text("Charlie".to_string())).ok();
+            }
+        }
+
+        let result = handle.await.unwrap();
+        let answers = &result["response"]["updated_input"]["answers"];
+        assert_eq!(answers["What name?"], "Charlie");
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_posts_approval_request() {
+        let (server, state) = setup_state().await;
+
+        let state_clone = state.clone();
+        let handle = tokio::spawn(async move {
+            handle_exit_plan_mode(&state_clone, "test-agent", "req-5", 100).await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        {
+            let mut pending = state.pending_questions.lock().await;
+            if let Some(q) = pending.remove("999") {
+                q.sender.send(QuestionAnswer::Approved).ok();
+            }
+        }
+
+        let result = handle.await.unwrap();
+        assert_eq!(result["response"]["permission"], "allow");
+
+        // Verify approval message was posted
+        let requests = server.received_requests().await.unwrap();
+        let post_count = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::POST)
+            .count();
+        assert!(post_count > 0);
+
+        // Verify ✅ and ❌ reactions added
+        let put_count = requests
+            .iter()
+            .filter(|r| r.method == wiremock::http::Method::PUT)
+            .count();
+        assert_eq!(put_count, 2);
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_denied() {
+        let (_server, state) = setup_state().await;
+
+        let state_clone = state.clone();
+        let handle = tokio::spawn(async move {
+            handle_exit_plan_mode(&state_clone, "test-agent", "req-6", 100).await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        {
+            let mut pending = state.pending_questions.lock().await;
+            if let Some(q) = pending.remove("999") {
+                q.sender.send(QuestionAnswer::Denied).ok();
+            }
+        }
+
+        let result = handle.await.unwrap();
+        assert_eq!(result["response"]["permission"], "deny");
+    }
+
+    #[tokio::test]
+    async fn permission_request_auto_allows_unknown_tools() {
+        let (_server, state) = setup_state().await;
+        let transport = Arc::new(Mutex::new(
+            BridgeTransport::new(
+                "test-agent".to_string(),
+                tokio::sync::mpsc::unbounded_channel().1,
+                tokio::sync::mpsc::unbounded_channel().0,
+                Box::new(|_name, _data| Box::pin(async move { Ok(()) })),
+                Box::new(|_name| Box::pin(async move { Ok(()) })),
+                Box::new(|| true),
+                false,
+                None,
+            ),
+        ));
+
+        let result = handle_permission_request(
+            &state, "test-agent", "req-7", "Bash",
+            &serde_json::json!({}), &transport,
+        ).await;
+
+        assert_eq!(result["response"]["permission"], "allow");
+    }
+
+    #[tokio::test]
+    async fn permission_request_no_channel_auto_allows() {
+        let (_server, state) = setup_state().await;
+        let transport = Arc::new(Mutex::new(
+            BridgeTransport::new(
+                "unknown-agent".to_string(),
+                tokio::sync::mpsc::unbounded_channel().1,
+                tokio::sync::mpsc::unbounded_channel().0,
+                Box::new(|_name, _data| Box::pin(async move { Ok(()) })),
+                Box::new(|_name| Box::pin(async move { Ok(()) })),
+                Box::new(|| true),
+                false,
+                None,
+            ),
+        ));
+
+        // "unknown-agent" has no channel registered
+        let result = handle_permission_request(
+            &state, "unknown-agent", "req-8", "AskUserQuestion",
+            &serde_json::json!({"questions": [{"question": "Q?", "options": []}]}),
+            &transport,
+        ).await;
+
+        assert_eq!(result["response"]["permission"], "allow");
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-compact threshold tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_compact_zero_tokens_returns_none() {
+        assert!(should_auto_compact(0, 200_000, 0.80).is_none());
+    }
+
+    #[test]
+    fn auto_compact_zero_window_returns_none() {
+        assert!(should_auto_compact(100_000, 0, 0.80).is_none());
+    }
+
+    #[test]
+    fn auto_compact_below_threshold_returns_none() {
+        // 50% utilization, 80% threshold
+        assert!(should_auto_compact(100_000, 200_000, 0.80).is_none());
+    }
+
+    #[test]
+    fn auto_compact_at_threshold_triggers() {
+        // 80% utilization, 80% threshold
+        let result = should_auto_compact(160_000, 200_000, 0.80);
+        assert!(result.is_some());
+        let util = result.unwrap();
+        assert!((util - 0.80).abs() < 0.001);
+    }
+
+    #[test]
+    fn auto_compact_above_threshold_triggers() {
+        // 95% utilization
+        let result = should_auto_compact(190_000, 200_000, 0.80);
+        assert!(result.is_some());
+        let util = result.unwrap();
+        assert!((util - 0.95).abs() < 0.001);
     }
 }

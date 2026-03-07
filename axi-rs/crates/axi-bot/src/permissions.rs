@@ -180,7 +180,7 @@ mod tests {
                 PermissionResult::Deny(msg) => {
                     assert!(msg.contains("not compatible"));
                 }
-                PermissionResult::Allow => panic!("{} should be denied", tool),
+                PermissionResult::Allow => panic!("{tool} should be denied"),
             }
         }
     }
@@ -193,7 +193,7 @@ mod tests {
         for tool in ALWAYS_ALLOWED {
             match check_permission(&config, tool, &json!({})) {
                 PermissionResult::Allow => {}
-                PermissionResult::Deny(msg) => panic!("{} should be allowed: {}", tool, msg),
+                PermissionResult::Deny(msg) => panic!("{tool} should be allowed: {msg}"),
             }
         }
     }
@@ -209,7 +209,7 @@ mod tests {
         let input = json!({"file_path": file_path.to_str().unwrap()});
         match check_permission(&config, "Write", &input) {
             PermissionResult::Allow => {}
-            PermissionResult::Deny(msg) => panic!("Should be allowed: {}", msg),
+            PermissionResult::Deny(msg) => panic!("Should be allowed: {msg}"),
         }
     }
 
@@ -236,7 +236,7 @@ mod tests {
         let input = json!({"file_path": file_path.to_str().unwrap()});
         match check_permission(&config, "Write", &input) {
             PermissionResult::Allow => {}
-            PermissionResult::Deny(msg) => panic!("Should be allowed: {}", msg),
+            PermissionResult::Deny(msg) => panic!("Should be allowed: {msg}"),
         }
     }
 
@@ -247,7 +247,7 @@ mod tests {
 
         match check_permission(&config, "Bash", &json!({"command": "ls"})) {
             PermissionResult::Allow => {}
-            PermissionResult::Deny(msg) => panic!("Bash should be allowed: {}", msg),
+            PermissionResult::Deny(msg) => panic!("Bash should be allowed: {msg}"),
         }
     }
 
@@ -273,7 +273,7 @@ mod tests {
         match check_permission(&config, "Write", &input) {
             PermissionResult::Allow => {}
             PermissionResult::Deny(msg) => {
-                panic!("Code agent should access worktrees: {}", msg)
+                panic!("Code agent should access worktrees: {msg}")
             }
         }
     }

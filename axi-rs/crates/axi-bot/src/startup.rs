@@ -287,6 +287,14 @@ async fn connect_bridge(
     None
 }
 
+/// Check whether the procmux bridge connection is down.
+///
+/// Returns `true` if the bridge is unreachable (connection is `None` or dead).
+pub(crate) async fn is_bridge_down(hub: &AgentHub) -> bool {
+    let conn = hub.process_conn.lock().await;
+    !conn.as_ref().is_some_and(axi_hub::procmux_wire::ProcmuxProcessConnection::is_alive)
+}
+
 /// Background loop that monitors the procmux bridge connection.
 ///
 /// If procmux dies, all agent sessions are lost (procmux has no persistent
@@ -301,12 +309,7 @@ async fn bridge_monitor_loop(state: Arc<BotState>, hub: Arc<AgentHub>) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
 
-        let is_alive = {
-            let conn = hub.process_conn.lock().await;
-            conn.as_ref().is_some_and(|c| c.is_alive())
-        };
-
-        if is_alive {
+        if !is_bridge_down(&hub).await {
             continue;
         }
 
@@ -380,5 +383,151 @@ async fn idle_reminder_loop(state: Arc<BotState>, hub: Arc<AgentHub>) {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    use axi_hub::hub::AgentHub;
+    use axi_hub::procmux_wire::ProcmuxProcessConnection;
+    use axi_hub::rate_limits::RateLimitTracker;
+    use axi_hub::scheduler::Scheduler;
+    use axi_hub::tasks::BackgroundTaskSet;
+
+    /// Build a minimal `AgentHub` with the given process connection.
+    fn test_hub(conn: Option<ProcmuxProcessConnection>) -> Arc<AgentHub> {
+        // Dummy frontend callbacks
+        struct NoopCallbacks;
+        impl axi_hub::FrontendCallbacks for NoopCallbacks {
+            fn post_message(&self, _: &str, _: &str) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn post_system(&self, _: &str, _: &str) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn on_wake(&self, _: &str) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn on_sleep(&self, _: &str) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn on_session_id(&self, _: &str, _: &str) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn on_spawn(&self, _: &str) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn on_kill(&self, _: &str, _: Option<&str>) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn broadcast(&self, _: &str) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn schedule_rate_limit_expiry(&self, _: f64) {}
+            fn on_idle_reminder(&self, _: &str, _: f64) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn on_reconnect(&self, _: &str, _: bool) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn close_app(&self) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn kill_process(&self) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+            fn send_goodbye(&self) -> axi_hub::callbacks::CallbackResult {
+                Box::pin(async {})
+            }
+        }
+
+        let scheduler = Arc::new(Scheduler::new(
+            7,
+            HashSet::new(),
+            Arc::new(Vec::new),
+            Arc::new(|_| Box::pin(async {})),
+        ));
+
+        Arc::new(AgentHub {
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            callbacks: Arc::new(NoopCallbacks),
+            scheduler,
+            rate_limits: Arc::new(tokio::sync::Mutex::new(RateLimitTracker::new(None, None))),
+            tasks: BackgroundTaskSet::new(),
+            wake_lock: tokio::sync::Mutex::new(()),
+            process_conn: Arc::new(tokio::sync::Mutex::new(conn)),
+            create_client: Arc::new(|_, _| Box::pin(async { Ok(Box::new(()) as Box<dyn std::any::Any + Send + Sync>) })),
+            disconnect_client: Arc::new(|_| Box::pin(async {})),
+            send_query: Arc::new(|_, _| Box::pin(async {})),
+            query_timeout: 300.0,
+            max_retries: 3,
+            retry_base_delay: 5.0,
+            slot_timeout: 300.0,
+            shutdown_requested: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    #[tokio::test]
+    async fn bridge_down_when_no_connection() {
+        let hub = test_hub(None);
+        assert!(is_bridge_down(&hub).await);
+    }
+
+    #[tokio::test]
+    async fn bridge_up_with_live_connection() {
+        use procmux::server::ProcmuxServer;
+
+        let socket_path = "/tmp/procmux-test-bridge-up.sock";
+        let _ = std::fs::remove_file(socket_path);
+
+        let server = ProcmuxServer::new(socket_path);
+        let server_handle = tokio::spawn(async move {
+            server.run().await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let conn = ProcmuxProcessConnection::connect(socket_path).await.unwrap();
+        let hub = test_hub(Some(conn));
+
+        assert!(!is_bridge_down(&hub).await);
+
+        server_handle.abort();
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[tokio::test]
+    async fn bridge_down_after_server_killed() {
+        use procmux::server::ProcmuxServer;
+
+        let socket_path = "/tmp/procmux-test-bridge-down.sock";
+        let _ = std::fs::remove_file(socket_path);
+
+        let server = ProcmuxServer::new(socket_path);
+        let server_handle = tokio::spawn(async move {
+            server.run().await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let conn = ProcmuxProcessConnection::connect(socket_path).await.unwrap();
+        assert!(conn.is_alive());
+
+        // Kill the server
+        server_handle.abort();
+        let _ = server_handle.await;
+
+        // Wait for the connection to detect the loss
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let hub = test_hub(Some(conn));
+        assert!(is_bridge_down(&hub).await);
+
+        let _ = std::fs::remove_file(socket_path);
     }
 }

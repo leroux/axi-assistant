@@ -37,6 +37,14 @@ pub struct DiscordClient {
 
 impl DiscordClient {
     pub fn new(token: &str) -> Self {
+        Self::with_base_url(token, API_BASE.to_string())
+    }
+
+    /// Create a client pointing at a custom base URL.
+    ///
+    /// Used for integration tests — point at a local HTTP server
+    /// instead of the real Discord API.
+    pub fn with_base_url(token: &str, base_url: String) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .default_headers({
@@ -51,10 +59,7 @@ impl DiscordClient {
             .build()
             .expect("failed to build HTTP client");
 
-        Self {
-            client,
-            base_url: API_BASE.to_string(),
-        }
+        Self { client, base_url }
     }
 
     /// Make a Discord API request with rate-limit and retry handling.
