@@ -216,10 +216,10 @@ Each phase produces testable artifacts:
 | axi-config | lib | 4 | Config loading, Discord REST client, model management |
 | axi-hub | lib | 2 | Agent session management, lifecycle, rate limits |
 | axi-mcp | lib | 8 | MCP tool servers — protocol, tools, schedules |
-| axi-bot | bin | 56 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions, todos, frontend, startup, bridge |
+| axi-bot | bin | 58 | Discord bot, events, commands, channels, scheduler, crash handler, streaming, prompts, permissions, todos, frontend, startup, bridge |
 | discordquery | bin | 5 | Discord message history query CLI (guilds, channels, history, search, wait) |
 | axi-supervisor | bin | 0 | Process supervisor (tested via integration) |
-| **Total** | | **103** | |
+| **Total** | | **105** | |
 
 ## Migration Plan
 

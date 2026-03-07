@@ -72,10 +72,15 @@ pub async fn create_client(
     let procmux_rx = conn.register_process(name).await;
 
     // Build CLI args
-    let cli_args = build_cli_args(resume_session_id, &state.config.config_path);
+    let cli_args = build_cli_args(
+        resume_session_id,
+        &state.config.config_path,
+        system_prompt.as_ref(),
+        mcp_servers.as_ref(),
+    );
 
     // Build environment
-    let env = build_env(system_prompt.as_ref(), mcp_servers.as_ref());
+    let env = build_env();
 
     // Spawn process via procmux
     let spawn_cwd = if cwd.is_empty() { None } else { Some(cwd) };
@@ -460,17 +465,54 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
 fn build_cli_args(
     resume_session_id: Option<&str>,
     config_path: &std::path::Path,
+    system_prompt: Option<&serde_json::Value>,
+    mcp_servers: Option<&serde_json::Value>,
 ) -> Vec<String> {
     let mut args = vec![
         "claude".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
+        "--print".to_string(),
+        "--input-format".to_string(),
+        "stream-json".to_string(),
+        "--include-partial-messages".to_string(),
     ];
 
     // Set model
     let model = axi_config::get_model(config_path);
     args.extend(["--model".to_string(), model]);
+
+    // Setting sources
+    args.extend(["--setting-sources".to_string(), "local".to_string()]);
+
+    // Permission mode
+    args.extend(["--permission-mode".to_string(), "default".to_string()]);
+
+    // System prompt
+    if let Some(prompt) = system_prompt {
+        if let Some(prompt_str) = prompt.as_str() {
+            if !prompt_str.is_empty() {
+                args.extend(["--append-system-prompt".to_string(), prompt_str.to_string()]);
+            }
+        } else if let Ok(prompt_str) = serde_json::to_string(prompt) {
+            args.extend(["--append-system-prompt".to_string(), prompt_str]);
+        }
+    }
+
+    // MCP server config
+    if let Some(mcp) = mcp_servers {
+        if mcp.is_object() && !mcp.as_object().unwrap().is_empty() {
+            // Wrap in {"mcpServers": ...} format expected by --mcp-config
+            let config = serde_json::json!({"mcpServers": mcp});
+            if let Ok(mcp_json) = serde_json::to_string(&config) {
+                args.extend(["--mcp-config".to_string(), mcp_json]);
+            }
+        }
+    }
+
+    // Disallowed tools
+    args.extend(["--disallowed-tools".to_string(), "Task".to_string()]);
 
     // Resume session if available
     if let Some(session_id) = resume_session_id {
@@ -481,22 +523,27 @@ fn build_cli_args(
 }
 
 /// Build environment variables for the CLI process.
-fn build_env(
-    _system_prompt: Option<&serde_json::Value>,
-    _mcp_servers: Option<&serde_json::Value>,
-) -> std::collections::HashMap<String, String> {
+fn build_env() -> std::collections::HashMap<String, String> {
     let mut env = std::collections::HashMap::new();
 
     // Pass through relevant env vars
-    if let Ok(val) = std::env::var("ANTHROPIC_API_KEY") {
-        env.insert("ANTHROPIC_API_KEY".to_string(), val);
+    for key in &[
+        "ANTHROPIC_API_KEY",
+        "HOME",
+        "PATH",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "NODE_PATH",
+        "TERM",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            env.insert(key.to_string(), val);
+        }
     }
-    if let Ok(val) = std::env::var("HOME") {
-        env.insert("HOME".to_string(), val);
-    }
-    if let Ok(val) = std::env::var("PATH") {
-        env.insert("PATH".to_string(), val);
-    }
+
+    // Force autocompact
+    env.insert("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(), "100".to_string());
 
     env
 }
@@ -561,19 +608,44 @@ mod tests {
     #[test]
     fn cli_args_fresh() {
         let path = std::path::Path::new("/tmp/nonexistent-config.json");
-        let args = build_cli_args(None, path);
+        let args = build_cli_args(None, path, None, None);
         assert!(args.contains(&"claude".to_string()));
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--print".to_string()));
+        assert!(args.contains(&"--input-format".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--append-system-prompt".to_string()));
+        assert!(!args.contains(&"--mcp-config".to_string()));
     }
 
     #[test]
     fn cli_args_resume() {
         let path = std::path::Path::new("/tmp/nonexistent-config.json");
-        let args = build_cli_args(Some("session-123"), path);
+        let args = build_cli_args(Some("session-123"), path, None, None);
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&"session-123".to_string()));
+    }
+
+    #[test]
+    fn cli_args_with_system_prompt() {
+        let path = std::path::Path::new("/tmp/nonexistent-config.json");
+        let prompt = serde_json::Value::String("You are a test bot.".to_string());
+        let args = build_cli_args(None, path, Some(&prompt), None);
+        assert!(args.contains(&"--append-system-prompt".to_string()));
+        assert!(args.contains(&"You are a test bot.".to_string()));
+    }
+
+    #[test]
+    fn cli_args_with_mcp_servers() {
+        let path = std::path::Path::new("/tmp/nonexistent-config.json");
+        let mcp = serde_json::json!({"myserver": {"command": "node", "args": ["server.js"]}});
+        let args = build_cli_args(None, path, None, Some(&mcp));
+        assert!(args.contains(&"--mcp-config".to_string()));
+        // Should be wrapped in {"mcpServers": ...}
+        let mcp_idx = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let mcp_val: serde_json::Value = serde_json::from_str(&args[mcp_idx + 1]).unwrap();
+        assert!(mcp_val.get("mcpServers").is_some());
     }
 
     #[test]
