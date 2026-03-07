@@ -6,7 +6,10 @@ This file is appended to the system prompt for agents working on the axi-assista
 
 - **Axi Prime**: Main bot at %(bot_dir)s (branch `main`, service `axi-bot.service`)
 - **Disposable test instances**: Managed by `axi_test.py` CLI, git worktrees in `/home/ubuntu/axi-tests/<name>/`
-- Each test instance has its own worktree, `.env`, venv, data dir, and systemd service (`axi-test@<name>`)
+- Each test instance has its own worktree, `.env`, venv, data dir, and systemd service(s)
+- **Python mode** (default): 1 service — `axi-test@<name>`
+- **Rust mode** (`--rs`): 2 services — `axi-test-procmux@<name>` (process mux) + `axi-test-bot@<name>` (bot, depends on procmux)
+- Mode is stored in `slots.json` per instance; `down`/`restart`/`logs`/`clean` read it automatically
 - Config at `~/.config/axi/test-config.json` (bots, guilds, defaults)
 - See [test-system.md](test-system.md) for details
 
@@ -15,7 +18,9 @@ This file is appended to the system prompt for agents working on the axi-assista
 - `bot.py` — Main bot code (all instances run same code, behavior differs via env vars)
 - `supervisor.py` — Process supervisor (manages bot.py lifecycle)
 - `axi_test.py` — CLI for test instances (up/down/restart/list/merge/msg/logs)
-- `axi-test@.service` — Systemd template unit for test instances
+- `axi-test@.service` — Systemd template unit for Python test instances
+- `axi-rs/systemd/axi-test-bot@.service` — Systemd template unit for Rust test bot
+- `axi-rs/systemd/axi-test-procmux@.service` — Systemd template unit for Rust test procmux
 - `SOUL.md` — Shared personality prompt for all agents (loaded at startup)
 - `dev_context.md` — This file; axi dev context appended for agents working on the codebase
 - `.env` — Instance-specific config (gitignored)

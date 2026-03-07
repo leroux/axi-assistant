@@ -39,6 +39,7 @@ CONFIG_DIR = os.path.expanduser("~/.config/axi")
 SLOTS_FILE = os.path.join(CONFIG_DIR, ".test-slots.json")
 SLOTS_LOCK = os.path.join(CONFIG_DIR, ".test-slots.lock")
 SENTINEL = "Bot has finished responding"
+BOT_DIR = "/home/ubuntu/axi-assistant"
 
 
 # --- Utilities ---
@@ -54,6 +55,41 @@ def _systemctl_env() -> dict[str, str]:
     if "XDG_RUNTIME_DIR" not in env:
         env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
     return env
+
+
+def _service_units(name: str, mode: str) -> list[str]:
+    """Return systemd unit name(s) for an instance, in start order."""
+    if mode == "rs":
+        return [f"axi-test-procmux@{name}.service", f"axi-test-bot@{name}.service"]
+    return [f"axi-test@{name}.service"]
+
+
+def _slot_mode(slots: dict[str, Any], name: str) -> str:
+    """Return 'rs' or 'py' for a reserved instance."""
+    return slots.get(name, {}).get("mode", "py")
+
+
+def _install_rs_units() -> None:
+    """Symlink Rust unit files into ~/.config/systemd/user/ and reload."""
+    user_units = os.path.expanduser("~/.config/systemd/user")
+    os.makedirs(user_units, exist_ok=True)
+    src_dir = os.path.join(BOT_DIR, "axi-rs", "systemd")
+    changed = False
+    for unit in ("axi-test-bot@.service", "axi-test-procmux@.service"):
+        src = os.path.join(src_dir, unit)
+        dst = os.path.join(user_units, unit)
+        if os.path.islink(dst) and os.readlink(dst) == src:
+            continue
+        if os.path.exists(dst):
+            os.remove(dst)
+        os.symlink(src, dst)
+        changed = True
+    if changed:
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            capture_output=True,
+            env=_systemctl_env(),
+        )
 
 
 def load_config() -> dict[str, Any]:
@@ -75,14 +111,15 @@ def load_config() -> dict[str, Any]:
     return config
 
 
-def is_instance_running(name: str) -> bool:
+def is_instance_running(name: str, mode: str = "py") -> bool:
     """Check if a test instance systemd service is active.
 
     Fails hard if systemctl can't reach the user bus — silently returning
     False in that case would mask running instances and corrupt reservations.
     """
+    unit = f"axi-test-bot@{name}" if mode == "rs" else f"axi-test@{name}"
     result = subprocess.run(
-        ["systemctl", "--user", "is-active", f"axi-test@{name}"],
+        ["systemctl", "--user", "is-active", unit],
         capture_output=True,
         text=True,
         env=_systemctl_env(),
@@ -240,12 +277,14 @@ def _health_check(slots: dict[str, Any], config: dict[str, Any]) -> None:
         # Worktree directory gone → definitely orphaned
         if not os.path.isdir(worktree):
             to_remove.append(name)
-            if is_instance_running(name):
-                subprocess.run(
-                    ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                    capture_output=True,
-                    env=_systemctl_env(),
-                )
+            mode = _slot_mode(slots, name)
+            if is_instance_running(name, mode):
+                for unit in reversed(_service_units(name, mode)):
+                    subprocess.run(
+                        ["systemctl", "--user", "stop", unit],
+                        capture_output=True,
+                        env=_systemctl_env(),
+                    )
 
     for name in to_remove:
         del slots[name]
@@ -279,7 +318,7 @@ def _find_free_guild(
     return None
 
 
-def _make_slot(guild_name: str, config: dict[str, Any], worktree: str) -> dict[str, Any]:
+def _make_slot(guild_name: str, config: dict[str, Any], worktree: str, mode: str = "py") -> dict[str, Any]:
     """Create a slot reservation record."""
     guild_info = config["guilds"][guild_name]
     return {
@@ -288,6 +327,7 @@ def _make_slot(guild_name: str, config: dict[str, Any], worktree: str) -> dict[s
         "token_id": guild_info.get("bot"),
         "reserved_at": datetime.now(UTC).isoformat(),
         "worktree": worktree,
+        "mode": mode,
     }
 
 
@@ -323,24 +363,28 @@ def _write_env(guild_name: str, config: dict[str, Any], instance_path: str, data
                 json.dump([], f)
 
 
-def _try_reserve(config: dict[str, Any], name: str, instance_path: str, explicit_guild: str | None) -> str | None:
+def _try_reserve(
+    config: dict[str, Any], name: str, instance_path: str, explicit_guild: str | None, mode: str = "py"
+) -> str | None:
     """Attempt to reserve a slot atomically. Returns guild name or None."""
     with _flock(SLOTS_LOCK):
         slots = _load_slots(config)
         _health_check(slots, config)
 
         if name in slots:
-            if is_instance_running(name):
+            old_mode = _slot_mode(slots, name)
+            if is_instance_running(name, old_mode):
                 print(f"Error: Instance '{name}' is already running", file=sys.stderr)
                 print(f"Run 'axi-test down {name}' first, or choose a different name", file=sys.stderr)
                 sys.exit(1)
             else:
                 print(f"Cleaning up stale reservation for '{name}' (not running)")
-                subprocess.run(
-                    ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                    capture_output=True,
-                    env=_systemctl_env(),
-                )
+                for unit in reversed(_service_units(name, old_mode)):
+                    subprocess.run(
+                        ["systemctl", "--user", "stop", unit],
+                        capture_output=True,
+                        env=_systemctl_env(),
+                    )
                 env_path = os.path.join(instance_path, ".env")
                 if os.path.isfile(env_path):
                     os.remove(env_path)
@@ -348,7 +392,7 @@ def _try_reserve(config: dict[str, Any], name: str, instance_path: str, explicit
 
         guild_name = _find_free_guild(slots, config, name, explicit_guild)
         if guild_name is not None:
-            slots[name] = _make_slot(guild_name, config, instance_path)
+            slots[name] = _make_slot(guild_name, config, instance_path, mode)
             _write_slots(slots)
             return guild_name
 
@@ -363,6 +407,7 @@ def _wait_and_reserve(
     explicit_guild: str | None,
     timeout: int,
     poll_interval: int = 10,
+    mode: str = "py",
 ) -> str:
     """Poll until a slot is available and reserve it atomically."""
     deadline = time.monotonic() + timeout
@@ -390,7 +435,7 @@ def _wait_and_reserve(
             _health_check(slots, config)
             guild_name = _find_free_guild(slots, config, name, explicit_guild)
             if guild_name is not None:
-                slots[name] = _make_slot(guild_name, config, instance_path)
+                slots[name] = _make_slot(guild_name, config, instance_path, mode)
                 _write_slots(slots)
                 print(f"Slot available! Using guild '{guild_name}'")
                 return guild_name
@@ -407,25 +452,39 @@ def _wait_and_reserve(
 def cleanup_orphan_services() -> int:
     """Stop and reset orphaned axi-test@ services.
 
-    Finds user-level axi-test@ units that have no reservation in the
-    slots file and no .env file (pre-migration fallback).
+    Finds user-level axi-test@, axi-test-bot@, and axi-test-procmux@
+    units that have no reservation in the slots file and no .env file
+    (pre-migration fallback).
     """
     slots = _read_slots()
     env = _systemctl_env()
+
+    # Scan all three unit patterns
+    prefixes = ("axi-test@", "axi-test-bot@", "axi-test-procmux@")
+    patterns = [f"{p}*" for p in prefixes]
     result = subprocess.run(
-        ["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "axi-test@*"],
+        ["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", *patterns],
         capture_output=True,
         text=True,
         env=env,
     )
+
     cleaned = 0
     for line in result.stdout.strip().splitlines():
         if not line.strip():
             continue
         unit = line.split()[0]
-        if not unit.startswith("axi-test@") or not unit.endswith(".service"):
+        if not unit.endswith(".service"):
             continue
-        name = unit[len("axi-test@") : -len(".service")]
+
+        # Extract instance name from unit
+        name: str | None = None
+        for prefix in prefixes:
+            if unit.startswith(prefix):
+                name = unit[len(prefix) : -len(".service")]
+                break
+        if name is None:
+            continue
 
         # Has a reservation → legitimate
         if name in slots:
@@ -625,10 +684,14 @@ def cmd_up(args: argparse.Namespace) -> None:
 
     config = load_config()
     name = args.name
+    mode = "rs" if args.rs else "py"
     instance_path = os.path.join(TESTS_DIR, name)
     data_path = os.path.join(TESTS_DIR, f"{name}-data")
 
-    guild_name = _try_reserve(config, name, instance_path, args.guild)
+    if mode == "rs":
+        _install_rs_units()
+
+    guild_name = _try_reserve(config, name, instance_path, args.guild, mode)
 
     if guild_name is None:
         if args.wait:
@@ -638,6 +701,7 @@ def cmd_up(args: argparse.Namespace) -> None:
                 instance_path,
                 args.guild,
                 args.wait_timeout,
+                mode=mode,
             )
         else:
             total = len(config["guilds"])
@@ -650,7 +714,7 @@ def cmd_up(args: argparse.Namespace) -> None:
     _write_env(guild_name, config, instance_path, data_path)
 
     guild_id = config["guilds"][guild_name]["guild_id"]
-    print(f"Reserved guild '{guild_name}' ({guild_id}) for instance '{name}'")
+    print(f"Reserved guild '{guild_name}' ({guild_id}) for instance '{name}' (mode: {mode})")
     print(f"  .env:  {instance_path}/.env")
     print(f"  Data:  {data_path}")
 
@@ -668,14 +732,17 @@ def cmd_down(args: argparse.Namespace) -> None:
             print(f"Error: No reservation found for '{name}'", file=sys.stderr)
             sys.exit(1)
 
-        if is_instance_running(name):
-            print(f"Stopping axi-test@{name}...")
-            subprocess.run(
-                ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                capture_output=True,
-                check=True,
-                env=_systemctl_env(),
-            )
+        mode = _slot_mode(slots, name)
+        if is_instance_running(name, mode):
+            units = _service_units(name, mode)
+            print(f"Stopping {units[-1]}...")
+            for unit in reversed(units):
+                subprocess.run(
+                    ["systemctl", "--user", "stop", unit],
+                    capture_output=True,
+                    check=True,
+                    env=_systemctl_env(),
+                )
 
         if os.path.isfile(env_path):
             os.remove(env_path)
@@ -692,13 +759,16 @@ def cmd_restart(args: argparse.Namespace) -> None:
     if name not in slots:
         print(f"Warning: No reservation found for '{name}' in slots file", file=sys.stderr)
 
-    print(f"Restarting axi-test@{name}...")
-    subprocess.run(
-        ["systemctl", "--user", "restart", f"axi-test@{name}"],
-        capture_output=True,
-        check=True,
-        env=_systemctl_env(),
-    )
+    mode = _slot_mode(slots, name)
+    units = _service_units(name, mode)
+    print(f"Restarting {units[-1]}...")
+    for unit in units:
+        subprocess.run(
+            ["systemctl", "--user", "restart", unit],
+            capture_output=True,
+            check=True,
+            env=_systemctl_env(),
+        )
     print("Done")
 
 
@@ -714,20 +784,21 @@ def cmd_list(args: argparse.Namespace) -> None:
         print("No test instances found")
         return
 
-    rows: list[tuple[str, str, str, str, str]] = []
+    rows: list[tuple[str, str, str, str, str, str]] = []
     for name in sorted(slots):
         slot = slots[name]
         guild_name = slot.get("guild", "?")
+        mode = _slot_mode(slots, name)
         worktree = slot.get("worktree", os.path.join(TESTS_DIR, name))
-        status = "running" if is_instance_running(name) else "stopped"
+        status = "running" if is_instance_running(name, mode) else "stopped"
 
         is_git = os.path.isdir(os.path.join(worktree, ".git")) or os.path.isfile(os.path.join(worktree, ".git"))
         branch = get_worktree_branch(worktree) if is_git else "-"
 
         reserved_at = slot.get("reserved_at", "?")[:19]
-        rows.append((name, str(guild_name), branch, status, str(reserved_at)))
+        rows.append((name, str(guild_name), mode, branch, status, str(reserved_at)))
 
-    headers = ("NAME", "GUILD", "BRANCH", "STATUS", "RESERVED_AT")
+    headers = ("NAME", "GUILD", "MODE", "BRANCH", "STATUS", "RESERVED_AT")
     widths = [max(len(h), max(len(str(r[i])) for r in rows)) for i, h in enumerate(headers)]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*headers))
@@ -1094,13 +1165,16 @@ def cmd_clean(args: argparse.Namespace) -> None:
     with _flock(SLOTS_LOCK):
         slots = _load_slots(config)
         if name in slots:
-            if is_instance_running(name):
-                print(f"Stopping axi-test@{name}...")
-                subprocess.run(
-                    ["systemctl", "--user", "stop", f"axi-test@{name}"],
-                    capture_output=True,
-                    env=_systemctl_env(),
-                )
+            mode = _slot_mode(slots, name)
+            if is_instance_running(name, mode):
+                units = _service_units(name, mode)
+                print(f"Stopping {units[-1]}...")
+                for unit in reversed(units):
+                    subprocess.run(
+                        ["systemctl", "--user", "stop", unit],
+                        capture_output=True,
+                        env=_systemctl_env(),
+                    )
             env_path = os.path.join(worktree_path, ".env")
             if os.path.isfile(env_path):
                 os.remove(env_path)
@@ -1172,16 +1246,32 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
 
 def cmd_logs(args: argparse.Namespace) -> None:
-    os.execvp(
-        "journalctl",
-        [
+    name = args.name
+    mode = _slot_mode(_read_slots(), name)
+    if mode == "rs":
+        os.execvp(
             "journalctl",
-            "--user",
-            "-u",
-            f"axi-test@{args.name}",
-            "-f",
-        ],
-    )
+            [
+                "journalctl",
+                "--user",
+                "-u",
+                f"axi-test-procmux@{name}",
+                "-u",
+                f"axi-test-bot@{name}",
+                "-f",
+            ],
+        )
+    else:
+        os.execvp(
+            "journalctl",
+            [
+                "journalctl",
+                "--user",
+                "-u",
+                f"axi-test@{name}",
+                "-f",
+            ],
+        )
 
 
 def main():
@@ -1197,6 +1287,7 @@ def main():
     p_up.add_argument("--guild", help="Guild name from config (default: auto-pick)")
     p_up.add_argument("--wait", action="store_true", help="Wait for a bot token slot if all are in use")
     p_up.add_argument("--wait-timeout", type=int, default=7200, help="Max seconds to wait for a slot (default: 7200)")
+    p_up.add_argument("--rs", action="store_true", help="Use Rust bot (2 services: procmux + bot)")
     p_up.set_defaults(func=cmd_up)
 
     # down
