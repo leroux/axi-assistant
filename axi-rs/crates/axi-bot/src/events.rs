@@ -123,10 +123,114 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
         content_preview(&content, 100)
     );
 
-    // TODO: Look up agent for this channel via hub
-    // TODO: Route message to agent or handle system commands
-    // For now, just log that we received it
-    debug!("Message routed (hub integration pending)");
+    // Look up agent for this channel
+    let agent_name = match state.agent_for_channel(msg.channel_id).await {
+        Some(name) => name,
+        None => {
+            debug!(
+                "No agent mapped to channel {}, ignoring message",
+                msg.channel_id
+            );
+            return;
+        }
+    };
+
+    // Add timestamp prefix (matches Python behavior)
+    let ts_prefix = chrono::Utc::now()
+        .format("[%Y-%m-%d %H:%M:%S UTC] ")
+        .to_string();
+    let message_content = axi_hub::MessageContent::Text(format!("{}{}", ts_prefix, content));
+
+    // Mark agent as interactive (user-facing)
+    let hub = state.hub().await;
+    hub.scheduler.mark_interactive(&agent_name).await;
+
+    // Wake-or-queue the message
+    let woke = axi_hub::lifecycle::wake_or_queue(
+        &hub,
+        &agent_name,
+        message_content.clone(),
+        None,
+    )
+    .await;
+
+    if woke {
+        // Agent is awake — send the query in a background task
+        let hub_ref = hub.clone_ref();
+        let name = agent_name.clone();
+        let stream_handler = make_stream_handler(Arc::clone(&state));
+        tokio::spawn(async move {
+            let query_lock = {
+                let sessions = hub_ref.sessions.lock().await;
+                sessions.get(&name).map(|s| s.query_lock.clone())
+            };
+
+            if let Some(query_lock) = query_lock {
+                let _lock = query_lock.lock().await;
+
+                {
+                    let mut sessions = hub_ref.sessions.lock().await;
+                    if let Some(session) = sessions.get_mut(&name) {
+                        axi_hub::lifecycle::reset_activity(session);
+                    }
+                }
+
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs_f64(hub_ref.query_timeout),
+                    axi_hub::messaging::process_message(
+                        &hub_ref,
+                        &name,
+                        &message_content,
+                        &stream_handler,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        let mut sessions = hub_ref.sessions.lock().await;
+                        if let Some(session) = sessions.get_mut(&name) {
+                            session.last_activity = chrono::Utc::now();
+                            session.activity = claudewire::events::ActivityState::default();
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Query error for '{}': {}", name, e);
+                        hub_ref
+                            .callbacks
+                            .post_system(&name, &format!("Error: {}", e))
+                            .await;
+                    }
+                    Err(_) => {
+                        axi_hub::messaging::handle_query_timeout(&hub_ref, &name).await;
+                    }
+                }
+
+                // Process queue then sleep
+                axi_hub::messaging::process_message_queue(&hub_ref, &name, &stream_handler).await;
+                axi_hub::lifecycle::sleep_agent(&hub_ref, &name, false).await;
+            }
+        });
+    } else {
+        debug!(
+            "Agent '{}' not awake, message queued",
+            agent_name
+        );
+    }
+}
+
+/// Create a stream handler that consumes SDK output and renders to Discord.
+///
+/// This is a placeholder — the real implementation will read claudewire events
+/// from the bridge and post live-edit messages to the agent's channel.
+fn make_stream_handler(state: Arc<BotState>) -> axi_hub::messaging::StreamHandlerFn {
+    Arc::new(move |_agent_name: &str| {
+        let _state = state.clone();
+        Box::pin(async move {
+            // TODO: Read claudewire stream events, render via live-edit to Discord
+            // For now, return None (success) — real implementation will process the stream
+            None
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +293,47 @@ pub async fn handle_reaction_add(ctx: &Context, reaction: &Reaction) {
         emoji, reaction.message_id, reaction.channel_id
     );
 
-    // TODO: Route to plan approval or question answer via hub
+    // Look up agent for this channel
+    let agent_name = match state.agent_for_channel(reaction.channel_id).await {
+        Some(name) => name,
+        None => return,
+    };
+
+    // Plan approval: checkmark = approve, X = reject
+    match emoji.as_str() {
+        "\u{2705}" | "\u{2714}\u{fe0f}" => {
+            // Checkmark — approve plan
+            info!(
+                "Plan approved for agent '{}' via reaction",
+                agent_name
+            );
+            // Send approval message to agent
+            let hub = state.hub().await;
+            let content = axi_hub::MessageContent::Text(
+                "Plan approved. Proceed with implementation.".to_string(),
+            );
+            axi_hub::lifecycle::wake_or_queue(&hub, &agent_name, content, None).await;
+        }
+        "\u{274c}" | "\u{274e}" => {
+            // X mark — reject plan
+            info!(
+                "Plan rejected for agent '{}' via reaction",
+                agent_name
+            );
+            let hub = state.hub().await;
+            let content = axi_hub::MessageContent::Text(
+                "Plan rejected. Please revise your approach.".to_string(),
+            );
+            axi_hub::lifecycle::wake_or_queue(&hub, &agent_name, content, None).await;
+        }
+        _ => {
+            // Other reactions — could be question answers (1️⃣, 2️⃣, etc.)
+            debug!(
+                "Unhandled reaction {} for agent '{}'",
+                emoji, agent_name
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

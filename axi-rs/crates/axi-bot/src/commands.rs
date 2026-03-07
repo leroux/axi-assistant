@@ -7,10 +7,11 @@
 use std::sync::Arc;
 
 use serenity::all::{
-    CommandDataOptionValue, CommandInteraction, CommandOptionType, Context, CreateCommand,
-    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage,
+    ChannelId, CommandDataOptionValue, CommandInteraction, CommandOptionType, Context,
+    CreateCommand, CreateCommandOption, CreateInteractionResponse,
+    CreateInteractionResponseMessage,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::state::BotState;
 
@@ -245,15 +246,21 @@ pub async fn handle_command(ctx: &Context, command: &CommandInteraction) {
         "ping" => handle_ping(ctx, command, &state).await,
         "model" => handle_model(ctx, command, &state).await,
         "list-agents" => handle_list_agents(ctx, command, &state).await,
+        "status" => handle_status(ctx, command, &state).await,
+        "kill-agent" => handle_kill_agent(ctx, command, &state).await,
+        "stop" => handle_stop(ctx, command, &state).await,
+        "skip" => handle_skip(ctx, command, &state).await,
         "restart" => handle_restart(ctx, command, &state).await,
+        "restart-including-bridge" => handle_restart_bridge(ctx, command, &state).await,
+        "reset-context" => handle_reset_context(ctx, command, &state).await,
+        "send" => handle_send(ctx, command, &state).await,
         _ => {
-            // Placeholder for commands that need hub integration
             let _ = command
                 .create_response(
                     &ctx.http,
                     CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
-                            .content(format!("Command `/{name}` is not yet implemented in Rust."))
+                            .content(format!("Command `/{name}` is not yet wired."))
                             .ephemeral(true),
                     ),
                 )
@@ -334,9 +341,59 @@ async fn handle_model(ctx: &Context, command: &CommandInteraction, state: &BotSt
         .await;
 }
 
-async fn handle_list_agents(ctx: &Context, command: &CommandInteraction, _state: &BotState) {
-    // TODO: integrate with AgentHub sessions
-    let msg = "*System:* No active agents (hub integration pending).";
+/// Resolve agent name: explicit option > infer from channel.
+async fn resolve_agent_name(
+    command: &CommandInteraction,
+    state: &BotState,
+) -> Option<String> {
+    if let Some(name) = get_string_option(command, "agent_name") {
+        return Some(name);
+    }
+    // Infer from channel
+    state
+        .agent_for_channel(ChannelId::new(command.channel_id.get()))
+        .await
+}
+
+async fn handle_list_agents(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let hub = state.hub().await;
+    let sessions = hub.sessions.lock().await;
+
+    if sessions.is_empty() {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("No active agents.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let mut lines = Vec::new();
+    for (name, session) in sessions.iter() {
+        let status = if session.is_awake() {
+            if axi_hub::lifecycle::is_processing(session) {
+                "working"
+            } else {
+                "awake"
+            }
+        } else {
+            "sleeping"
+        };
+        let sid = session
+            .session_id
+            .as_deref()
+            .map(|s| format!(" `{}`", &s[..8.min(s.len())]))
+            .unwrap_or_default();
+        lines.push(format!("- **{}** — {}{}", name, status, sid));
+    }
+
+    let msg = format!("**Active agents ({}):**\n{}", sessions.len(), lines.join("\n"));
+    drop(sessions);
 
     let _ = command
         .create_response(
@@ -345,6 +402,309 @@ async fn handle_list_agents(ctx: &Context, command: &CommandInteraction, _state:
                 CreateInteractionResponseMessage::new()
                     .content(msg)
                     .ephemeral(true),
+            ),
+        )
+        .await;
+}
+
+async fn handle_status(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = match resolve_agent_name(command, state).await {
+        Some(n) => n,
+        None => {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Could not determine agent. Specify a name or use in an agent channel.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+    };
+
+    let hub = state.hub().await;
+    let sessions = hub.sessions.lock().await;
+
+    let msg = if let Some(session) = sessions.get(&agent_name) {
+        let status = if session.is_awake() {
+            if axi_hub::lifecycle::is_processing(session) {
+                "Working"
+            } else {
+                "Awake (idle)"
+            }
+        } else {
+            "Sleeping"
+        };
+        let queued = session.message_queue.len();
+        let sid = session
+            .session_id
+            .as_deref()
+            .unwrap_or("none");
+        format!(
+            "**{}**: {} | session: `{}` | queued: {} | cwd: `{}`",
+            agent_name, status, sid, queued, session.cwd
+        )
+    } else {
+        format!("Agent '{}' not found.", agent_name)
+    };
+
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(msg)
+                    .ephemeral(true),
+            ),
+        )
+        .await;
+}
+
+async fn handle_kill_agent(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = match resolve_agent_name(command, state).await {
+        Some(n) => n,
+        None => {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Could not determine agent.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+    };
+
+    if agent_name == state.config.master_agent_name {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("Cannot kill the master agent.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let hub = state.hub().await;
+
+    // Get session ID before killing
+    let session_id = {
+        let sessions = hub.sessions.lock().await;
+        sessions.get(&agent_name).and_then(|s| s.session_id.clone())
+    };
+
+    axi_hub::registry::end_session(&hub, &agent_name).await;
+    hub.callbacks.on_kill(&agent_name, session_id.as_deref()).await;
+
+    let sid_text = session_id
+        .as_deref()
+        .map(|s| format!(" (session: `{}`)", s))
+        .unwrap_or_default();
+
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(format!("Agent **{}** killed.{}", agent_name, sid_text)),
+            ),
+        )
+        .await;
+}
+
+async fn handle_stop(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = match resolve_agent_name(command, state).await {
+        Some(n) => n,
+        None => {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Could not determine agent.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+    };
+
+    let hub = state.hub().await;
+    axi_hub::messaging::interrupt_session(&hub, &agent_name).await;
+
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(format!("Interrupted agent **{}**.", agent_name)),
+            ),
+        )
+        .await;
+}
+
+async fn handle_skip(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = match resolve_agent_name(command, state).await {
+        Some(n) => n,
+        None => {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Could not determine agent.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+    };
+
+    let hub = state.hub().await;
+    axi_hub::messaging::interrupt_session(&hub, &agent_name).await;
+
+    // Skip doesn't sleep — the agent will process the next queued message
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(format!(
+                        "Skipped current query for **{}** (will process queue).",
+                        agent_name
+                    )),
+            ),
+        )
+        .await;
+}
+
+async fn handle_reset_context(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = match resolve_agent_name(command, state).await {
+        Some(n) => n,
+        None => {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Could not determine agent.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+    };
+
+    let cwd = get_string_option(command, "working_dir");
+    let hub = state.hub().await;
+    axi_hub::registry::reset_session(&hub, &agent_name, cwd.clone()).await;
+
+    let cwd_msg = cwd
+        .as_deref()
+        .map(|c| format!(" (new cwd: `{}`)", c))
+        .unwrap_or_default();
+
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(format!(
+                        "Context reset for **{}**.{}",
+                        agent_name, cwd_msg
+                    )),
+            ),
+        )
+        .await;
+}
+
+async fn handle_send(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    let agent_name = match get_string_option(command, "agent_name") {
+        Some(n) => n,
+        None => {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Agent name required.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+    };
+
+    let message = match get_string_option(command, "message") {
+        Some(m) => m,
+        None => {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Message required.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+    };
+
+    let hub = state.hub().await;
+
+    // Check if agent exists
+    let exists = {
+        let sessions = hub.sessions.lock().await;
+        sessions.contains_key(&agent_name)
+    };
+
+    if !exists {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content(format!("Agent '{}' not found.", agent_name))
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let content = axi_hub::MessageContent::Text(message.clone());
+    axi_hub::lifecycle::wake_or_queue(&hub, &agent_name, content, None).await;
+
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(format!(
+                        "Message sent to **{}**: {}",
+                        agent_name,
+                        if message.len() > 100 {
+                            format!("{}...", &message[..100])
+                        } else {
+                            message
+                        }
+                    )),
             ),
         )
         .await;
@@ -368,6 +728,28 @@ async fn handle_restart(ctx: &Context, command: &CommandInteraction, _state: &Bo
         )
         .await;
 
-    // TODO: trigger actual shutdown coordinator
+    // Exit with code 42 to signal supervisor for restart
     info!("Restart requested via /restart (force={})", force);
+    std::process::exit(42);
+}
+
+async fn handle_restart_bridge(ctx: &Context, command: &CommandInteraction, _state: &BotState) {
+    let force = get_bool_option(command, "force").unwrap_or(false);
+
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("*System:* Full restart (including bridge)..."),
+            ),
+        )
+        .await;
+
+    info!(
+        "Full restart requested via /restart-including-bridge (force={})",
+        force
+    );
+    // Exit with code 0 to signal supervisor for full restart
+    std::process::exit(0);
 }

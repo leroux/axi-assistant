@@ -7,9 +7,11 @@ mod channels;
 mod commands;
 mod crash_handler;
 mod events;
+mod frontend;
 mod permissions;
 mod prompts;
 mod scheduler;
+mod startup;
 mod state;
 mod streaming;
 mod todos;
@@ -39,14 +41,12 @@ impl EventHandler for Handler {
             error!("Failed to register slash commands: {}", e);
         }
 
-        // Initialize bot state
+        // Full startup: hub init, channel reconstruction, master agent, scheduler
         let data = ctx.data.read().await;
         if let Some(state) = data.get::<BotState>() {
-            info!(
-                "Bot ready in guild {} with {} allowed users",
-                state.config.discord_guild_id,
-                state.config.allowed_user_ids.len()
-            );
+            let state = Arc::clone(state);
+            drop(data);
+            startup::initialize(&ctx, state).await;
         }
     }
 

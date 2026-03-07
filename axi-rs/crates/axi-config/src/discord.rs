@@ -371,6 +371,42 @@ impl DiscordClient {
         .await
     }
 
+    pub async fn edit_channel_name(
+        &self,
+        channel_id: u64,
+        name: &str,
+    ) -> Result<Value, DiscordError> {
+        self.patch(
+            &format!("/channels/{}", channel_id),
+            serde_json::json!({ "name": name }),
+        )
+        .await
+    }
+
+    pub async fn edit_channel_topic(
+        &self,
+        channel_id: u64,
+        topic: &str,
+    ) -> Result<Value, DiscordError> {
+        self.patch(
+            &format!("/channels/{}", channel_id),
+            serde_json::json!({ "topic": topic }),
+        )
+        .await
+    }
+
+    pub async fn edit_channel_category(
+        &self,
+        channel_id: u64,
+        category_id: u64,
+    ) -> Result<Value, DiscordError> {
+        self.patch(
+            &format!("/channels/{}", channel_id),
+            serde_json::json!({ "parent_id": category_id.to_string() }),
+        )
+        .await
+    }
+
     pub async fn find_channel(
         &self,
         guild_id: u64,

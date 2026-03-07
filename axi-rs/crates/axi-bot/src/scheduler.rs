@@ -445,6 +445,72 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// High-level: run scheduler with hub integration
+// ---------------------------------------------------------------------------
+
+/// Start the scheduler loop connected to the AgentHub.
+/// Fired schedules are routed as messages to their owner agent.
+pub async fn run_scheduler(
+    state: std::sync::Arc<crate::state::BotState>,
+    hub: std::sync::Arc<axi_hub::AgentHub>,
+) {
+    let config = SchedulerConfig {
+        schedules_path: state.config.schedules_path.clone(),
+        history_path: state.config.history_path.clone(),
+        user_data_dir: state.config.axi_user_data.clone(),
+        idle_reminder_thresholds: state
+            .config
+            .idle_reminder_thresholds
+            .iter()
+            .map(|d| d.as_secs())
+            .collect(),
+        auto_sleep_secs: 14400, // 4 hours default
+    };
+
+    run_loop(config, move |fired| {
+        let hub = hub.clone();
+        let prompt = fired.prompt.clone();
+        let agent = fired.agent_name.clone();
+        let schedule_name = fired.schedule_name.clone();
+
+        tokio::spawn(async move {
+            info!(
+                "Scheduler firing '{}' for agent '{}'",
+                schedule_name, agent
+            );
+
+            // Check if agent exists, register if not
+            let exists = {
+                let sessions = hub.sessions.lock().await;
+                sessions.contains_key(&agent)
+            };
+
+            if !exists {
+                // Create a session for the agent
+                let default_cwd = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+                    .to_string_lossy()
+                    .to_string();
+                axi_hub::registry::spawn_agent(
+                    &hub,
+                    agent.clone(),
+                    default_cwd,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            }
+
+            let content = axi_hub::MessageContent::Text(prompt);
+            axi_hub::lifecycle::wake_or_queue(&hub, &agent, content, None).await;
+        });
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
