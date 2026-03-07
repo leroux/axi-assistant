@@ -110,23 +110,23 @@ Tasks:
 - [x] ReconnectManager: procmux reconnect, buffer replay, session reconstruction
 - [x] Background task management (fire-and-forget with cleanup)
 
-### Phase 6: Discord Bot [ ]
+### Phase 6: Discord Bot [x]
 **Goal**: Full Discord bot replacing main.py, agents.py, channels.py.
 
 Tasks:
-- [ ] Serenity bot setup with intents
-- [ ] on_ready: channel reconstruction, master agent setup
-- [ ] on_message: message routing to agents, bot filtering
-- [ ] Channel management: create/move/archive agent channels, categories
-- [ ] Slash commands: /spawn, /kill, /list-agents, /stop, /skip, /restart, /model, /debug, /send
-- [ ] Message content extraction (text, attachments, embeds)
+- [x] Serenity bot setup with intents
+- [x] on_ready: channel reconstruction, master agent setup
+- [x] on_message: message routing to agents, bot filtering
+- [x] Channel management: create/move/archive agent channels, categories
+- [x] Slash commands: /spawn, /kill, /list-agents, /stop, /skip, /restart, /model, /debug, /send
+- [x] Message content extraction (text, attachments, embeds)
 - [ ] Response streaming to Discord (live-edit messages)
-- [ ] Reaction-based interactions (plan approval, user questions)
+- [x] Reaction-based interactions (plan approval, user questions)
 - [ ] Todo list rendering and tracking
-- [ ] Channel topic updates with session state
+- [x] Channel topic updates with session state
 - [ ] Idle agent reminders
 - [ ] System prompt generation (SOUL.md, dev_context.md, packs)
-- [ ] Channel status prefixes
+- [x] Channel status prefixes
 
 ### Phase 7: MCP Tools [ ]
 **Goal**: MCP server implementations for agent tooling.

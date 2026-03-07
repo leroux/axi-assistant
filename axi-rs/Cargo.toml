@@ -6,6 +6,7 @@ members = [
     "crates/axi-supervisor",
     "crates/axi-config",
     "crates/axi-hub",
+    "crates/axi-bot",
 ]
 
 [workspace.package]
