@@ -10,10 +10,11 @@ cargo build --release
 
 echo ""
 echo "Release binaries:"
-ls -lh target/release/axi-bot target/release/axi-supervisor target/release/procmux
+ls -lh target/release/axi-bot target/release/procmux target/release/discordquery
 echo ""
-echo "To install systemd service:"
-echo "  sudo cp axi-bot.service /etc/systemd/system/"
+echo "To install systemd services:"
+echo "  sudo cp systemd/axi-procmux.service /etc/systemd/system/"
+echo "  sudo cp systemd/axi-bot.service /etc/systemd/system/"
 echo "  sudo systemctl daemon-reload"
-echo "  sudo systemctl enable axi-bot"
-echo "  sudo systemctl start axi-bot"
+echo "  sudo systemctl enable axi-procmux axi-bot"
+echo "  sudo systemctl start axi-procmux axi-bot"

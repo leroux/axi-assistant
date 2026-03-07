@@ -241,25 +241,94 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
     tokio::spawn(async move {
         idle_reminder_loop(state_for_idle, hub_for_idle).await;
     });
+
+    // 10. Start bridge monitor (reconnects to procmux if it dies/restarts)
+    let state_for_bridge = state.clone();
+    let hub_for_bridge = hub.clone();
+    tokio::spawn(async move {
+        bridge_monitor_loop(state_for_bridge, hub_for_bridge).await;
+    });
 }
 
-/// Connect to the procmux bridge server.
+/// Connect to the procmux bridge server, retrying with backoff.
+///
+/// Tries for up to ~30 seconds at startup. If procmux isn't ready yet,
+/// the bridge monitor loop will keep trying in the background.
 async fn connect_bridge(
     config: &axi_config::Config,
 ) -> Option<axi_hub::procmux_wire::ProcmuxProcessConnection> {
     let socket_path = config.bridge_socket_path.to_string_lossy().to_string();
-    match axi_hub::procmux_wire::ProcmuxProcessConnection::connect(&socket_path).await {
-        Ok(conn) => {
-            info!("Connected to procmux bridge at {}", socket_path);
-            Some(conn)
+    let mut backoff_ms = 500_u64;
+    let max_attempts = 6; // ~30s total: 0.5 + 1 + 2 + 4 + 8 + 16
+
+    for attempt in 1..=max_attempts {
+        match axi_hub::procmux_wire::ProcmuxProcessConnection::connect(&socket_path).await {
+            Ok(conn) => {
+                info!("Connected to procmux bridge at {}", socket_path);
+                return Some(conn);
+            }
+            Err(e) => {
+                if attempt == max_attempts {
+                    warn!(
+                        "Failed to connect to procmux bridge after {} attempts: {} (bridge monitor will retry)",
+                        max_attempts, e
+                    );
+                    return None;
+                }
+                info!(
+                    "Waiting for procmux bridge (attempt {}/{}, retrying in {}ms): {}",
+                    attempt, max_attempts, backoff_ms, e
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(16_000);
+            }
         }
-        Err(e) => {
-            warn!(
-                "Failed to connect to procmux bridge at {}: {} (agents will not work until bridge is available)",
-                socket_path, e
-            );
-            None
+    }
+    None
+}
+
+/// Background loop that monitors the procmux bridge connection.
+///
+/// If procmux dies, all agent sessions are lost (procmux has no persistent
+/// state). Rather than trying to reconnect in-place with stale state,
+/// we notify the user and exit with code 42 so systemd restarts us cleanly.
+/// We wait a few seconds first so procmux's own Restart= has time to bring
+/// it back before we try to reconnect on startup.
+async fn bridge_monitor_loop(state: Arc<BotState>, hub: Arc<AgentHub>) {
+    const CHECK_INTERVAL_SECS: u64 = 2;
+    const GRACE_PERIOD_SECS: u64 = 3;
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+
+        let is_alive = {
+            let conn = hub.process_conn.lock().await;
+            conn.as_ref().is_some_and(|c| c.is_alive())
+        };
+
+        if is_alive {
+            continue;
         }
+
+        warn!("Bridge connection lost — procmux is down");
+
+        // Notify master channel
+        if let Some(ch_id) = state.channel_for_agent(&state.config.master_agent_name).await {
+            let _ = state
+                .discord_client
+                .send_message(
+                    ch_id.get(),
+                    "*System:* Bridge connection lost. Restarting to reconnect...",
+                )
+                .await;
+        }
+
+        // Give procmux time to restart (its RestartSec=1)
+        tokio::time::sleep(std::time::Duration::from_secs(GRACE_PERIOD_SECS)).await;
+
+        // Exit with restart code — systemd will relaunch us
+        error!("Exiting with code 42 to trigger restart after bridge loss");
+        std::process::exit(42);
     }
 }
 

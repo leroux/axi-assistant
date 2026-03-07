@@ -6,8 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/ubuntu/axi-tests/%i
-EnvironmentFile=/home/ubuntu/axi-tests/%i/.env
-ExecStart=/bin/bash -c 'exec "$(dirname "$AXI_RS_BINARY")/procmux" /home/ubuntu/axi-tests/%i/.bridge.sock'
+ExecStart=/home/ubuntu/axi-tests/%i/axi-rs/target/release/procmux /home/ubuntu/axi-tests/%i/.bridge.sock
 Restart=on-failure
 RestartSec=1
 TimeoutStopSec=10
