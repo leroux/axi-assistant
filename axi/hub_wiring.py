@@ -71,7 +71,7 @@ async def _create_client(session: AgentSession, options: Any) -> Any:
                 f"Procmux required for flowcoder agent '{session.name}'"
             )
         cli_args = build_engine_cli_args(options)
-        env = build_engine_env()
+        env = build_engine_env(options)
         log.info(
             "Spawning flowcoder engine for '%s': %s",
             session.name,
@@ -121,13 +121,6 @@ def create_hub(
     router = FrontendRouter()
     discord_fe = DiscordFrontend(bot)
     router.add(discord_fe)
-
-    # Optionally register the web frontend
-    if config.WEB_ENABLED:
-        from axi.web_frontend import WebFrontend
-
-        web_fe = WebFrontend(port=config.WEB_PORT)
-        router.add(web_fe)
 
     # Generate backward-compatible callbacks from the router
     callbacks = router.as_callbacks()

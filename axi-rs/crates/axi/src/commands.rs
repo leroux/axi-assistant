@@ -198,13 +198,33 @@ pub async fn register_commands(ctx: &Context) -> anyhow::Result<()> {
                 )
                 .required(true),
             ),
+        CreateCommand::new("flowchart")
+            .description("Run a flowchart command in the current agent's channel.")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "name",
+                    "Flowchart command name",
+                )
+                .required(true),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "args",
+                    "Arguments for the flowchart command",
+                )
+                .required(false),
+            ),
+        CreateCommand::new("flowchart-list")
+            .description("List available flowchart commands."),
     ];
 
     guild_id
         .set_commands(&ctx.http, commands)
         .await?;
 
-    info!("Registered {} slash commands", 17);
+    info!("Registered {} slash commands", 19);
     Ok(())
 }
 
@@ -257,6 +277,8 @@ pub async fn handle_command(ctx: &Context, command: &CommandInteraction) {
         "clear" => handle_clear(ctx, command, &state).await,
         "claude-usage" => handle_claude_usage(ctx, command, &state).await,
         "restart-agent" => handle_restart_agent(ctx, command, &state).await,
+        "flowchart" => handle_flowchart(ctx, command, &state).await,
+        "flowchart-list" => handle_flowchart_list(ctx, command, &state).await,
         _ => {
             let _ = command
                 .create_response(
@@ -927,6 +949,117 @@ async fn handle_restart_agent(ctx: &Context, command: &CommandInteraction, state
         &format!("Restarted agent **{agent_name}** with fresh system prompt."),
     )
     .await;
+}
+
+async fn handle_flowchart(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    if !state.config.flowcoder_enabled {
+        let _ = respond_ephemeral(ctx, command, "Flowcoder is not enabled.").await;
+        return;
+    }
+
+    let agent_name = if let Some(n) = resolve_agent_name(command, state).await {
+        n
+    } else {
+        let _ = respond_ephemeral(ctx, command, "Could not determine agent.").await;
+        return;
+    };
+
+    // Verify agent is a flowcoder agent
+    let (is_flowcoder, is_busy) = {
+        let sessions = state.sessions.lock().await;
+        if let Some(session) = sessions.get(&agent_name) {
+            (
+                session.agent_type == "flowcoder",
+                crate::lifecycle::is_processing(session),
+            )
+        } else {
+            let _ = respond_ephemeral(ctx, command, &format!("Agent '{agent_name}' not found.")).await;
+            return;
+        }
+    };
+    let channel_id = state.channel_for_agent(&agent_name).await;
+
+    if !is_flowcoder {
+        let _ = respond_ephemeral(
+            ctx,
+            command,
+            "Flowcharts are only available for **flowcoder** agents.",
+        )
+        .await;
+        return;
+    }
+
+    if is_busy {
+        let _ = respond_ephemeral(
+            ctx,
+            command,
+            &format!("Agent **{agent_name}** is busy."),
+        )
+        .await;
+        return;
+    }
+
+    let fc_name = get_string_option(command, "name").unwrap_or_default();
+    let fc_args = get_string_option(command, "args").unwrap_or_default();
+    let fc_name = fc_name.trim_start_matches('/');
+    let slash_content = if fc_args.is_empty() {
+        format!("/{fc_name}")
+    } else {
+        format!("/{fc_name} {fc_args}")
+    };
+
+    let content = crate::types::MessageContent::Text(slash_content);
+    crate::lifecycle::wake_or_queue(state, &agent_name, content, None).await;
+
+    // Fire and forget — the message processor will handle the rest
+    if let Some(ch) = channel_id {
+        let dc = &state.discord_client;
+        let _ = dc
+            .send_message(
+                ch.get(),
+                &format!("*System:* Flowchart `{fc_name}` started on **{agent_name}**."),
+            )
+            .await;
+    }
+
+    let _ = respond(
+        ctx,
+        command,
+        &format!("Flowchart `{fc_name}` dispatched to **{agent_name}**."),
+    )
+    .await;
+}
+
+async fn handle_flowchart_list(ctx: &Context, command: &CommandInteraction, state: &BotState) {
+    if !state.config.flowcoder_enabled {
+        let _ = respond_ephemeral(ctx, command, "Flowcoder is not enabled.").await;
+        return;
+    }
+
+    let commands = crate::flowcoder::list_flowchart_commands();
+
+    if commands.is_empty() {
+        let _ = respond_ephemeral(ctx, command, "No flowchart commands found.").await;
+        return;
+    }
+
+    let mut lines = Vec::new();
+    for cmd in &commands {
+        let desc = if cmd.description.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", cmd.description)
+        };
+        lines.push(format!("- `{}`{desc}", cmd.name));
+    }
+
+    let msg = format!(
+        "*System:* **Available flowcharts** ({}):\n{}",
+        commands.len(),
+        lines.join("\n")
+    );
+
+    let _ = respond_ephemeral(ctx, command, &msg).await;
 }
 
 // ---------------------------------------------------------------------------

@@ -40,7 +40,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-from .cli import build_variables, parse_args
+from .cli import build_inner_claude_cmd, build_inner_env, build_variables, parse_args
 from .protocol import ProtocolHandler
 from .resolver import CommandNotFoundError, resolve_command
 from .session import Session
@@ -191,17 +191,17 @@ async def main() -> None:
         protocol.emit_result(str(e), is_error=True)
         sys.exit(1)
 
-    # Build the inner claude command
-    claude_cmd = [
-        claude_path,
-        "-p",
-        "--input-format", "stream-json",
-        "--output-format", "stream-json",
-    ] + (args.passthrough or [])
+    # Build inner Claude command and environment from parsed args.
+    # Engine-owned flags (--model, --mcp-config, etc.) are merged with
+    # passthrough args. Env vars for SDK control protocol are set here
+    # so we don't depend on the full claude-code-sdk package.
+    claude_cmd = build_inner_claude_cmd(args, claude_path)
+    inner_env = build_inner_env(args)
+    inner_cwd = args.cwd or ""
 
     # Start the inner Claude process (before signal setup so handler can reference it)
     process = ClaudeProcess()
-    await process.start(claude_cmd, _clean_env(), "")
+    await process.start(claude_cmd, inner_env, inner_cwd)
 
     # Signal handling — kill inner Claude immediately for fast shutdown
     shutdown_event = asyncio.Event()
@@ -323,19 +323,6 @@ async def main() -> None:
             otel_provider.shutdown()
         protocol.log("Shutdown complete")
 
-
-def _clean_env() -> dict[str, str]:
-    """Return a copy of os.environ for the inner Claude CLI.
-
-    Strips CLAUDECODE to prevent nested-session rejection, but preserves
-    (or sets) CLAUDE_AGENT_SDK_VERSION and CLAUDE_CODE_ENTRYPOINT so the
-    inner CLI uses the SDK control protocol for tool permissions and MCP.
-    Without these, the CLI auto-denies MCP tool permissions in pipe mode.
-    """
-    env = dict(os.environ)
-    env.pop("CLAUDECODE", None)
-    env.setdefault("CLAUDE_CODE_ENTRYPOINT", "sdk-py")
-    return env
 
 
 async def _proxy_turn(

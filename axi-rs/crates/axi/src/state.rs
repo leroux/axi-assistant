@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use axi_config::{Config, DiscordClient};
 
-use crate::bridge;
+use crate::claude_process;
 use crate::channels::GuildInfrastructure;
 use crate::procmux_wire::ProcmuxProcessConnection;
 use crate::prompts::PromptBuilder;
@@ -62,7 +62,7 @@ pub struct BotState {
     /// Guild infrastructure (categories), set during `on_ready`.
     pub infra: RwLock<Option<GuildInfrastructure>>,
     /// Per-agent `BridgeTransport` storage.
-    pub transports: bridge::TransportMap,
+    pub transports: claude_process::TransportMap,
     /// Prompt builder for constructing system prompts.
     pub prompt_builder: PromptBuilder,
     /// Pending permission questions keyed by `message_id`.
@@ -106,7 +106,7 @@ impl BotState {
             channel_map: RwLock::new(HashMap::new()),
             agent_channels: RwLock::new(HashMap::new()),
             infra: RwLock::new(None),
-            transports: bridge::new_transport_map(),
+            transports: claude_process::new_transport_map(),
             prompt_builder,
             pending_questions: Mutex::new(HashMap::new()),
             sessions: Arc::new(Mutex::new(HashMap::new())),

@@ -127,6 +127,7 @@ pub async fn initialize(ctx: &Context, state: Arc<BotState>) {
         .filter(|s| !s.is_empty());
 
     let mut master_session = AgentSession::new(master_name.clone());
+    master_session.agent_type = state.config.default_agent_type.clone();
     master_session.cwd = master_cwd.clone();
     master_session.session_id = master_session_id;
 

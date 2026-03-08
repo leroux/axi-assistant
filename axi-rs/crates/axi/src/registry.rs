@@ -42,7 +42,7 @@ pub async fn end_session(state: &BotState, name: &str) {
     };
 
     if has_client {
-        crate::bridge::disconnect_client(state, name).await;
+        crate::claude_process::disconnect_client(state, name).await;
         let mut sessions = state.sessions.lock().await;
         if let Some(session) = sessions.get_mut(name) {
             session.awake = false;
@@ -164,7 +164,7 @@ pub async fn spawn_agent(state: &BotState, req: SpawnRequest) -> AgentSession {
     let resume = req.resume;
 
     let mut session = AgentSession::new(name.clone());
-    session.agent_type = req.agent_type.unwrap_or_else(|| "claude_code".to_string());
+    session.agent_type = req.agent_type.unwrap_or_else(|| state.config.default_agent_type.clone());
     session.cwd = cwd.clone();
     session.system_prompt = req.system_prompt;
     session.session_id = resume.clone();

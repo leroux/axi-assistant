@@ -4,10 +4,11 @@
 #![allow(dead_code)]
 
 // --- Bot layer ---
-mod bridge;
+mod claude_process;
 mod channels;
 mod commands;
 mod events;
+mod flowcoder;
 mod frontend;
 mod permissions;
 mod prompts;

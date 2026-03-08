@@ -100,7 +100,7 @@ async fn reconnect_single(
                 sessions.get(name).and_then(|s| s.session_id.clone())
             };
 
-            match crate::bridge::create_client(state, name, resume_id.as_deref()).await {
+            match crate::claude_process::create_client(state, name, resume_id.as_deref()).await {
                 Ok(()) => {
                     let mut sessions = state.sessions.lock().await;
                     if let Some(session) = sessions.get_mut(name) {

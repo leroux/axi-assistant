@@ -16,7 +16,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use claudewire::config::Config;
 use flowchart::{resolve_command, validate};
 use flowchart_runner::Session;
 use flowchart_runner::executor::{ExecutorConfig, run_flowchart};
@@ -38,33 +37,22 @@ use events::EngineEvent;
     about = "Headless Claude CLI proxy with flowchart support"
 )]
 struct Cli {
-    /// Claude model to use
-    #[arg(long, default_value = "sonnet")]
-    model: String,
-
     /// Additional search paths for flowchart command files
     #[arg(long = "search-path", action = clap::ArgAction::Append)]
     search_paths: Vec<String>,
-
-    /// Claude permission mode
-    #[arg(long, default_value = "plan")]
-    permission_mode: String,
 
     /// Maximum blocks before safety halt
     #[arg(long, default_value_t = 1000)]
     max_blocks: usize,
 
-    /// Resume an existing Claude session
-    #[arg(long)]
-    resume: Option<String>,
-
-    /// Enable verbose output
-    #[arg(long)]
-    verbose: bool,
-
     /// Enable debug logging to stderr
     #[arg(long)]
     debug: bool,
+
+    /// Arguments passed through to the inner Claude CLI process.
+    /// Provide after `--` separator.
+    #[arg(last = true, allow_hyphen_values = true)]
+    claude_args: Vec<String>,
 }
 
 #[tokio::main]
@@ -87,16 +75,8 @@ async fn main() -> Result<()> {
     // Build search paths
     let search_paths: Vec<PathBuf> = cli.search_paths.iter().map(PathBuf::from).collect();
 
-    // Build claudewire config for inner Claude
-    let config = Config {
-        model: cli.model.clone(),
-        permission_mode: cli.permission_mode.clone(),
-        resume: cli.resume.clone(),
-        verbose: cli.verbose,
-        print_mode: true,
-        replay_user_messages: true,
-        ..Config::default()
-    };
+    // Build Claude CLI args: engine ensures --print + stream-json + replay
+    let claude_args = build_claude_args(&cli.claude_args);
 
     // Build executor config
     let exec_config = ExecutorConfig {
@@ -114,7 +94,7 @@ async fn main() -> Result<()> {
     // Create engine session (spawns inner Claude)
     let cancel = CancellationToken::new();
     let mut session =
-        EngineSession::new(config, "engine".into(), control_response_rx, cancel.clone())?;
+        EngineSession::new(claude_args, "engine".into(), control_response_rx, cancel.clone())?;
     let mut protocol = EngineProtocol::new();
     let mut message_rx = message_rx;
 
@@ -308,4 +288,45 @@ async fn try_run_flowchart(
         message_rx: cr_result.message_rx,
         buffered: cr_result.buffered,
     }
+}
+
+/// Build the inner Claude CLI argv from passthrough args.
+///
+/// Ensures `--print`, `--output-format stream-json`, `--input-format stream-json`,
+/// and `--replay-user-messages` are present regardless of what the caller passes.
+fn build_claude_args(passthrough: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "claude".to_string(),
+        "--print".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--input-format".to_string(),
+        "stream-json".to_string(),
+        "--replay-user-messages".to_string(),
+    ];
+
+    // Append passthrough args, skipping any that duplicate what we already set
+    let skip_flags = [
+        "--print",
+        "--output-format",
+        "--input-format",
+        "--replay-user-messages",
+    ];
+    let mut skip_next = false;
+    for arg in passthrough {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if skip_flags.contains(&arg.as_str()) {
+            // Skip flags that take a value argument
+            if arg == "--output-format" || arg == "--input-format" {
+                skip_next = true;
+            }
+            continue;
+        }
+        args.push(arg.clone());
+    }
+
+    args
 }

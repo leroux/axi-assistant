@@ -50,14 +50,16 @@ class QueryResult:
 def _clean_env() -> dict[str, str]:
     """Return a copy of os.environ for the inner Claude CLI.
 
-    Strips CLAUDECODE to prevent nested-session rejection, but preserves
-    (or sets) CLAUDE_AGENT_SDK_VERSION and CLAUDE_CODE_ENTRYPOINT so the
-    inner CLI uses the SDK control protocol for tool permissions and MCP.
+    Sets the env vars that make inner Claude use the SDK control protocol
+    (for tool permissions and MCP), without depending on the full
+    claude-code-sdk package.
     """
+    from .cli import SDK_VERSION
+
     env = dict(os.environ)
     env.pop("CLAUDECODE", None)
-    env.setdefault("CLAUDE_CODE_ENTRYPOINT", "sdk-py")
-    env.setdefault("CLAUDE_AGENT_SDK_VERSION", "flowcoder-engine")
+    env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-py"
+    env["CLAUDE_AGENT_SDK_VERSION"] = SDK_VERSION
     return env
 
 

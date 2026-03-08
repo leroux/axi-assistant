@@ -4,13 +4,14 @@
 //! `control_requests` are relayed to the engine's stdout (for the outer client
 //! to handle), and responses are read from the router's `control_response` channel.
 
+use std::process::Stdio;
 use std::time::Instant;
 
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use claudewire::config::Config;
 use claudewire::session::CliSession;
 use flowchart_runner::error::ExecutionError;
 use flowchart_runner::protocol::Protocol;
@@ -23,7 +24,8 @@ use crate::events;
 /// Relays `control_requests` to engine stdout (the outer client) and reads
 /// `control_responses` from the router's dedicated channel.
 pub struct EngineSession {
-    config: Config,
+    /// Raw CLI args for the inner Claude process (for respawning on clear).
+    claude_args: Vec<String>,
     name: String,
     cli: Option<CliSession>,
     total_cost: f64,
@@ -33,15 +35,19 @@ pub struct EngineSession {
 }
 
 impl EngineSession {
+    /// Spawn the inner Claude CLI from raw CLI args.
+    ///
+    /// `claude_args` are the full argv for the inner process (e.g. `["claude", "--print", ...]`).
+    /// The engine adds `--print`, `--output-format stream-json`, etc. if not already present.
     pub fn new(
-        config: Config,
+        claude_args: Vec<String>,
         name: String,
         control_response_rx: mpsc::UnboundedReceiver<serde_json::Value>,
         cancel: CancellationToken,
     ) -> anyhow::Result<Self> {
-        let cli = CliSession::spawn(&config, name.clone(), None)?;
+        let cli = Self::spawn_claude(&claude_args, &name)?;
         Ok(Self {
-            config,
+            claude_args,
             name,
             cli: Some(cli),
             total_cost: 0.0,
@@ -49,6 +55,20 @@ impl EngineSession {
             control_response_rx,
             cancel,
         })
+    }
+
+    fn spawn_claude(args: &[String], name: &str) -> anyhow::Result<CliSession> {
+        let binary = args.first().map_or("claude", |s| s.as_str());
+        let mut cmd = Command::new(binary);
+        if args.len() > 1 {
+            cmd.args(&args[1..]);
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // Prevent nested session detection
+        cmd.env_remove("CLAUDECODE");
+        CliSession::from_command(cmd, name.to_string(), None)
     }
 
     /// Borrow the inner `CliSession` mutably.
@@ -233,7 +253,7 @@ impl Session for EngineSession {
             cli.stop().await;
         }
 
-        let cli = CliSession::spawn(&self.config, self.name.clone(), None)
+        let cli = Self::spawn_claude(&self.claude_args, &self.name)
             .map_err(|e| ExecutionError::Session(e.to_string()))?;
         self.cli = Some(cli);
         Ok(())

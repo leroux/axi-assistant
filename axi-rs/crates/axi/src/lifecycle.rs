@@ -56,7 +56,7 @@ pub async fn sleep_agent(state: &BotState, name: &str, force: bool) {
     info!("Sleeping agent '{}'", name);
     drop(sessions);
 
-    crate::bridge::disconnect_client(state, name).await;
+    crate::claude_process::disconnect_client(state, name).await;
 
     let mut sessions = state.sessions.lock().await;
     if let Some(session) = sessions.get_mut(name) {
@@ -115,7 +115,7 @@ pub async fn wake_agent(state: &BotState, name: &str) -> Result<(), HubError> {
 
     info!("Waking agent '{}' (session_id={:?})", name, resume_id);
 
-    match crate::bridge::create_client(state, name, resume_id.as_deref()).await {
+    match crate::claude_process::create_client(state, name, resume_id.as_deref()).await {
         Ok(()) => {
             let mut sessions = state.sessions.lock().await;
             if let Some(session) = sessions.get_mut(name) {
@@ -132,7 +132,7 @@ pub async fn wake_agent(state: &BotState, name: &str) -> Result<(), HubError> {
                 "Failed to resume agent '{}' with session_id={:?}, retrying fresh",
                 name, resume_id
             );
-            if crate::bridge::create_client(state, name, None).await.is_ok() {
+            if crate::claude_process::create_client(state, name, None).await.is_ok() {
                 let mut sessions = state.sessions.lock().await;
                 if let Some(session) = sessions.get_mut(name) {
                     session.awake = true;

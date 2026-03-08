@@ -310,10 +310,54 @@ async fn handle_text_command(
             crate::messaging::interrupt_session(state, &agent_name).await;
             let _ = dc.send_message(ch, "Agent interrupted.").await;
         }
+        "flowchart" => {
+            if !state.config.flowcoder_enabled {
+                let _ = dc.send_message(ch, "Flowcoder is not enabled.").await;
+                return;
+            }
+
+            let is_flowcoder = {
+                let sessions = state.sessions.lock().await;
+                sessions.get(&agent_name).map(|s| s.agent_type == "flowcoder").unwrap_or(false)
+            };
+
+            if !is_flowcoder {
+                let _ = dc.send_message(ch, "Flowcharts are only available for **flowcoder** agents.").await;
+                return;
+            }
+
+            let cmd_args = parts.get(1).copied().unwrap_or("");
+            if cmd_args.is_empty() {
+                let _ = dc.send_message(ch, "Usage: `//flowchart <command> [args]`").await;
+                return;
+            }
+
+            let fc_parts: Vec<&str> = cmd_args.splitn(2, ' ').collect();
+            let fc_name = fc_parts[0].trim_start_matches('/');
+            let fc_args = fc_parts.get(1).copied().unwrap_or("");
+            let slash_content = if fc_args.is_empty() {
+                format!("/{fc_name}")
+            } else {
+                format!("/{fc_name} {fc_args}")
+            };
+
+            let is_busy = {
+                let sessions = state.sessions.lock().await;
+                sessions.get(&agent_name).map(|s| crate::lifecycle::is_processing(s)).unwrap_or(false)
+            };
+
+            if is_busy {
+                let _ = dc.send_message(ch, &format!("Agent **{agent_name}** is busy.")).await;
+                return;
+            }
+
+            let content = crate::types::MessageContent::Text(slash_content);
+            crate::lifecycle::wake_or_queue(state, &agent_name, content, None).await;
+        }
         _ => {
             let _ = dc.send_message(
                 ch,
-                &format!("Unknown command: `{command}`. Available: debug, status, clear, compact, stop"),
+                &format!("Unknown command: `{command}`. Available: debug, status, clear, compact, stop, flowchart"),
             ).await;
         }
     }
@@ -321,7 +365,7 @@ async fn handle_text_command(
 
 /// Create a stream handler that consumes SDK output and renders to Discord.
 fn make_stream_handler(state: Arc<BotState>) -> crate::messaging::StreamHandlerFn {
-    crate::bridge::make_stream_handler(state)
+    crate::claude_process::make_stream_handler(state)
 }
 
 // ---------------------------------------------------------------------------
