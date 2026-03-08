@@ -45,6 +45,28 @@ pub enum Action {
     Done {
         output: Option<String>,
     },
+    /// Flowchart terminated early via exit block.
+    Exit {
+        block_id: String,
+        block_name: String,
+        exit_code: i32,
+    },
+    /// Spawn an agent sub-session.
+    Spawn {
+        block_id: String,
+        block_name: String,
+        agent_name: Option<String>,
+        command_name: Option<String>,
+        arguments: String,
+        inherit_variables: bool,
+        exit_code_variable: Option<String>,
+        config_file: Option<String>,
+    },
+    /// Wait for all spawned agent sub-sessions.
+    Wait {
+        block_id: String,
+        block_name: String,
+    },
     /// Flowchart execution hit an error.
     Error { message: String },
 }
@@ -385,6 +407,47 @@ impl GraphWalker {
                         session: target_session.clone(),
                     };
                 }
+
+                BlockData::Exit { exit_code } => {
+                    return Action::Exit {
+                        block_id,
+                        block_name,
+                        exit_code: exit_code.unwrap_or(0),
+                    };
+                }
+
+                BlockData::Spawn {
+                    agent_name,
+                    command_name,
+                    arguments,
+                    inherit_variables,
+                    exit_code_variable,
+                    config_file,
+                } => {
+                    let args = arguments
+                        .as_deref()
+                        .map(|a| interpolate::interpolate(a, &self.variables))
+                        .unwrap_or_default();
+                    self.pending_output_var = exit_code_variable.clone();
+
+                    return Action::Spawn {
+                        block_id,
+                        block_name,
+                        agent_name: agent_name.clone(),
+                        command_name: command_name.clone(),
+                        arguments: args,
+                        inherit_variables: inherit_variables.unwrap_or(false),
+                        exit_code_variable: exit_code_variable.clone(),
+                        config_file: config_file.clone(),
+                    };
+                }
+
+                BlockData::Wait => {
+                    return Action::Wait {
+                        block_id,
+                        block_name,
+                    };
+                }
             }
         }
     }
@@ -460,6 +523,7 @@ mod tests {
         Block {
             name: name.to_owned(),
             data,
+            extra: HashMap::new(),
         }
     }
 

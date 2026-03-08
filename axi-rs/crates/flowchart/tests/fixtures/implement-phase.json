@@ -1,0 +1,230 @@
+{
+  "id": "implement-phase-001",
+  "name": "implement-phase",
+  "description": "Implements a single phase from the phase plan",
+  "flowchart": {
+    "blocks": {
+      "start-2": {
+        "id": "start-2",
+        "type": "start",
+        "name": "START",
+        "position": {
+          "x": 100,
+          "y": 50
+        }
+      },
+      "prompt-scaffold": {
+        "id": "prompt-scaffold",
+        "type": "prompt",
+        "name": "SCAFFOLD",
+        "position": {
+          "x": 100,
+          "y": 150
+        },
+        "prompt": "Read ./design_docs/phases/PHASE_$1.md\n\nCreate the file structure and scaffolding for this phase. Set up directory structure, create empty/skeleton files, add basic imports and structure.\n\nDO NOT implement full logic yet - just scaffolding.\n\nDocument what you created in ./progress-reports/PHASE_$1_SCAFFOLD.md",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "prompt-implement": {
+        "id": "prompt-implement",
+        "type": "prompt",
+        "name": "IMPLEMENT",
+        "position": {
+          "x": 100,
+          "y": 250
+        },
+        "prompt": "Now fully implement ./design_docs/phases/PHASE_$1.md\n\nIf ./progress-reports/PHASE_$1_PROGRESS.md exists, continue from where you left off.\n\nImplement all required functionality for this phase. Follow the design doc carefully.\n\nUpdate ./progress-reports/PHASE_$1_PROGRESS.md with your progress.\n\nWhen done, answer: Is this phase fully implemented according to its design doc?",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "phaseComplete": {
+              "type": "boolean"
+            }
+          },
+          "required": ["phaseComplete"]
+        },
+        "sound_effect": null
+      },
+      "branch-done": {
+        "id": "branch-done",
+        "type": "branch",
+        "name": "PHASE DONE?",
+        "position": {
+          "x": 150,
+          "y": 350
+        },
+        "condition": "phaseComplete"
+      },
+      "prompt-continue": {
+        "id": "prompt-continue",
+        "type": "prompt",
+        "name": "CONTINUE",
+        "position": {
+          "x": 350,
+          "y": 350
+        },
+        "prompt": "Continue implementing ./design_docs/phases/PHASE_$1.md\n\nCheck ./progress-reports/PHASE_$1_PROGRESS.md for current status.\n\nComplete any remaining work for this phase.\n\nWhen done, answer: Is this phase fully implemented?",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "phaseComplete": {
+              "type": "boolean"
+            }
+          },
+          "required": ["phaseComplete"]
+        },
+        "sound_effect": null
+      },
+      "prompt-review": {
+        "id": "prompt-review",
+        "type": "prompt",
+        "name": "SELF REVIEW",
+        "position": {
+          "x": 150,
+          "y": 450
+        },
+        "prompt": "Review the code you just implemented for PHASE_$1.\n\nCheck for:\n- Code quality issues\n- Obvious bugs or edge cases\n- Tech debt or over-engineering\n- Missing error handling\n- Code that doesn't match the design doc\n\nMake any necessary improvements.\n\nWrite a brief review summary to ./progress-reports/PHASE_$1_REVIEW.md",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "prompt-unit-tests": {
+        "id": "prompt-unit-tests",
+        "type": "prompt",
+        "name": "UNIT TESTS",
+        "position": {
+          "x": 150,
+          "y": 550
+        },
+        "prompt": "Create unit tests for the code implemented in PHASE_$1.\n\nFocus on testing the key functions/classes/components created in this phase.\n\nCreate tests in an appropriate location (e.g., ./tests/phase_$1/ or alongside the code).\n\nDon't run the tests yet - just create them.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "bash-tag": {
+        "id": "bash-tag",
+        "type": "bash",
+        "name": "TAG PHASE",
+        "position": {
+          "x": 150,
+          "y": 650
+        },
+        "command": "git tag \"phase-$1-complete\" 2>/dev/null || true",
+        "capture_output": false,
+        "output_variable": "",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": true,
+        "exit_code_variable": ""
+      },
+      "end-2": {
+        "id": "end-2",
+        "type": "end",
+        "name": "END",
+        "position": {
+          "x": 150,
+          "y": 750
+        }
+      }
+    },
+    "connections": [
+      {
+        "id": "conn-4",
+        "source_block_id": "start-2",
+        "target_block_id": "prompt-scaffold",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-5",
+        "source_block_id": "prompt-scaffold",
+        "target_block_id": "prompt-implement",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-6",
+        "source_block_id": "prompt-implement",
+        "target_block_id": "branch-done",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-7",
+        "source_block_id": "branch-done",
+        "target_block_id": "prompt-continue",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-8",
+        "source_block_id": "prompt-continue",
+        "target_block_id": "branch-done",
+        "source_port": "top",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-9",
+        "source_block_id": "branch-done",
+        "target_block_id": "prompt-review",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-10",
+        "source_block_id": "prompt-review",
+        "target_block_id": "prompt-unit-tests",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-11",
+        "source_block_id": "prompt-unit-tests",
+        "target_block_id": "bash-tag",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-12",
+        "source_block_id": "bash-tag",
+        "target_block_id": "end-2",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "start-2"
+  },
+  "metadata": {
+    "created": "2025-01-08T00:00:00.000000",
+    "modified": "2025-01-08T00:00:00.000000",
+    "version": "1.0",
+    "author": "autonomous-system",
+    "tags": ["implementation"]
+  },
+  "arguments": []
+}

@@ -1,0 +1,175 @@
+{
+  "id": "9bb1a824-2b4e-41b6-bf9b-918cac2d3b3a",
+  "name": "all-waves",
+  "description": "",
+  "flowchart": {
+    "blocks": {
+      "0e9ab712-ac34-41e5-ad09-d0f879711fd2": {
+        "id": "0e9ab712-ac34-41e5-ad09-d0f879711fd2",
+        "type": "start",
+        "name": "Start",
+        "position": {
+          "x": 200,
+          "y": 50
+        }
+      },
+      "19205039-b354-49bc-aa6f-4505fd73bd78": {
+        "id": "19205039-b354-49bc-aa6f-4505fd73bd78",
+        "type": "command",
+        "name": "Single Wave",
+        "position": {
+          "x": 250,
+          "y": 450
+        },
+        "command_name": "single-wave",
+        "arguments": "{{waveNum}}",
+        "inherit_variables": false,
+        "merge_output": false
+      },
+      "b7b27513-44ee-4286-a8ac-6441538b3648": {
+        "id": "b7b27513-44ee-4286-a8ac-6441538b3648",
+        "type": "variable",
+        "name": "waveNum",
+        "position": {
+          "x": 200,
+          "y": 150
+        },
+        "variable_name": "waveNum",
+        "variable_value": "0",
+        "variable_type": "int"
+      },
+      "0668a1d6-af18-48ee-954c-6bdb8252ac53": {
+        "id": "0668a1d6-af18-48ee-954c-6bdb8252ac53",
+        "type": "bash",
+        "name": "getFinalWaveNum",
+        "position": {
+          "x": 200,
+          "y": 250
+        },
+        "command": "echo \"10\"",
+        "capture_output": true,
+        "output_variable": "finalWaveNum",
+        "output_type": "int",
+        "working_directory": "",
+        "continue_on_error": false,
+        "exit_code_variable": ""
+      },
+      "17806a97-ec8a-434f-a399-d401ecd268b4": {
+        "id": "17806a97-ec8a-434f-a399-d401ecd268b4",
+        "type": "branch",
+        "name": "Branch",
+        "position": {
+          "x": 150,
+          "y": 350
+        },
+        "condition": "waveNum <= 10"
+      },
+      "ed7d9ef2-b7c0-4557-9a00-e06b2a5d63b8": {
+        "id": "ed7d9ef2-b7c0-4557-9a00-e06b2a5d63b8",
+        "type": "bash",
+        "name": "waveNum Increment",
+        "position": {
+          "x": 200,
+          "y": 550
+        },
+        "command": "echo $(({{waveNum}}+1))",
+        "capture_output": true,
+        "output_variable": "waveNum",
+        "output_type": "int",
+        "working_directory": "",
+        "continue_on_error": false,
+        "exit_code_variable": ""
+      },
+      "a9089727-778c-4c08-8d2a-2a05d01cb00d": {
+        "id": "a9089727-778c-4c08-8d2a-2a05d01cb00d",
+        "type": "end",
+        "name": "End",
+        "position": {
+          "x": 350,
+          "y": 350
+        }
+      }
+    },
+    "connections": [
+      {
+        "id": "f722a0c6-8b5f-4e05-9fff-7511b21942d2",
+        "source_block_id": "0e9ab712-ac34-41e5-ad09-d0f879711fd2",
+        "target_block_id": "b7b27513-44ee-4286-a8ac-6441538b3648",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "8d661db5-cc48-4977-bb00-6054d15157cd",
+        "source_block_id": "b7b27513-44ee-4286-a8ac-6441538b3648",
+        "target_block_id": "0668a1d6-af18-48ee-954c-6bdb8252ac53",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "6972924c-b6e2-4948-bf7f-3032380908b8",
+        "source_block_id": "17806a97-ec8a-434f-a399-d401ecd268b4",
+        "target_block_id": "19205039-b354-49bc-aa6f-4505fd73bd78",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "184a1c70-0689-4833-b0f2-4efbe4ef230d",
+        "source_block_id": "19205039-b354-49bc-aa6f-4505fd73bd78",
+        "target_block_id": "ed7d9ef2-b7c0-4557-9a00-e06b2a5d63b8",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "08176b6b-cddc-43e4-acc6-4cda6c0f1847",
+        "source_block_id": "ed7d9ef2-b7c0-4557-9a00-e06b2a5d63b8",
+        "target_block_id": "17806a97-ec8a-434f-a399-d401ecd268b4",
+        "source_port": "left",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "d119d647-08bc-4ce4-93ae-7e0c7353bbcf",
+        "source_block_id": "17806a97-ec8a-434f-a399-d401ecd268b4",
+        "target_block_id": "a9089727-778c-4c08-8d2a-2a05d01cb00d",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "9c393d35-d132-42ad-a05c-5199021f8c1c",
+        "source_block_id": "0668a1d6-af18-48ee-954c-6bdb8252ac53",
+        "target_block_id": "17806a97-ec8a-434f-a399-d401ecd268b4",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "0e9ab712-ac34-41e5-ad09-d0f879711fd2"
+  },
+  "metadata": {
+    "created": "2025-11-30T11:19:29.626413",
+    "modified": "2025-12-17T11:55:19.616669",
+    "version": "1.0",
+    "author": null,
+    "tags": []
+  },
+  "arguments": []
+}

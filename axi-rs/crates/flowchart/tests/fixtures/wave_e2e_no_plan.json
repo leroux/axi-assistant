@@ -1,0 +1,633 @@
+{
+  "id": "6da74f4c-0d29-4edc-9174-f375d348d66e",
+  "name": "wave_e2e_no_plan",
+  "description": "",
+  "flowchart": {
+    "blocks": {
+      "69836169-01ee-4074-a7e2-4ef8acd39170": {
+        "id": "69836169-01ee-4074-a7e2-4ef8acd39170",
+        "type": "start",
+        "name": "Start",
+        "position": {
+          "x": 700,
+          "y": 250
+        }
+      },
+      "8b5b7a53-c097-430d-ad44-54fdac680e2a": {
+        "id": "8b5b7a53-c097-430d-ad44-54fdac680e2a",
+        "type": "prompt",
+        "name": "Implement",
+        "position": {
+          "x": 500,
+          "y": 300
+        },
+        "prompt": "Thoroughly implement Wave $1 of WAVE_BREAKDOWN.md. All previous waves have already been implemented. \n\nIf ./audits/AUDIT_$1.{{prevTurn}}.md exists, it means we already have a partial implementation of Wave $1, but it failed the audit. Read and understand the audit. Focus on the discrepancies the audit lays out as you execute the rest of this prompt; don't bother reviewing anything that the auditor didn't flag as problematic.\n\nReference ARCHITECTURE.md and ./how-to-be-a-good-coder (./how-to-be-a-good-coder/ABOUT.md has more info). ./progress has all progress reports created so far. DO NOT OVERENGINEER. Do not incorporate fallbacks or failsafes; errors should never be handled silently. Examples of horrible fallbacks you should never do: checking if objects have attributes, forcibly trying to install packages mid-run, \"safe\" code branches when variables are unvavailable, etc. Stay consistent with architectural choices and paradigms made in the plan and the codebase. Comment and document as you write.\n\nDon't edit DESIGN_DOC.md, ARCHITECTURE.md, FEATURE_LIST_FULL.md, WAVE_BREAKDOWN.md, ./research, ./plans, ./audits, ./test-results, ./test-agents, ./how-to-be-a-good-coder\n\nFor more information on features described in WAVE_BREAKDOWN.md, see FEATURE_LIST_FULL.md\n\nDO NOT USE TEMP DIRECTORIES. DO ALL WORK IN THIS DIRECTORY/SUBDIRECTORIES.\n\nWhen you're done, answer the question: has every detail of Wave $1 of WAVE_BREAKDOWN.md been implemented with nothing deferred or deprioritized? Document the current state of the codebase in ./progress/PROGRESS_$1.{{turn}}.{{subTurn}}.md",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "doneImplementing": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "doneImplementing"
+          ]
+        },
+        "sound_effect": null
+      },
+      "85a6caa9-f4da-4d89-941f-ef20bc6e4490": {
+        "id": "85a6caa9-f4da-4d89-941f-ef20bc6e4490",
+        "type": "prompt",
+        "name": "Audit",
+        "position": {
+          "x": 550,
+          "y": 500
+        },
+        "prompt": "DO NOT USE TEMP DIRECTORIES. DO ALL WORK IN THIS DIRECTORY/SUBDIRECTORIES.\n\nPerform a comprehensive audit of the codebase against Wave $1 of WAVE_BREAKDOWN.md. Create a full breakdown of everything in Wave $1 of WAVE_BREAKDOWN.md that's missing from the codebase and store it in ./audits/AUDIT_$1.{{turn}}.md. This should include every single detail, no matter how minor, with nothing deferred or deprioritized.\n\nFor more information on features described in WAVE_BREAKDOWN.md, see FEATURE_LIST_FULL.md\n\nDon't edit DESIGN_DOC.md, ARCHITECTURE.md, FEATURE_LIST_FULL.md, WAVE_BREAKDOWN.md, ./research, ./plans, ./test-results, ./test-agents, ./how-to-be-a-good-coder\n\nIs anything missing?",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "anythingMissing": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "anythingMissing"
+          ]
+        },
+        "sound_effect": null
+      },
+      "e641e202-f1cc-4e6d-a8fb-5890fa762420": {
+        "id": "e641e202-f1cc-4e6d-a8fb-5890fa762420",
+        "type": "prompt",
+        "name": "Create Tests",
+        "position": {
+          "x": 600,
+          "y": 750
+        },
+        "prompt": "DO NOT USE TEMP DIRECTORIES. DO ALL WORK IN THIS DIRECTORY/SUBDIRECTORIES.\n\n./test-agents contains subdirectories of agents.md-style files that instruct an agent to simulate an end user that performs end-to-end testing on the codebase. These should not be code inspection agents -- they should be end-to-end testers. Add up to five new test agent files to subdir ./test-agents/test-agents-wave-$1, depending on how much testing is required. With each agent, you should be aiming to explore as much functionality at once of what's described in the Wave $1 of WAVE_BREAKDOWN.md and all waves leading up to it. You should also be aiming to have each agent act differently from each other (which requires cross-referencing against the current documents in ./test-agents). If there are very few agents so far, you should be creating agents that test core functionality and simulate realistic users. If there are many agents so far, you should be creating agents that explore edge case behavior.\n\nWhile building these test agents, you can reference ./how-to-be-a-good-coder, an organized encyclopedia of important knowledge specific to various coding topics. See ./how-to-be-a-good-coder/ABOUT.md for details.\n\nFor more information on features described in WAVE_BREAKDOWN.md, see FEATURE_LIST_FULL.md\n\nDon't deploy the test agents yet. Don't edit DESIGN_DOC.md, ARCHITECTURE.md, FEATURE_LIST_FULL.md, WAVE_BREAKDOWN.md, ./research, ./plans, ./test-results, ./how-to-be-a-good-coder\n\nAnswer this question when you're finished: will more test agents be required beyond the ones created so far for fully testing all functionality in Wave $1 of WAVE_BREAKDOWN.md (from top to bottom without deferring or deprioritizng any features)?",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "moreTestsRequired": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "moreTestsRequired"
+          ]
+        },
+        "sound_effect": null
+      },
+      "ea1a2621-7060-474c-a209-4cb54aaf676b": {
+        "id": "ea1a2621-7060-474c-a209-4cb54aaf676b",
+        "type": "end",
+        "name": "End",
+        "position": {
+          "x": 400,
+          "y": 900
+        }
+      },
+      "7d6a6a97-29b1-4b3f-9f19-6b0dfa8cb1ea": {
+        "id": "7d6a6a97-29b1-4b3f-9f19-6b0dfa8cb1ea",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 400,
+          "y": 500
+        }
+      },
+      "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5": {
+        "id": "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5",
+        "type": "branch",
+        "name": "Done Implementing?",
+        "position": {
+          "x": 450,
+          "y": 400
+        },
+        "condition": "doneImplementing",
+        "iteration_variable": ""
+      },
+      "074e732f-a36d-4888-929a-16bf2a905db6": {
+        "id": "074e732f-a36d-4888-929a-16bf2a905db6",
+        "type": "branch",
+        "name": "Anything Missing?",
+        "position": {
+          "x": 350,
+          "y": 600
+        },
+        "condition": "anythingMissing",
+        "iteration_variable": ""
+      },
+      "3a8730c4-84ea-46a9-86e7-1ee7c3154ba9": {
+        "id": "3a8730c4-84ea-46a9-86e7-1ee7c3154ba9",
+        "type": "branch",
+        "name": "Tests Passed?",
+        "position": {
+          "x": 100,
+          "y": 750
+        },
+        "condition": "testsPassed",
+        "iteration_variable": ""
+      },
+      "ef4879cd-462d-4e0d-9d02-d8696e8edae9": {
+        "id": "ef4879cd-462d-4e0d-9d02-d8696e8edae9",
+        "type": "branch",
+        "name": "No More Tests?",
+        "position": {
+          "x": 600,
+          "y": 900
+        },
+        "condition": "moreTestsRequired",
+        "iteration_variable": ""
+      },
+      "ee67bac5-a865-4210-b3ca-3429c4f4bb25": {
+        "id": "ee67bac5-a865-4210-b3ca-3429c4f4bb25",
+        "type": "variable",
+        "name": "turn",
+        "position": {
+          "x": 700,
+          "y": 50
+        },
+        "variable_name": "turn",
+        "variable_value": "0",
+        "variable_type": "int"
+      },
+      "ab22f72e-aecc-4677-a653-72b2d61a77ae": {
+        "id": "ab22f72e-aecc-4677-a653-72b2d61a77ae",
+        "type": "variable",
+        "name": "subTurn",
+        "position": {
+          "x": 200,
+          "y": 50
+        },
+        "variable_name": "subTurn",
+        "variable_value": "0",
+        "variable_type": "int"
+      },
+      "6b870eed-baa0-41e9-a114-82533c8e154e": {
+        "id": "6b870eed-baa0-41e9-a114-82533c8e154e",
+        "type": "bash",
+        "name": "Turn Increment",
+        "position": {
+          "x": 100,
+          "y": 150
+        },
+        "command": "echo $(({{turn}}+1))",
+        "capture_output": true,
+        "output_variable": "turn",
+        "working_directory": "",
+        "continue_on_error": false,
+        "exit_code_variable": ""
+      },
+      "f1ade468-8014-43f2-aa19-5ebe44ed9afb": {
+        "id": "f1ade468-8014-43f2-aa19-5ebe44ed9afb",
+        "type": "bash",
+        "name": "subTurn Increment",
+        "position": {
+          "x": 700,
+          "y": 500
+        },
+        "command": "echo $(({{subTurn}}+1))",
+        "capture_output": true,
+        "output_variable": "subTurn",
+        "working_directory": "",
+        "continue_on_error": false,
+        "exit_code_variable": ""
+      },
+      "63180d59-98b6-49f7-b387-fbc47c34b898": {
+        "id": "63180d59-98b6-49f7-b387-fbc47c34b898",
+        "type": "variable",
+        "name": "prevTurn",
+        "position": {
+          "x": 100,
+          "y": 300
+        },
+        "variable_name": "prevTurn",
+        "variable_value": "{{turn}}",
+        "variable_type": "int"
+      },
+      "dffff63e-880a-432f-b1e0-4b01f9723793": {
+        "id": "dffff63e-880a-432f-b1e0-4b01f9723793",
+        "type": "variable",
+        "name": "testsPassed",
+        "position": {
+          "x": 700,
+          "y": 150
+        },
+        "variable_name": "testsPassed",
+        "variable_value": "true",
+        "variable_type": "boolean"
+      },
+      "3603ca83-c8b8-44d9-9bc4-e86f69c64fc1": {
+        "id": "3603ca83-c8b8-44d9-9bc4-e86f69c64fc1",
+        "type": "prompt",
+        "name": "Run Tests",
+        "position": {
+          "x": 200,
+          "y": 600
+        },
+        "prompt": "DO NOT USE TEMP DIRECTORIES. DO ALL WORK IN THIS DIRECTORY/SUBDIRECTORIES.\n\nFor each file across the subdirectories of ./test-agents, deploy an agent treating that file as an agents.md file. This agent will perform e2e testing on the codebase based on the behaviors prescribed in the .md file. Direct each agent to write results to its own uniquely identifiable output file in the subdirectory ./test_results/TEST_RESULTS_$1.{{turn}}\n\nDon't edit DESIGN_DOC.md, ARCHITECTURE.md, FEATURE_LIST_FULL.md, WAVE_BREAKDOWN.md, ./research, ./plans, ./test-agents, ./how-to-be-a-good-coder\n\nBased on the results in ./test_results/TEST_RESULTS_$1.{{turn}}, did ALL tests pass?",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "testsPassed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "testsPassed"
+          ]
+        },
+        "sound_effect": null
+      },
+      "c944a307-c181-4058-bbc3-4ee2d9b4be28": {
+        "id": "c944a307-c181-4058-bbc3-4ee2d9b4be28",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 700,
+          "y": 400
+        }
+      },
+      "de006542-82fc-4591-9183-40972cf31dcb": {
+        "id": "de006542-82fc-4591-9183-40972cf31dcb",
+        "type": "variable",
+        "name": "anythingMissing",
+        "position": {
+          "x": 500,
+          "y": 50
+        },
+        "variable_name": "anythingMissing",
+        "variable_value": "false",
+        "variable_type": "boolean"
+      },
+      "3fabba8f-7880-4bf0-a69e-ae31c0a31820": {
+        "id": "3fabba8f-7880-4bf0-a69e-ae31c0a31820",
+        "type": "branch",
+        "name": "Tests Passed?",
+        "position": {
+          "x": 350,
+          "y": 200
+        },
+        "condition": "testsPassed",
+        "iteration_variable": ""
+      },
+      "9b09e408-7f01-445c-985a-93d43cd8c530": {
+        "id": "9b09e408-7f01-445c-985a-93d43cd8c530",
+        "type": "prompt",
+        "name": "Diagnose Test Failures",
+        "position": {
+          "x": 250,
+          "y": 300
+        },
+        "prompt": "Don't edit anything. We are currently implementing Wave $1 of WAVE_BREAKDOWN.md. All previous waves have been implemented. Currently we are debugging test failures for our implementation of the current wave. Analyze and diagnose the test failures in ./test_results/TEST_RESULTS_$1.{{prevTurn}}",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "bc44f1ea-36cb-46c6-8675-8f7540c34248": {
+        "id": "bc44f1ea-36cb-46c6-8675-8f7540c34248",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 350,
+          "y": 100
+        }
+      },
+      "3bb8897c-b0ff-426a-9217-c779d9ebbb44": {
+        "id": "3bb8897c-b0ff-426a-9217-c779d9ebbb44",
+        "type": "prompt",
+        "name": "Fix Test Failures",
+        "position": {
+          "x": 250,
+          "y": 400
+        },
+        "prompt": "Based on your analysis and diagnoses, fix all test failures in ./test_results/TEST_RESULTS_$1.{{prevTurn}}\n\nDO NOT USE TEMP DIRECTORIES. DO ALL WORK IN THIS DIRECTORY/SUBDIRECTORIES.\n\nDon't edit DESIGN_DOC.md, ARCHITECTURE.md, FEATURE_LIST_FULL.md, WAVE_BREAKDOWN.md, ./research, ./plans, ./progress, ./test-agents, ./test-results, ./how-to-be-a-good-coder",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "33d4eebb-eb41-49e9-a53e-7e33a9285c89": {
+        "id": "33d4eebb-eb41-49e9-a53e-7e33a9285c89",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 600,
+          "y": 600
+        }
+      },
+      "aeb9040b-efe1-47a0-a615-86acdf4ae846": {
+        "id": "aeb9040b-efe1-47a0-a615-86acdf4ae846",
+        "type": "variable",
+        "name": "prevTurn",
+        "position": {
+          "x": 500,
+          "y": 150
+        },
+        "variable_name": "prevTurn",
+        "variable_value": "-1",
+        "variable_type": "int"
+      }
+    },
+    "connections": [
+      {
+        "id": "ce2ec43d-af67-4534-868b-d099b179df89",
+        "source_block_id": "8b5b7a53-c097-430d-ad44-54fdac680e2a",
+        "target_block_id": "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "68898a2a-b966-4037-bf1e-f6c7cc1077d5",
+        "source_block_id": "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5",
+        "target_block_id": "7d6a6a97-29b1-4b3f-9f19-6b0dfa8cb1ea",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "deb980ac-e33c-4812-a928-b714bba084dd",
+        "source_block_id": "85a6caa9-f4da-4d89-941f-ef20bc6e4490",
+        "target_block_id": "074e732f-a36d-4888-929a-16bf2a905db6",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "c2e14f74-5940-477d-bf79-79f48f494138",
+        "source_block_id": "3a8730c4-84ea-46a9-86e7-1ee7c3154ba9",
+        "target_block_id": "ef4879cd-462d-4e0d-9d02-d8696e8edae9",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "80d49411-61ed-4a47-b1ea-4d7eb4f161e6",
+        "source_block_id": "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5",
+        "target_block_id": "f1ade468-8014-43f2-aa19-5ebe44ed9afb",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "7dfef6ca-8452-4f2b-8f2f-e4d8a2637c5f",
+        "source_block_id": "3a8730c4-84ea-46a9-86e7-1ee7c3154ba9",
+        "target_block_id": "63180d59-98b6-49f7-b387-fbc47c34b898",
+        "source_port": "left",
+        "target_port": "bottom",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "a132a6cc-516f-4d8b-b0f9-672a0d260662",
+        "source_block_id": "6b870eed-baa0-41e9-a114-82533c8e154e",
+        "target_block_id": "ab22f72e-aecc-4677-a653-72b2d61a77ae",
+        "source_port": "top",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "2b7bfd1c-7ccc-4a33-86a7-4064ccf2524a",
+        "source_block_id": "074e732f-a36d-4888-929a-16bf2a905db6",
+        "target_block_id": "63180d59-98b6-49f7-b387-fbc47c34b898",
+        "source_port": "left",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "e78c1fb2-26cb-4d68-b62b-3a9487de5122",
+        "source_block_id": "ef4879cd-462d-4e0d-9d02-d8696e8edae9",
+        "target_block_id": "e641e202-f1cc-4e6d-a8fb-5890fa762420",
+        "source_port": "right",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "e10235c0-22dd-41d0-9330-4333fc69b993",
+        "source_block_id": "ef4879cd-462d-4e0d-9d02-d8696e8edae9",
+        "target_block_id": "ea1a2621-7060-474c-a209-4cb54aaf676b",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "b8e40978-c10a-444f-a92b-6b494e6647e2",
+        "source_block_id": "f1ade468-8014-43f2-aa19-5ebe44ed9afb",
+        "target_block_id": "c944a307-c181-4058-bbc3-4ee2d9b4be28",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "7bf1fd3b-bc57-4140-bdd9-94224cdbb5a6",
+        "source_block_id": "7d6a6a97-29b1-4b3f-9f19-6b0dfa8cb1ea",
+        "target_block_id": "85a6caa9-f4da-4d89-941f-ef20bc6e4490",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "b4bdd5cf-b258-4f7a-a6f8-7eed165eb9b8",
+        "source_block_id": "9b09e408-7f01-445c-985a-93d43cd8c530",
+        "target_block_id": "3bb8897c-b0ff-426a-9217-c779d9ebbb44",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "20071c28-83d8-42e4-9e01-5d7cf37c030a",
+        "source_block_id": "33d4eebb-eb41-49e9-a53e-7e33a9285c89",
+        "target_block_id": "e641e202-f1cc-4e6d-a8fb-5890fa762420",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "8e74d76d-4b41-4a6e-aaa0-da054f63f553",
+        "source_block_id": "074e732f-a36d-4888-929a-16bf2a905db6",
+        "target_block_id": "33d4eebb-eb41-49e9-a53e-7e33a9285c89",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "8db1cec7-2225-4c08-b3af-5c9dc9c8115a",
+        "source_block_id": "3fabba8f-7880-4bf0-a69e-ae31c0a31820",
+        "target_block_id": "9b09e408-7f01-445c-985a-93d43cd8c530",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "a38b3323-671f-4b7d-b186-183eb7b6f526",
+        "source_block_id": "de006542-82fc-4591-9183-40972cf31dcb",
+        "target_block_id": "ab22f72e-aecc-4677-a653-72b2d61a77ae",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "243f5f2f-ce30-426d-ae02-157c3b196608",
+        "source_block_id": "ab22f72e-aecc-4677-a653-72b2d61a77ae",
+        "target_block_id": "bc44f1ea-36cb-46c6-8675-8f7540c34248",
+        "source_port": "bottom",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "b734c087-37e1-43ef-ab4a-ad8f367a4990",
+        "source_block_id": "bc44f1ea-36cb-46c6-8675-8f7540c34248",
+        "target_block_id": "3fabba8f-7880-4bf0-a69e-ae31c0a31820",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "bf9ba763-6472-4272-9109-c0dd65cadc4f",
+        "source_block_id": "63180d59-98b6-49f7-b387-fbc47c34b898",
+        "target_block_id": "6b870eed-baa0-41e9-a114-82533c8e154e",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "34704453-b17e-4e8e-a627-f841d23fa65b",
+        "source_block_id": "dffff63e-880a-432f-b1e0-4b01f9723793",
+        "target_block_id": "ee67bac5-a865-4210-b3ca-3429c4f4bb25",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "52e4ed26-36bb-467e-bd72-191e2a0a3564",
+        "source_block_id": "69836169-01ee-4074-a7e2-4ef8acd39170",
+        "target_block_id": "dffff63e-880a-432f-b1e0-4b01f9723793",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "88c527bd-467e-4ab7-9b4a-91157cf4d0e4",
+        "source_block_id": "3bb8897c-b0ff-426a-9217-c779d9ebbb44",
+        "target_block_id": "3603ca83-c8b8-44d9-9bc4-e86f69c64fc1",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "0aef513e-5dd4-4cc0-a1c3-aedaf325af30",
+        "source_block_id": "e641e202-f1cc-4e6d-a8fb-5890fa762420",
+        "target_block_id": "3603ca83-c8b8-44d9-9bc4-e86f69c64fc1",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "12760d10-44e0-4b51-b1d0-1111f7d8953a",
+        "source_block_id": "3603ca83-c8b8-44d9-9bc4-e86f69c64fc1",
+        "target_block_id": "3a8730c4-84ea-46a9-86e7-1ee7c3154ba9",
+        "source_port": "bottom",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "9298bc30-4d99-4cfa-a19e-805a6c0ddb32",
+        "source_block_id": "c944a307-c181-4058-bbc3-4ee2d9b4be28",
+        "target_block_id": "8b5b7a53-c097-430d-ad44-54fdac680e2a",
+        "source_port": "top",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "c38aac53-32cc-4b80-8855-2f27576a189e",
+        "source_block_id": "3fabba8f-7880-4bf0-a69e-ae31c0a31820",
+        "target_block_id": "8b5b7a53-c097-430d-ad44-54fdac680e2a",
+        "source_port": "right",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "56f4ff9b-8a2b-48fc-9d06-1e56179aa3fe",
+        "source_block_id": "ee67bac5-a865-4210-b3ca-3429c4f4bb25",
+        "target_block_id": "aeb9040b-efe1-47a0-a615-86acdf4ae846",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "bdea43f0-fd31-4c8e-8374-9eacc0f778a0",
+        "source_block_id": "aeb9040b-efe1-47a0-a615-86acdf4ae846",
+        "target_block_id": "de006542-82fc-4591-9183-40972cf31dcb",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "69836169-01ee-4074-a7e2-4ef8acd39170"
+  },
+  "metadata": {
+    "created": "2025-11-29T11:26:47.357973",
+    "modified": "2025-11-30T00:11:46.261399",
+    "version": "1.0",
+    "author": null,
+    "tags": []
+  },
+  "arguments": []
+}

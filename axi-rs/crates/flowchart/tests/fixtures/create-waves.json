@@ -1,0 +1,252 @@
+{
+  "id": "5a2e805d-6111-4e13-ab92-9fd605267566",
+  "name": "create-waves",
+  "description": "",
+  "flowchart": {
+    "blocks": {
+      "2cf0b0d4-6bce-4384-81b2-f5e969d92ffb": {
+        "id": "2cf0b0d4-6bce-4384-81b2-f5e969d92ffb",
+        "type": "start",
+        "name": "Start",
+        "position": {
+          "x": 150,
+          "y": 50
+        }
+      },
+      "669c3f00-5865-42a1-af5c-5e591738a26a": {
+        "id": "669c3f00-5865-42a1-af5c-5e591738a26a",
+        "type": "prompt",
+        "name": "Break Down",
+        "position": {
+          "x": 150,
+          "y": 150
+        },
+        "prompt": "Read and thoroughly understand DESIGN_DOC.md. Do not edit DESIGN_DOC.md. Create the following three documents:\n\n1. ARCHITECTURE.md. This should be a spec of the architecture and technology/tooling stack to use to implement DESIGN_DOC.md. The ideal architecture is modular, separating layers into independently testable and reusable \"libraries\". Do deep research to determine the best options. Your research should include both a general search and a query of ./how-to-be-a-good-coder, an organized encyclopedia of important knowledge specific to various coding topics. See ./how-to-be-a-good-coder/ABOUT.md for details. Your research should include determining the best architectural choices, as well as the best technologies/tools for the job, so that you reinvent the wheel as little as possible. It should also include research into techniques for quickly bootstrapping projects so you aren't rewriting a bunch of boilerplate code. Your research can include scratch work and quick prototype coding in ./research so you can learn what might work or not work.\n\n2. FEATURE_LIST_FULL.md. This should be a simple line-by-line list of every single feature present in DESIGN_DOC.md. DESIGN_DOC.md should be thoroughly scoured from top to bottom so that every single feature is captured, with none being deferred or deprioritized or deemed too minor. Avoid duplicate features.\n\n**REQUIRED FORMAT FOR FEATURE_LIST_FULL.md:**\n- Lines starting with # are headers (allowed for organization)\n- Empty lines are allowed\n- All feature lines MUST match exactly: [tag-name] <description>\n  - Where tag-name is a lowercase hyphenated identifier (e.g., [user-login], [password-reset], [dashboard-stats])\n  - Tags must be unique (no duplicates)\n  - Tags should be descriptive and human-readable\n\nExample:\n```\n# Authentication Features\n\n[create-account] User can create a new account with email and password\n[user-login] User can log in with existing credentials\n[password-reset] User can reset password via email link\n\n# Dashboard Features\n\n[dashboard-overview] User sees overview statistics on dashboard\n```\n\n3. WAVE_BREAKDOWN.md. This is the most complex task. This document should describe multiple \"waves\" of development. Each wave should aim to create a usable product/prototype more advanced than the previous wave. Wave 0 should be a Hello World level app that proves the entire architectural/technological/tooling/testing stack works as intended. Each wave after that should be an increasingly sophisticated version of the product that delivers more end-user features, with Wave 1 (or first few waves) working toward implementing an MVP and the final wave (or final few waves) implementing the FULL COMPREHENSIVE design from DESIGN_DOC.md. Every feature from FEATURE_LIST_FULL.md should be delegated to a wave.  (Note: it is NOT a problem for WAVE_BREAKDOWN.md to have additional features that FEATURE_LIST_FULL.md lacks -- this may be necessary for tying up loose ends in a particular wave.) Each wave after Wave 0 should encompass about 40-80 features, and each should represent a \"reasonable progress checkpoint\" where the end-user will be able to see real progress. When deciding what features to delegate to each wave, consider the question from this angle: What is the end user's most likely ways of actually using the app, and what features does he expect to be able to do that?\n\n**REQUIRED FORMAT FOR WAVE_BREAKDOWN.md:**\n\nEach wave MUST follow this exact structure:\n\n```\n## Wave N - <Title>\n\n<Description paragraph(s) explaining what this wave accomplishes and what the user can do after it's complete.>\n\n### Features\n[tag-name]\n[another-tag]\n[yet-another]\n### End Features\n```\n\nRules:\n- Wave numbers must be sequential starting from 0\n- Every wave must have exactly one ### Features / ### End Features block\n- Inside feature blocks: ONLY [tag-name] tags or empty lines (one tag per line)\n- Additional features may be added for tying loose ends not in FEATURE_LIST_FULL.md\n- Wave 0 can have any number of features (it's a Hello World proof of concept)\n- All other waves should have 40-80 features each\n- Every tag from FEATURE_LIST_FULL.md must appear in exactly one wave\n\nExample:\n```\n## Wave 0 - Hello World\n\nThis wave proves the tech stack works. A minimal app that builds, runs, and displays a welcome screen.\n\n### Features\n[hello-world-screen]\n[app-skeleton]\n### End Features\n\n## Wave 1 - MVP Authentication\n\nThis wave implements core authentication so users can sign up, log in, and access protected routes.\n\n### Features\n[create-account]\n[user-login]\n[password-reset]\n... (40-80 features total)\n### End Features\n```\n\nUse this command to validate all criteria are met: `(./auto-validation/validate-feature-list-format.sh && ./auto-validation/validate-wave-breakdown-format.sh && ./auto-validation/validate-feature-coverage.sh && ./auto-validation/validate-wave-sizes.sh) 2>&1`\n\nDon't edit ./auto-validation\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "d191bd91-29f2-4405-911d-3635e0729e9f": {
+        "id": "d191bd91-29f2-4405-911d-3635e0729e9f",
+        "type": "branch",
+        "name": "Any Problems?",
+        "position": {
+          "x": 550,
+          "y": 350
+        },
+        "condition": "anyProblems",
+        "iteration_variable": ""
+      },
+      "d7436937-cefc-467b-adf3-02e762013f29": {
+        "id": "d7436937-cefc-467b-adf3-02e762013f29",
+        "type": "prompt",
+        "name": "Audit",
+        "position": {
+          "x": 650,
+          "y": 150
+        },
+        "prompt": "Audit ARCHITECTURE.md, FEATURE_LIST_FULL.md, and WAVE_BREAKDOWN.md against DESIGN_DOC.md. \n\nAudit ARCHITECTURE.md to see if it's well suited for the overall DESIGN_DOC.md at hand.\n\nAudit FEATURE_LIST_FULL.md to to see if DESIGN_DOC.md is comprehensively captured from top to bottom, with every single feature represented in FEATURE_LIST_FULL.md, no matter how minor-seeming. We do not want to defer or deprioritize ANYTHING in DESIGN_DOC.md (anything minor should appear in a late Wave). We also want to ensure this document doesn't contain duplicate features.\n\nWAVE_BREAKDOWN.md splits FEATURE_LIST_FULL.md into waves (occasionally adding auxilary features to tie up loose ends). Audit WAVE_BREAKDOWN.md to see if its delegation of Waves is appropriate. Is Wave 0 a Hello World level (or as close as reasonably posisble) proof of concept of the architectural/technological/tooling/testing stack? Does Wave 1 or the first few waves after work toward an appropriate MVP that would match an end-user's expectations of what features to expect from an MVP? Is each wave progressively more complex, featuring more important features in earlier waves and less important ones in later waves? Does each wave only have dependencies going backward, not into future waves? Is each wave coherent?\n\nNote: it is NOT a problem if WAVE_BREAKDOWN.md has additional features that FEATURE_LIST_FULL.md lacks. This may be necessary to tie up loose ends in a particular wave.\n\nWrite your results to SETUP_AUDIT.md. Do not edit any other files. DO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.\n\nAnswer this question: did you find any problems?",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "anyProblems": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "anyProblems"
+          ]
+        },
+        "sound_effect": null
+      },
+      "c67272c0-1f8e-4125-9401-67189f8f0a34": {
+        "id": "c67272c0-1f8e-4125-9401-67189f8f0a34",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 400,
+          "y": 150
+        }
+      },
+      "c29e3cde-e82f-47a6-bea5-fec2c974d5f9": {
+        "id": "c29e3cde-e82f-47a6-bea5-fec2c974d5f9",
+        "type": "end",
+        "name": "End",
+        "position": {
+          "x": 350,
+          "y": 400
+        }
+      },
+      "cab30b49-639e-42eb-83cf-965c75d4a584": {
+        "id": "cab30b49-639e-42eb-83cf-965c75d4a584",
+        "type": "prompt",
+        "name": "Audit-Based Revise",
+        "position": {
+          "x": 150,
+          "y": 250
+        },
+        "prompt": "Revise ARCHITECTURE.md, FULL_FEATURE_LIST.md, and WAVE_BREAKDOWN.md to accurately reflect DESIGN_DOC.md, based on the results in SETUP_AUDIT.md. Edit the files instead of doing full rewrites unless really fundamental changes are required. Do not edit DESIGN_DOC.md or SETUP_AUDIT.md. DO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.\n\nDescriptions of the three documents:\n\n1. ARCHITECTURE.md. This should be a spec of the architecture and technology/tooling stack to use to implement DESIGN_DOC.md. The ideal architecture is modular, separating layers into independently testable and reusable \"libraries\". Do deep research to determine the best options. Your research should include both a general search and a query of ./how-to-be-a-good-coder, an organized encyclopedia of important knowledge specific to various coding topics. See ./how-to-be-a-good-coder/ABOUT.md for details. Your research should include determining the best architectural choices, as well as the best technologies/tools for the job, so that you reinvent the wheel as little as possible. It should also include research into techniques for quickly bootstrapping projects so you aren't rewriting a bunch of boilerplate code. Your research can include scratch work and quick prototype coding in ./research so you can learn what might work or not work.\n\n2. FEATURE_LIST_FULL.md. This should be a simple line-by-line list of every single feature present in DESIGN_DOC.md. DESIGN_DOC.md should be thoroughly scoured from top to bottom so that every single feature is captured, with none being deferred or deprioritized or deemed too minor.\n\n**REQUIRED FORMAT FOR FEATURE_LIST_FULL.md:**\n- Lines starting with # are headers (allowed for organization)\n- Empty lines are allowed\n- All feature lines MUST match exactly: [tag-name] <description>\n  - Where tag-name is a lowercase hyphenated identifier (e.g., [user-login], [password-reset], [dashboard-stats])\n  - Tags must be unique (no duplicates)\n  - Tags should be descriptive and human-readable\n\nExample:\n```\n# Authentication Features\n\n[create-account] User can create a new account with email and password\n[user-login] User can log in with existing credentials\n[password-reset] User can reset password via email link\n\n# Dashboard Features\n\n[dashboard-overview] User sees overview statistics on dashboard\n```\n\n3. WAVE_BREAKDOWN.md. This is the most complex task. This document should describe multiple \"waves\" of development. Each wave should aim to create a usable product/prototype more advanced than the previous wave. Wave 0 should be a Hello World level app that proves the entire architectural/technological/tooling/testing stack works as intended. Each wave after that should be an increasingly sophisticated version of the product that delivers more end-user features, with Wave 1 (or first few waves) working toward implementing an MVP and the final wave (or final few waves) implementing the FULL COMPREHENSIVE design from DESIGN_DOC.md. Every feature from FEATURE_LIST_FULL.md should be delegated to a wave. (Note: it is NOT a problem for WAVE_BREAKDOWN.md to have additional features that FEATURE_LIST_FULL.md lacks -- this may be necessary for tying up loose ends in a particular wave.) Each wave after Wave 0 should encompass about 40-80 features, and each should represent a \"reasonable progress checkpoint\" where the end-user will be able to see real progress. When deciding what features to delegate to each wave, consider the question from this angle: What is the end user's most likely ways of actually using the app, and what features does he expect to be able to do that?\n\n**REQUIRED FORMAT FOR WAVE_BREAKDOWN.md:**\n\nEach wave MUST follow this exact structure:\n\n```\n## Wave N - <Title>\n\n<Description paragraph(s) explaining what this wave accomplishes and what the user can do after it's complete.>\n\n### Features\n[tag-name]\n[another-tag]\n[yet-another]\n### End Features\n```\n\nRules:\n- Wave numbers must be sequential starting from 0\n- Every wave must have exactly one ### Features / ### End Features block\n- Inside feature blocks: ONLY [tag-name] tags or empty lines (one tag per line)\n- Additional features may be added for tying loose ends not in FEATURE_LIST_FULL.md\n- Wave 0 can have any number of features (it's a Hello World proof of concept)\n- All other waves should have 40-80 features each\n- Every tag from FEATURE_LIST_FULL.md must appear in exactly one wave\n\nExample:\n```\n## Wave 0 - Hello World\n\nThis wave proves the tech stack works. A minimal app that builds, runs, and displays a welcome screen.\n\n### Features\n[hello-world-screen]\n[app-skeleton]\n### End Features\n\n## Wave 1 - MVP Authentication\n\nThis wave implements core authentication so users can sign up, log in, and access protected routes.\n\n### Features\n[create-account]\n[user-login]\n[password-reset]\n... (40-80 features total)\n### End Features\n```\n\nUse this command to validate all criteria are met: `(./auto-validation/validate-feature-list-format.sh && ./auto-validation/validate-wave-breakdown-format.sh && ./auto-validation/validate-feature-coverage.sh && ./auto-validation/validate-wave-sizes.sh) 2>&1`\n\nDon't edit ./auto-validation\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "5bd213c5-2c60-45ab-8054-934de66b7ef2": {
+        "id": "5bd213c5-2c60-45ab-8054-934de66b7ef2",
+        "type": "bash",
+        "name": "Auto-Validation",
+        "position": {
+          "x": 300,
+          "y": 250
+        },
+        "command": "(./auto-validation/validate-feature-list-format.sh && ./auto-validation/validate-wave-breakdown-format.sh && ./auto-validation/validate-feature-coverage.sh && ./auto-validation/validate-wave-sizes.sh) 2>&1",
+        "capture_output": true,
+        "output_variable": "avmsg",
+        "working_directory": "",
+        "continue_on_error": true,
+        "exit_code_variable": "exitCode"
+      },
+      "1bc9e0a0-47a2-41ad-8b9e-23a473ea9120": {
+        "id": "1bc9e0a0-47a2-41ad-8b9e-23a473ea9120",
+        "type": "branch",
+        "name": "Branch",
+        "position": {
+          "x": 450,
+          "y": 250
+        },
+        "condition": "exitCode == 0",
+        "iteration_variable": ""
+      },
+      "b255249f-1bed-4e78-b487-d4f7389c2c42": {
+        "id": "b255249f-1bed-4e78-b487-d4f7389c2c42",
+        "type": "prompt",
+        "name": "Bash-Based Revise",
+        "position": {
+          "x": 200,
+          "y": 350
+        },
+        "prompt": "Revise FULL_FEATURE_LIST.md and WAVE_BREAKDOWN.md to address this auto-validation error message: \n\n** ERROR MESSAGE **\n{{avmsg}}\n** END OF ERROR MESSAGE **\n\nDescriptions of the three documents:\n\n1. ARCHITECTURE.md. This should be a spec of the architecture and technology/tooling stack to use to implement DESIGN_DOC.md. The ideal architecture is modular, separating layers into independently testable and reusable \"libraries\". Do deep research to determine the best options. Your research should include both a general search and a query of ./how-to-be-a-good-coder, an organized encyclopedia of important knowledge specific to various coding topics. See ./how-to-be-a-good-coder/ABOUT.md for details. Your research should include determining the best architectural choices, as well as the best technologies/tools for the job, so that you reinvent the wheel as little as possible. It should also include research into techniques for quickly bootstrapping projects so you aren't rewriting a bunch of boilerplate code. Your research can include scratch work and quick prototype coding in ./research so you can learn what might work or not work.\n\n2. FEATURE_LIST_FULL.md. This should be a simple line-by-line list of every single feature present in DESIGN_DOC.md. DESIGN_DOC.md should be thoroughly scoured from top to bottom so that every single feature is captured, with none being deferred or deprioritized or deemed too minor.\n\n**REQUIRED FORMAT FOR FEATURE_LIST_FULL.md:**\n- Lines starting with # are headers (allowed for organization)\n- Empty lines are allowed\n- All feature lines MUST match exactly: [tag-name] <description>\n  - Where tag-name is a lowercase hyphenated identifier (e.g., [user-login], [password-reset], [dashboard-stats])\n  - Tags must be unique (no duplicates)\n  - Tags should be descriptive and human-readable\n\nExample:\n```\n# Authentication Features\n\n[create-account] User can create a new account with email and password\n[user-login] User can log in with existing credentials\n[password-reset] User can reset password via email link\n\n# Dashboard Features\n\n[dashboard-overview] User sees overview statistics on dashboard\n```\n\n3. WAVE_BREAKDOWN.md. This is the most complex task. This document should describe multiple \"waves\" of development. Each wave should aim to create a usable product/prototype more advanced than the previous wave. Wave 0 should be a Hello World level app that proves the entire architectural/technological/tooling/testing stack works as intended. Each wave after that should be an increasingly sophisticated version of the product that delivers more end-user features, with Wave 1 (or first few waves) working toward implementing an MVP and the final wave (or final few waves) implementing the FULL COMPREHENSIVE design from DESIGN_DOC.md. Every feature from FEATURE_LIST_FULL.md should be delegated to a wave. (Note: it is NOT a problem for WAVE_BREAKDOWN.md to have additional features that FEATURE_LIST_FULL.md lacks -- this may be necessary for tying up loose ends in a particular wave.) Each wave after Wave 0 should encompass about 40-80 features, and each should represent a \"reasonable progress checkpoint\" where the end-user will be able to see real progress. When deciding what features to delegate to each wave, consider the question from this angle: What is the end user's most likely ways of actually using the app, and what features does he expect to be able to do that?\n\n**REQUIRED FORMAT FOR WAVE_BREAKDOWN.md:**\n\nEach wave MUST follow this exact structure:\n\n```\n## Wave N - <Title>\n\n<Description paragraph(s) explaining what this wave accomplishes and what the user can do after it's complete.>\n\n### Features\n[tag-name]\n[another-tag]\n[yet-another]\n### End Features\n```\n\nRules:\n- Wave numbers must be sequential starting from 0\n- Every wave must have exactly one ### Features / ### End Features block\n- Inside feature blocks: ONLY [tag-name] tags or empty lines (one tag per line)\n- Additional features may be added for tying loose ends not in FEATURE_LIST_FULL.md\n- Wave 0 can have any number of features (it's a Hello World proof of concept)\n- All other waves should have 40-80 features each\n- Every tag from FEATURE_LIST_FULL.md must appear in exactly one wave\n\nExample:\n```\n## Wave 0 - Hello World\n\nThis wave proves the tech stack works. A minimal app that builds, runs, and displays a welcome screen.\n\n### Features\n[hello-world-screen]\n[app-skeleton]\n### End Features\n\n## Wave 1 - MVP Authentication\n\nThis wave implements core authentication so users can sign up, log in, and access protected routes.\n\n### Features\n[create-account]\n[user-login]\n[password-reset]\n... (40-80 features total)\n### End Features\n```\n\nUse this command to validate all criteria are met: `(./auto-validation/validate-feature-list-format.sh && ./auto-validation/validate-wave-breakdown-format.sh && ./auto-validation/validate-feature-coverage.sh && ./auto-validation/validate-wave-sizes.sh) 2>&1`\n\nDon't edit ./auto-validation\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.\nNew prompt",
+        "output_schema": null,
+        "sound_effect": null
+      }
+    },
+    "connections": [
+      {
+        "id": "fa940dd3-ca08-4d71-83e4-7c3f91dba9dc",
+        "source_block_id": "d191bd91-29f2-4405-911d-3635e0729e9f",
+        "target_block_id": "c29e3cde-e82f-47a6-bea5-fec2c974d5f9",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "e9e83ccc-ab2b-43a1-aca4-cbff90326f5f",
+        "source_block_id": "c67272c0-1f8e-4125-9401-67189f8f0a34",
+        "target_block_id": "d7436937-cefc-467b-adf3-02e762013f29",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "6ca19f1f-a6ed-4fd0-9790-a7240c4fe1be",
+        "source_block_id": "d7436937-cefc-467b-adf3-02e762013f29",
+        "target_block_id": "d191bd91-29f2-4405-911d-3635e0729e9f",
+        "source_port": "bottom",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "482542b3-c8ee-4cf2-af62-22eea64b40e4",
+        "source_block_id": "d191bd91-29f2-4405-911d-3635e0729e9f",
+        "target_block_id": "cab30b49-639e-42eb-83cf-965c75d4a584",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "1e7f1298-71c4-4b46-be60-7d49d125e603",
+        "source_block_id": "1bc9e0a0-47a2-41ad-8b9e-23a473ea9120",
+        "target_block_id": "c67272c0-1f8e-4125-9401-67189f8f0a34",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "343a54d4-1b3c-46bb-894d-687237c1ad77",
+        "source_block_id": "5bd213c5-2c60-45ab-8054-934de66b7ef2",
+        "target_block_id": "1bc9e0a0-47a2-41ad-8b9e-23a473ea9120",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "1b57e3c7-731b-4dec-9fd8-a2832334814b",
+        "source_block_id": "669c3f00-5865-42a1-af5c-5e591738a26a",
+        "target_block_id": "5bd213c5-2c60-45ab-8054-934de66b7ef2",
+        "source_port": "right",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "9f266a8b-916a-4d62-b2b5-34a1b1fc7566",
+        "source_block_id": "cab30b49-639e-42eb-83cf-965c75d4a584",
+        "target_block_id": "5bd213c5-2c60-45ab-8054-934de66b7ef2",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "085a6810-24e4-4fa0-b058-33eb5bdf241d",
+        "source_block_id": "b255249f-1bed-4e78-b487-d4f7389c2c42",
+        "target_block_id": "5bd213c5-2c60-45ab-8054-934de66b7ef2",
+        "source_port": "right",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "68937b98-3384-48e3-8807-4165696cac05",
+        "source_block_id": "1bc9e0a0-47a2-41ad-8b9e-23a473ea9120",
+        "target_block_id": "b255249f-1bed-4e78-b487-d4f7389c2c42",
+        "source_port": "bottom",
+        "target_port": "right",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "9206b446-25c4-447d-9a4b-21058316a4b8",
+        "source_block_id": "2cf0b0d4-6bce-4384-81b2-f5e969d92ffb",
+        "target_block_id": "669c3f00-5865-42a1-af5c-5e591738a26a",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "2cf0b0d4-6bce-4384-81b2-f5e969d92ffb"
+  },
+  "metadata": {
+    "created": "2025-11-28T21:29:08.441152",
+    "modified": "2025-11-30T11:24:09.016305",
+    "version": "1.0",
+    "author": null,
+    "tags": []
+  },
+  "arguments": []
+}

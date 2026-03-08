@@ -1,0 +1,127 @@
+{
+  "id": "phase-planner-001",
+  "name": "phase-planner",
+  "description": "Analyzes DESIGN_DOC.md and breaks project into implementation phases",
+  "flowchart": {
+    "blocks": {
+      "start-1": {
+        "id": "start-1",
+        "type": "start",
+        "name": "START",
+        "position": {
+          "x": 100,
+          "y": 50
+        }
+      },
+      "prompt-analyze": {
+        "id": "prompt-analyze",
+        "type": "prompt",
+        "name": "ANALYZE & PLAN",
+        "position": {
+          "x": 100,
+          "y": 150
+        },
+        "prompt": "Read and deeply understand ./design_docs/$1\n\nBreak this project into logical implementation phases. Each phase should be cohesive and have clear boundaries. Consider:\n- Core data structures and models first\n- Business logic and algorithms\n- API/interface layers\n- UI components (if applicable)\n- Integration and glue code\n- Configuration and deployment\n\nFor each phase, identify:\n1. Phase name\n2. Detailed description\n3. Key files/modules to create\n4. Dependencies on other phases\n\nOutput a structured plan with 3-8 phases (avoid over-fragmenting or under-fragmenting).",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "phases": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "key_deliverables": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "dependencies": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": ["name", "description", "key_deliverables"]
+              }
+            },
+            "total_phases": {
+              "type": "integer"
+            }
+          },
+          "required": ["phases", "total_phases"]
+        },
+        "sound_effect": null
+      },
+      "prompt-write-phases": {
+        "id": "prompt-write-phases",
+        "type": "prompt",
+        "name": "WRITE PHASE DOCS",
+        "position": {
+          "x": 100,
+          "y": 250
+        },
+        "prompt": "For each phase in your plan, create a detailed phase design document at:\n./design_docs/phases/PHASE_0.md\n./design_docs/phases/PHASE_1.md\n... etc.\n\nEach phase doc should include:\n- Phase name and number\n- Detailed implementation requirements\n- Files to create/modify\n- Key functions/classes/components\n- Dependencies on previous phases\n- Success criteria\n\nAlso create ./design_docs/phases/PHASES_SUMMARY.md with an overview of all phases and their relationships.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "end-1": {
+        "id": "end-1",
+        "type": "end",
+        "name": "END",
+        "position": {
+          "x": 100,
+          "y": 350
+        }
+      }
+    },
+    "connections": [
+      {
+        "id": "conn-1",
+        "source_block_id": "start-1",
+        "target_block_id": "prompt-analyze",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-2",
+        "source_block_id": "prompt-analyze",
+        "target_block_id": "prompt-write-phases",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-3",
+        "source_block_id": "prompt-write-phases",
+        "target_block_id": "end-1",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "start-1"
+  },
+  "metadata": {
+    "created": "2025-01-08T00:00:00.000000",
+    "modified": "2025-01-08T00:00:00.000000",
+    "version": "1.0",
+    "author": "autonomous-system",
+    "tags": ["planning", "architecture"]
+  },
+  "arguments": []
+}

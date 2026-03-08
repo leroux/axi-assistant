@@ -1,0 +1,417 @@
+{
+  "id": "1be9ad9c-5cfb-4b00-80be-2ff0877bdeb1",
+  "name": "wave-dev",
+  "description": "",
+  "flowchart": {
+    "blocks": {
+      "69836169-01ee-4074-a7e2-4ef8acd39170": {
+        "id": "69836169-01ee-4074-a7e2-4ef8acd39170",
+        "type": "start",
+        "name": "Start",
+        "position": {
+          "x": 700,
+          "y": 250
+        }
+      },
+      "8b5b7a53-c097-430d-ad44-54fdac680e2a": {
+        "id": "8b5b7a53-c097-430d-ad44-54fdac680e2a",
+        "type": "prompt",
+        "name": "Implement",
+        "position": {
+          "x": 450,
+          "y": 300
+        },
+        "prompt": "Our overarching goal is to implement DESIGN_DOC.md. Right now, we are only focused on Wave $1 of WAVE_BREAKDOWN.md. Thoroughly implement Wave $1 of WAVE_BREAKDOWN.md. All previous waves have already been implemented. Do not defer or deprioritize any features listed for Wave $1 of WAVE_BREAKDOWN.md. Make sure the description for Wave $1 of WAVE_BREAKDOWN.md is met (these are the user's expectations). NO MOCKS OR PLACEHOLDERS.\n\nThe test suite has already been created for Wave $1 of WAVE_BREAKDOWN.md. It can be run via `./run-tests.sh --wave=$1`. You should read the test suite and develop with the tests in mind. The tests have been written as though the associated project functions exists -- it is your job to implement these functions. DO NOT RUN THE TESTS THOUGH. Test suites take too long to run and my workflow is not conducive to background processes.\n\nIf ./audits/AUDIT_$1.{{prevTurn}}.md exists, it means we already have a partial implementation of Wave $1, but it failed the audit. Read and understand the audit. Focus on the discrepancies the audit lays out as you execute the rest of this prompt; don't bother reviewing anything that the auditor didn't flag as problematic.\n\nReference ARCHITECTURE.md and ./how-to-be-a-good-coder (./how-to-be-a-good-coder/ABOUT.md has more info). ./progress has all progress reports created so far. DO NOT OVERENGINEER. Do not incorporate fallbacks or failsafes; errors should never be handled silently. Examples of horrible fallbacks you should never do: checking if objects have attributes, forcibly trying to install packages mid-run, \"safe\" code branches when variables are unvavailable, etc. Stay consistent with architectural choices and paradigms made in the plan and the codebase. Comment and document as you write.\n\nDon't edit DESIGN_DOC.md, ARCHITECTURE.md, FEATURE_LIST_FULL.md, WAVE_BREAKDOWN.md, ./research, ./plans, ./audits, ./test-results, ./test-agents, ./how-to-be-a-good-coder\n\nFor more information on features described in WAVE_BREAKDOWN.md, see FEATURE_LIST_FULL.md\n\nMake sure there is a README explaining to the user how to run the program and what all the user can expect.\n\nWhen you're done, answer the question: has every detail of Wave $1 of WAVE_BREAKDOWN.md been implemented with nothing deferred or deprioritized? Document the current state of the codebase in ./progress/PROGRESS_$1.DEV.{{turn}}.{{subTurn}}.md",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "doneImplementing": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "doneImplementing"
+          ]
+        },
+        "sound_effect": null
+      },
+      "85a6caa9-f4da-4d89-941f-ef20bc6e4490": {
+        "id": "85a6caa9-f4da-4d89-941f-ef20bc6e4490",
+        "type": "prompt",
+        "name": "Audit",
+        "position": {
+          "x": 550,
+          "y": 500
+        },
+        "prompt": "Our overarching goal is to implement DESIGN_DOC.md. Right now, we are only focused on Wave $1 of WAVE_BREAKDOWN.md. Perform a comprehensive audit of the codebase against Wave $1 of WAVE_BREAKDOWN.md. Create a full breakdown of every feature in Wave $1 of WAVE_BREAKDOWN.md that's missing from the codebase and store it in ./audits/AUDIT_$1.{{turn}}.md. This should include every single detail, no matter how minor, with nothing deferred or deprioritized. There should be no mocks or placeholders. All issues are CRITICAL issues -- there are no \"low priority\" issues. The description given for Wave $1 in WAVE_BREAKDOWN.md is what the user is expecting. User expections should be met. You should also read the code to see if it actually makes sense. Are there fundamental logic errors or core issues? Audit the README as well for accuracy.\n\nFor more information on features described in WAVE_BREAKDOWN.md, see FEATURE_LIST_FULL.md\n\nDon't edit DESIGN_DOC.md, ARCHITECTURE.md, FEATURE_LIST_FULL.md, WAVE_BREAKDOWN.md, ./research, ./plans, ./test-results, ./test-agents, ./how-to-be-a-good-coder\n\nDon't edit any code. Ultrathink.\n\nAre there any issues?",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "anyIssues": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "anyIssues"
+          ]
+        },
+        "sound_effect": null
+      },
+      "ea1a2621-7060-474c-a209-4cb54aaf676b": {
+        "id": "ea1a2621-7060-474c-a209-4cb54aaf676b",
+        "type": "end",
+        "name": "End",
+        "position": {
+          "x": 500,
+          "y": 700
+        }
+      },
+      "7d6a6a97-29b1-4b3f-9f19-6b0dfa8cb1ea": {
+        "id": "7d6a6a97-29b1-4b3f-9f19-6b0dfa8cb1ea",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 400,
+          "y": 500
+        }
+      },
+      "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5": {
+        "id": "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5",
+        "type": "branch",
+        "name": "Done Implementing?",
+        "position": {
+          "x": 450,
+          "y": 400
+        },
+        "condition": "doneImplementing"
+      },
+      "074e732f-a36d-4888-929a-16bf2a905db6": {
+        "id": "074e732f-a36d-4888-929a-16bf2a905db6",
+        "type": "branch",
+        "name": "Any Issues?",
+        "position": {
+          "x": 350,
+          "y": 600
+        },
+        "condition": "anyIssues"
+      },
+      "ee67bac5-a865-4210-b3ca-3429c4f4bb25": {
+        "id": "ee67bac5-a865-4210-b3ca-3429c4f4bb25",
+        "type": "variable",
+        "name": "turn",
+        "position": {
+          "x": 700,
+          "y": 150
+        },
+        "variable_name": "turn",
+        "variable_value": "0",
+        "variable_type": "int"
+      },
+      "ab22f72e-aecc-4677-a653-72b2d61a77ae": {
+        "id": "ab22f72e-aecc-4677-a653-72b2d61a77ae",
+        "type": "variable",
+        "name": "subTurn",
+        "position": {
+          "x": 300,
+          "y": 50
+        },
+        "variable_name": "subTurn",
+        "variable_value": "0",
+        "variable_type": "int"
+      },
+      "6b870eed-baa0-41e9-a114-82533c8e154e": {
+        "id": "6b870eed-baa0-41e9-a114-82533c8e154e",
+        "type": "bash",
+        "name": "Turn Increment",
+        "position": {
+          "x": 200,
+          "y": 300
+        },
+        "command": "echo $(({{turn}}+1))",
+        "capture_output": true,
+        "output_variable": "turn",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": false,
+        "exit_code_variable": ""
+      },
+      "f1ade468-8014-43f2-aa19-5ebe44ed9afb": {
+        "id": "f1ade468-8014-43f2-aa19-5ebe44ed9afb",
+        "type": "bash",
+        "name": "subTurn Increment",
+        "position": {
+          "x": 700,
+          "y": 500
+        },
+        "command": "echo $(({{subTurn}}+1))",
+        "capture_output": true,
+        "output_variable": "subTurn",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": false,
+        "exit_code_variable": ""
+      },
+      "63180d59-98b6-49f7-b387-fbc47c34b898": {
+        "id": "63180d59-98b6-49f7-b387-fbc47c34b898",
+        "type": "variable",
+        "name": "prevTurn",
+        "position": {
+          "x": 200,
+          "y": 450
+        },
+        "variable_name": "prevTurn",
+        "variable_value": "{{turn}}",
+        "variable_type": "int"
+      },
+      "c944a307-c181-4058-bbc3-4ee2d9b4be28": {
+        "id": "c944a307-c181-4058-bbc3-4ee2d9b4be28",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 700,
+          "y": 400
+        }
+      },
+      "de006542-82fc-4591-9183-40972cf31dcb": {
+        "id": "de006542-82fc-4591-9183-40972cf31dcb",
+        "type": "variable",
+        "name": "anythingMissing",
+        "position": {
+          "x": 500,
+          "y": 50
+        },
+        "variable_name": "anythingMissing",
+        "variable_value": "false",
+        "variable_type": "boolean"
+      },
+      "bc44f1ea-36cb-46c6-8675-8f7540c34248": {
+        "id": "bc44f1ea-36cb-46c6-8675-8f7540c34248",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 400,
+          "y": 200
+        }
+      },
+      "aeb9040b-efe1-47a0-a615-86acdf4ae846": {
+        "id": "aeb9040b-efe1-47a0-a615-86acdf4ae846",
+        "type": "variable",
+        "name": "prevTurn",
+        "position": {
+          "x": 700,
+          "y": 50
+        },
+        "variable_name": "prevTurn",
+        "variable_value": "-1",
+        "variable_type": "int"
+      },
+      "af75a704-c108-4a19-b89a-644fc38aa1f8": {
+        "id": "af75a704-c108-4a19-b89a-644fc38aa1f8",
+        "type": "bash",
+        "name": "TAG COMPLETE",
+        "position": {
+          "x": 350,
+          "y": 700
+        },
+        "command": "git tag \"wave-$1-dev-complete\" 2>/dev/null || true",
+        "capture_output": true,
+        "output_variable": "",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": true,
+        "exit_code_variable": ""
+      }
+    },
+    "connections": [
+      {
+        "id": "ce2ec43d-af67-4534-868b-d099b179df89",
+        "source_block_id": "8b5b7a53-c097-430d-ad44-54fdac680e2a",
+        "target_block_id": "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "68898a2a-b966-4037-bf1e-f6c7cc1077d5",
+        "source_block_id": "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5",
+        "target_block_id": "7d6a6a97-29b1-4b3f-9f19-6b0dfa8cb1ea",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "deb980ac-e33c-4812-a928-b714bba084dd",
+        "source_block_id": "85a6caa9-f4da-4d89-941f-ef20bc6e4490",
+        "target_block_id": "074e732f-a36d-4888-929a-16bf2a905db6",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "80d49411-61ed-4a47-b1ea-4d7eb4f161e6",
+        "source_block_id": "70fa7df6-2b2c-4d0d-b759-edf3c882c2c5",
+        "target_block_id": "f1ade468-8014-43f2-aa19-5ebe44ed9afb",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "a132a6cc-516f-4d8b-b0f9-672a0d260662",
+        "source_block_id": "6b870eed-baa0-41e9-a114-82533c8e154e",
+        "target_block_id": "ab22f72e-aecc-4677-a653-72b2d61a77ae",
+        "source_port": "top",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "2b7bfd1c-7ccc-4a33-86a7-4064ccf2524a",
+        "source_block_id": "074e732f-a36d-4888-929a-16bf2a905db6",
+        "target_block_id": "63180d59-98b6-49f7-b387-fbc47c34b898",
+        "source_port": "left",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "b8e40978-c10a-444f-a92b-6b494e6647e2",
+        "source_block_id": "f1ade468-8014-43f2-aa19-5ebe44ed9afb",
+        "target_block_id": "c944a307-c181-4058-bbc3-4ee2d9b4be28",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "7bf1fd3b-bc57-4140-bdd9-94224cdbb5a6",
+        "source_block_id": "7d6a6a97-29b1-4b3f-9f19-6b0dfa8cb1ea",
+        "target_block_id": "85a6caa9-f4da-4d89-941f-ef20bc6e4490",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "a38b3323-671f-4b7d-b186-183eb7b6f526",
+        "source_block_id": "de006542-82fc-4591-9183-40972cf31dcb",
+        "target_block_id": "ab22f72e-aecc-4677-a653-72b2d61a77ae",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "243f5f2f-ce30-426d-ae02-157c3b196608",
+        "source_block_id": "ab22f72e-aecc-4677-a653-72b2d61a77ae",
+        "target_block_id": "bc44f1ea-36cb-46c6-8675-8f7540c34248",
+        "source_port": "bottom",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "bf9ba763-6472-4272-9109-c0dd65cadc4f",
+        "source_block_id": "63180d59-98b6-49f7-b387-fbc47c34b898",
+        "target_block_id": "6b870eed-baa0-41e9-a114-82533c8e154e",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "9298bc30-4d99-4cfa-a19e-805a6c0ddb32",
+        "source_block_id": "c944a307-c181-4058-bbc3-4ee2d9b4be28",
+        "target_block_id": "8b5b7a53-c097-430d-ad44-54fdac680e2a",
+        "source_port": "top",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "31fba260-5d4a-4303-bca2-9aefa421faa1",
+        "source_block_id": "bc44f1ea-36cb-46c6-8675-8f7540c34248",
+        "target_block_id": "8b5b7a53-c097-430d-ad44-54fdac680e2a",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "f032bfb8-5696-44d3-8cc4-3f38de11747c",
+        "source_block_id": "69836169-01ee-4074-a7e2-4ef8acd39170",
+        "target_block_id": "ee67bac5-a865-4210-b3ca-3429c4f4bb25",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "a318d1b4-5ac0-45c6-9317-8012d9ecb9db",
+        "source_block_id": "ee67bac5-a865-4210-b3ca-3429c4f4bb25",
+        "target_block_id": "aeb9040b-efe1-47a0-a615-86acdf4ae846",
+        "source_port": "top",
+        "target_port": "bottom",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "f22d837e-4c8f-4a15-a82e-86794e8e4b54",
+        "source_block_id": "aeb9040b-efe1-47a0-a615-86acdf4ae846",
+        "target_block_id": "de006542-82fc-4591-9183-40972cf31dcb",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "1cf000a8-b085-400e-b3e7-61ccfcbaf8ed",
+        "source_block_id": "074e732f-a36d-4888-929a-16bf2a905db6",
+        "target_block_id": "af75a704-c108-4a19-b89a-644fc38aa1f8",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "fb9b298b-f478-4d31-b7c5-7acc2e915382",
+        "source_block_id": "af75a704-c108-4a19-b89a-644fc38aa1f8",
+        "target_block_id": "ea1a2621-7060-474c-a209-4cb54aaf676b",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "69836169-01ee-4074-a7e2-4ef8acd39170"
+  },
+  "metadata": {
+    "created": "2025-11-30T11:08:33.635663",
+    "modified": "2025-12-22T01:54:33.238286",
+    "version": "1.0",
+    "author": null,
+    "tags": []
+  },
+  "arguments": []
+}

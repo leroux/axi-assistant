@@ -32,6 +32,9 @@ pub struct Block {
     pub name: String,
     #[serde(flatten)]
     pub data: BlockData,
+    /// Catch-all for fields we don't model (position, id, etc.)
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// Type-specific block data, discriminated by the `type` field in JSON.
@@ -83,6 +86,28 @@ pub enum BlockData {
         #[serde(default)]
         target_session: Option<String>,
     },
+    /// Early termination with an exit code. Kills all spawned sub-sessions.
+    Exit {
+        #[serde(default)]
+        exit_code: Option<i32>,
+    },
+    /// Spawn an agent sub-session to run a command concurrently.
+    Spawn {
+        #[serde(default)]
+        agent_name: Option<String>,
+        #[serde(default)]
+        command_name: Option<String>,
+        #[serde(default)]
+        arguments: Option<String>,
+        #[serde(default)]
+        inherit_variables: Option<bool>,
+        #[serde(default)]
+        exit_code_variable: Option<String>,
+        #[serde(default)]
+        config_file: Option<String>,
+    },
+    /// Wait for spawned agent sub-sessions to complete.
+    Wait,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

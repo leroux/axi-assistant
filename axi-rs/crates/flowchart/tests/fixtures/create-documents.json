@@ -1,0 +1,241 @@
+{
+  "id": "create-documents-001",
+  "name": "create-documents",
+  "description": "Create ARCHITECTURE.md, FEATURE_LIST_FULL.md, and FEATURE_DAG.csv with dedicated research phases",
+  "flowchart": {
+    "blocks": {
+      "start-block": {
+        "id": "start-block",
+        "type": "start",
+        "name": "Start",
+        "position": {
+          "x": 200,
+          "y": 50
+        }
+      },
+      "setup-directories-block": {
+        "id": "setup-directories-block",
+        "type": "bash",
+        "name": "Setup Directories",
+        "position": {
+          "x": 200,
+          "y": 150
+        },
+        "command": "mkdir -p research research-docs",
+        "capture_output": true,
+        "output_variable": "",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": false,
+        "exit_code_variable": ""
+      },
+      "research-arch-block": {
+        "id": "research-arch-block",
+        "type": "prompt",
+        "name": "Research Architecture",
+        "position": {
+          "x": 200,
+          "y": 250
+        },
+        "prompt": "Read and thoroughly understand DESIGN_DOC.md. Do not edit DESIGN_DOC.md.\n\nConduct deep research to determine the best architecture and technology stack for implementing DESIGN_DOC.md. Synthesize your findings into ./research-docs/ARCHITECTURE.md. This doesn't need to be an actionable architecture spec yet; it should be a presentation of research findings.\n\n**Research Activities:**\n- Query ./how-to-be-a-good-coder (an organized encyclopedia of coding knowledge - see ./how-to-be-a-good-coder/ABOUT.md for details) for relevant architectural patterns, technology recommendations, and best practices\n- Research the best technologies/tools for the job to minimize reinventing the wheel\n- Research techniques for quickly bootstrapping projects to avoid rewriting boilerplate\n- Use ./research for scratch work and quick prototype coding to learn what works\n- Evaluate trade-offs between different approaches\n\n**Output: ./research-docs/ARCHITECTURE.md**\nSynthesize all research findings into a structured document covering:\n1. Recommended technology stack with justification\n2. Architectural patterns that fit the requirements\n3. Testing framework recommendations\n4. Project structure recommendations\n5. Bootstrapping approach (templates, generators, etc.)\n6. Key libraries/tools to use\n7. Any prototyping results from ./research\n\nThis document will be used by the next step to create the final ARCHITECTURE.md.\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "refresh-after-arch-research-block": {
+        "id": "refresh-after-arch-research-block",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 200,
+          "y": 350
+        }
+      },
+      "create-arch-block": {
+        "id": "create-arch-block",
+        "type": "prompt",
+        "name": "Create Architecture",
+        "position": {
+          "x": 200,
+          "y": 450
+        },
+        "prompt": "Read and thoroughly understand DESIGN_DOC.md. Do not edit DESIGN_DOC.md.\nRead ./research-docs/ARCHITECTURE.md for research findings on architecture and technology choices.\n\nCreate ARCHITECTURE.md - a comprehensive spec of the architecture and technology/tooling stack to use to implement DESIGN_DOC.md.\n\n**Architecture Design Principles:**\n- The ideal architecture is modular, separating layers into independently testable and reusable \"libraries\"\n- Choose technologies that are well-suited to DESIGN_DOC.md's requirements (informed by research)\n- Include testing framework and approach\n- Specify how to run tests\n- Specify project structure and organization\n- Anything less than 100% test coverage is unacceptable\n\nUse the research findings to make informed decisions, but the final ARCHITECTURE.md should be a clean, actionable specification (not a research document).\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "refresh-after-arch-block": {
+        "id": "refresh-after-arch-block",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 200,
+          "y": 550
+        }
+      },
+      "research-features-block": {
+        "id": "research-features-block",
+        "type": "prompt",
+        "name": "Research Features",
+        "position": {
+          "x": 200,
+          "y": 650
+        },
+        "prompt": "Read and thoroughly understand DESIGN_DOC.md and ARCHITECTURE.md. Do not edit these files.\n\nConduct research on how to effectively decompose and prioritize features. Synthesize your findings into ./research-docs/FEATURES.md.\n\n**Research Activities:**\n- Query ./how-to-be-a-good-coder for best practices on feature decomposition, MVP definition, and prioritization strategies\n- Research how to identify core vs non-core features for this type of application\n- Research common dependency patterns for the feature types in DESIGN_DOC.md\n- Research how similar applications structure their feature sets\n- Identify which features are truly MVP vs nice-to-have\n\n**Output: ./research-docs/FEATURES.md**\nSynthesize all research findings into a structured document covering:\n1. Recommended approach for feature decomposition\n2. Criteria for identifying core features for this application\n3. Criteria for MVP vs non-MVP classification\n4. Common dependency patterns to watch for\n5. Suggested feature groupings or categories\n6. Any insights on prioritization for this type of application\n\nThis document will be used by the next steps to create FEATURE_LIST_FULL.md and FEATURE_DAG.csv.\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "refresh-after-features-research-block": {
+        "id": "refresh-after-features-research-block",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 200,
+          "y": 750
+        }
+      },
+      "create-feature-list-block": {
+        "id": "create-feature-list-block",
+        "type": "prompt",
+        "name": "Create Feature List",
+        "position": {
+          "x": 200,
+          "y": 850
+        },
+        "prompt": "Read and thoroughly understand DESIGN_DOC.md. Do not edit DESIGN_DOC.md.\nRead ./research-docs/FEATURES.md for research findings on feature decomposition and prioritization.\n\nCreate FEATURE_LIST_FULL.md - a simple line-by-line list of every single feature present in DESIGN_DOC.md.\n\n**Extraction Requirements:**\n- Scour DESIGN_DOC.md thoroughly from top to bottom\n- Capture every single feature, with none being deferred or deprioritized or deemed too minor\n- Avoid duplicate features\n- Use the research findings to inform how you decompose complex features into discrete units\n\n**REQUIRED FORMAT FOR FEATURE_LIST_FULL.md:**\n- Lines starting with # are headers (allowed for organization)\n- Empty lines are allowed\n- All feature lines MUST match exactly: [tag-name] <description>\n  - Where tag-name is a lowercase hyphenated identifier (e.g., [user-login], [password-reset], [dashboard-stats])\n  - Tags must be unique (no duplicates)\n  - Tags should be descriptive and human-readable\n\nExample:\n```\n# Authentication Features\n\n[create-account] User can create a new account with email and password\n[user-login] User can log in with existing credentials\n[password-reset] User can reset password via email link\n\n# Dashboard Features\n\n[dashboard-overview] User sees overview statistics on dashboard\n```\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "create-dag-block": {
+        "id": "create-dag-block",
+        "type": "prompt",
+        "name": "Create DAG",
+        "position": {
+          "x": 200,
+          "y": 950
+        },
+        "prompt": "Read FEATURE_LIST_FULL.md and DESIGN_DOC.md to understand all features. Read ARCHITECTURE.md to understand technical dependencies.\nRead ./research-docs/FEATURES.md for research findings on prioritization and dependency patterns.\n\nCreate FEATURE_DAG.csv - a CSV file describing feature dependencies, priorities, and effective values.\n\n**Section 1: Hello World Feature**\nThe first feature should be a \"Hello World\" proof-of-concept that validates the entire architectural/technological/tooling/testing stack works. This should be minimal but touch all layers.\n\n**Section 2: Feature DAG**\nOrganize all remaining features into a directed acyclic graph (DAG) based on dependencies. For each feature:\n- List its parent features (dependencies that must be completed first)\n- Assign a \"vertical score\" (1-10): the direct value this feature provides to end-users, considering three dimensions:\n\n  **Dimension 1: Core vs Non-Core**\n  - Core features define the product's identity and primary purpose\n  - Non-core features are supplementary or auxiliary\n\n  **Dimension 2: MVP vs Non-MVP**\n  - MVP features are required for the first usable release\n  - Non-MVP features can wait for later iterations\n\n  **Dimension 3: Functional vs Non-Functional**\n  - Functional requirements: what the system does (features, capabilities)\n  - Non-functional requirements: how the system performs (performance, scalability, security hardening)\n\n  **Scoring Guidelines:**\n  - 9-10: Core + MVP + Functional (essential features for first release)\n  - 7-8: Core + MVP + Non-functional OR Non-core + MVP + Functional\n  - 5-6: Non-core + MVP + Non-functional OR Core + Non-MVP + Functional\n  - 3-4: Non-core + Non-MVP + Functional\n  - 1-2: Non-core + Non-MVP + Non-functional (polish, optimization, edge cases)\n\n- The \"effective value\" will be calculated as: max(own vertical score, max effective value of all children)\n  - This ensures features that unlock high-value features are themselves high-value\n\n**REQUIRED FORMAT FOR FEATURE_DAG.csv:**\n\nCSV with columns: Feature Tag, Description, Parents, Vertical Score, Effective Score\n\n```\nFeature Tag,Description,Parents,Vertical Score,Effective Score\nhello-world,Description of the Hello World proof-of-concept feature,,10,\nfeature-tag-1,Full description of the feature,,8,\nfeature-tag-2,Full description of the feature,feature-tag-1,10,\nfeature-tag-3,Full description of the feature,\"feature-tag-1,feature-tag-2\",5,\n```\n\nCSV Rules:\n- First row is the header (exactly as shown)\n- Feature Tag: lowercase hyphenated identifier (no brackets)\n- Description: the feature description (quote if contains commas)\n- Parents: comma-separated parent tags (quote if multiple), empty if none\n- Vertical Score: integer 1-10\n- Effective Score: leave empty (calculated by script)\n- The Hello World feature MUST be the first data row (after header)\n- The file MUST be sorted by Vertical Score descending (highest first)\n\nContent Rules:\n- The Hello World feature has no parents and is always processed first\n- Every feature from FEATURE_LIST_FULL.md must appear in FEATURE_DAG.csv\n- Parents must reference valid feature tags that appear in the DAG\n- Vertical scores must be integers 1-10\n- The DAG must be acyclic (no circular dependencies)\n- Consider what features naturally depend on others (e.g., \"edit profile\" depends on \"create account\")\n- Additional features may be added for architectural necessities not in FEATURE_LIST_FULL.md\n- Use the research findings to inform dependency patterns and prioritization\n\n**IMPORTANT: Audit the sorted order**\nAfter creating the CSV sorted by Vertical Score, review the list from top to bottom. Higher-scored features should genuinely provide more end-user value than lower-scored ones. If the ordering doesn't make sense, adjust the scores accordingly.\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "end-block": {
+        "id": "end-block",
+        "type": "end",
+        "name": "End",
+        "position": {
+          "x": 200,
+          "y": 1050
+        }
+      }
+    },
+    "connections": [
+      {
+        "id": "conn-start-to-setup",
+        "source_block_id": "start-block",
+        "target_block_id": "setup-directories-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-setup-to-research-arch",
+        "source_block_id": "setup-directories-block",
+        "target_block_id": "research-arch-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-research-arch-to-refresh",
+        "source_block_id": "research-arch-block",
+        "target_block_id": "refresh-after-arch-research-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-refresh-to-create-arch",
+        "source_block_id": "refresh-after-arch-research-block",
+        "target_block_id": "create-arch-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-arch-to-refresh",
+        "source_block_id": "create-arch-block",
+        "target_block_id": "refresh-after-arch-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-refresh-to-research-features",
+        "source_block_id": "refresh-after-arch-block",
+        "target_block_id": "research-features-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-research-features-to-refresh",
+        "source_block_id": "research-features-block",
+        "target_block_id": "refresh-after-features-research-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-refresh-to-featurelist",
+        "source_block_id": "refresh-after-features-research-block",
+        "target_block_id": "create-feature-list-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-featurelist-to-dag",
+        "source_block_id": "create-feature-list-block",
+        "target_block_id": "create-dag-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-dag-to-end",
+        "source_block_id": "create-dag-block",
+        "target_block_id": "end-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "start-block"
+  },
+  "metadata": {
+    "created": "2026-01-02T00:00:00",
+    "modified": "2026-01-03T11:33:01.008101",
+    "version": "1.0",
+    "author": null,
+    "tags": []
+  },
+  "arguments": []
+}

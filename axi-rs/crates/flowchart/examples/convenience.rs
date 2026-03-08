@@ -62,6 +62,26 @@ fn main() {
                 println!("--- [{block_name}] clear session ---");
                 action = walker.feed("");
             }
+            Action::Exit {
+                block_name,
+                exit_code,
+                ..
+            } => {
+                println!("--- [{block_name}] exit with code {exit_code} ---");
+                break;
+            }
+            Action::Spawn {
+                block_name,
+                agent_name,
+                ..
+            } => {
+                println!("--- [{block_name}] spawn agent: {} ---", agent_name.as_deref().unwrap_or("default"));
+                action = walker.feed("");
+            }
+            Action::Wait { block_name, .. } => {
+                println!("--- [{block_name}] wait for spawned agents ---");
+                action = walker.feed("");
+            }
         }
     }
 

@@ -1,0 +1,439 @@
+{
+  "id": "56539956-083b-49a4-bdb3-b02705e6b6e4",
+  "name": "research-mode",
+  "description": "Deep web research mode. Takes a research question, autonomously searches the web in iterative cycles (decompose \u2192 search \u2192 read \u2192 extract \u2192 gap analysis \u2192 repeat), then synthesizes a comprehensive cited report. Replicates Claude's research mode behavior.\n\nUsage: /research-mode \"your research question here\"\n\nOutput: Report saved to /tmp/fc-research/report.md",
+  "flowchart": {
+    "blocks": {
+      "1f7d8aae-2d0e-42bb-8c88-3669074c783d": {
+        "id": "1f7d8aae-2d0e-42bb-8c88-3669074c783d",
+        "type": "start",
+        "name": "START",
+        "position": {
+          "x": 150,
+          "y": 50
+        }
+      },
+      "7f5ad181-70b7-4d48-90cb-7b29914e7af1": {
+        "id": "7f5ad181-70b7-4d48-90cb-7b29914e7af1",
+        "type": "bash",
+        "name": "SETUP WORKSPACE",
+        "position": {
+          "x": 150,
+          "y": 150
+        },
+        "command": "mkdir -p /tmp/fc-research && echo '# Research Knowledge Base' > /tmp/fc-research/knowledge.md && echo '[]' > /tmp/fc-research/sources.json && echo '' > /tmp/fc-research/next_queries.txt && echo 'Workspace ready'",
+        "capture_output": true,
+        "output_variable": "",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": false,
+        "exit_code_variable": "",
+        "disable_auto_git": true,
+        "git_tag": null
+      },
+      "c23532df-eff7-4592-b43f-98f5c4a5618f": {
+        "id": "c23532df-eff7-4592-b43f-98f5c4a5618f",
+        "type": "prompt",
+        "name": "DECOMPOSE QUERY",
+        "position": {
+          "x": 150,
+          "y": 270
+        },
+        "prompt": "You are a research planner. Your job is to analyze a research question and create a thorough plan.\n\nRESEARCH QUESTION: $1\n\nTasks:\n1. Break the question into 3-7 sub-questions that together would comprehensively answer the main question\n2. For each sub-question, generate 1-2 search queries that would find relevant information\n3. Write a concise research plan summarizing what you need to find\n\nWrite your research plan to /tmp/fc-research/plan.md\nWrite the initial search queries (one per line) to /tmp/fc-research/next_queries.txt\n\nThen return the structured output below.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "num_sub_questions": {
+              "type": "integer"
+            },
+            "plan_summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "num_sub_questions",
+            "plan_summary"
+          ]
+        },
+        "sound_effect": null,
+        "disable_auto_git": true,
+        "git_tag": null
+      },
+      "33d2e454-ae1a-4057-808f-76354b165189": {
+        "id": "33d2e454-ae1a-4057-808f-76354b165189",
+        "type": "variable",
+        "name": "SET iteration=0",
+        "position": {
+          "x": 150,
+          "y": 400
+        },
+        "variable_name": "iteration",
+        "variable_value": "0",
+        "variable_type": "int"
+      },
+      "d6cd1512-c422-4b72-bdaf-b48455204805": {
+        "id": "d6cd1512-c422-4b72-bdaf-b48455204805",
+        "type": "variable",
+        "name": "SET continue=true",
+        "position": {
+          "x": 150,
+          "y": 490
+        },
+        "variable_name": "should_continue",
+        "variable_value": "true",
+        "variable_type": "boolean"
+      },
+      "3605c52a-369e-4d1c-91ae-4ecf46dda2e0": {
+        "id": "3605c52a-369e-4d1c-91ae-4ecf46dda2e0",
+        "type": "branch",
+        "name": "CONTINUE?",
+        "position": {
+          "x": 150,
+          "y": 590
+        },
+        "condition": "should_continue"
+      },
+      "9ed42ce1-2a80-4b74-94f9-31a12bb1f943": {
+        "id": "9ed42ce1-2a80-4b74-94f9-31a12bb1f943",
+        "type": "branch",
+        "name": "UNDER LIMIT?",
+        "position": {
+          "x": 150,
+          "y": 690
+        },
+        "condition": "iteration < 15"
+      },
+      "95f4f55d-2cd9-477b-afd7-ece332e3e3fe": {
+        "id": "95f4f55d-2cd9-477b-afd7-ece332e3e3fe",
+        "type": "refresh",
+        "name": "REFRESH",
+        "position": {
+          "x": 150,
+          "y": 790
+        }
+      },
+      "7b06767a-49f7-449b-ad27-acfb320ebbc7": {
+        "id": "7b06767a-49f7-449b-ad27-acfb320ebbc7",
+        "type": "prompt",
+        "name": "SEARCH & ANALYZE",
+        "position": {
+          "x": 150,
+          "y": 890
+        },
+        "prompt": "You are a research assistant conducting one iteration of a deep web research process.\n\nORIGINAL RESEARCH QUESTION: $1\n\nFirst, read these files to understand the current state of the research:\n1. /tmp/fc-research/plan.md \u2014 the research plan with sub-questions\n2. /tmp/fc-research/knowledge.md \u2014 all findings accumulated so far\n3. /tmp/fc-research/next_queries.txt \u2014 the search queries to use this iteration\n4. /tmp/fc-research/sources.json \u2014 sources found so far\n\nThen perform these steps:\n1. SEARCH: Use the web search tool to search for each query in next_queries.txt. Examine the results carefully.\n2. READ: Pick the 2-4 most promising results based on domain authority (.gov, .edu, major publications), relevance to unanswered sub-questions, and recency. Fetch and read the full content of those pages.\n3. EXTRACT: For each page, extract facts relevant to the research question. Note the URL and key claims.\n4. EVALUATE: Assess source credibility. Flag any contradictions with existing knowledge.\n5. GAP ANALYSIS: Compare what you now know against the research plan. What sub-questions are still unanswered? What needs more evidence?\n6. DECIDE: Based on your gap analysis:\n   - If significant gaps remain and new searches would help \u2192 should_continue = true, and write new targeted search queries to /tmp/fc-research/next_queries.txt\n   - If all sub-questions are well-answered with multiple corroborating sources \u2192 should_continue = false\n\nIMPORTANT: Append your new findings to /tmp/fc-research/knowledge.md (do NOT overwrite \u2014 append with a clear iteration header).\nUpdate /tmp/fc-research/sources.json by reading the current array and appending new source entries.\n\nThen return the structured output.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "should_continue": {
+              "type": "boolean"
+            },
+            "sources_found_this_iteration": {
+              "type": "integer"
+            },
+            "gaps_remaining": {
+              "type": "string"
+            },
+            "iteration_summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "should_continue",
+            "sources_found_this_iteration",
+            "gaps_remaining",
+            "iteration_summary"
+          ]
+        },
+        "sound_effect": null,
+        "disable_auto_git": true,
+        "git_tag": null
+      },
+      "73a9b6da-6765-4d33-aa0a-7c91cb440fcf": {
+        "id": "73a9b6da-6765-4d33-aa0a-7c91cb440fcf",
+        "type": "bash",
+        "name": "LOG ITERATION",
+        "position": {
+          "x": 150,
+          "y": 1040
+        },
+        "command": "echo \"Iteration {{iteration}} complete: {{iteration_summary}}\" && echo \"Gaps remaining: {{gaps_remaining}}\"",
+        "capture_output": true,
+        "output_variable": "",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": true,
+        "exit_code_variable": "",
+        "disable_auto_git": true,
+        "git_tag": null
+      },
+      "e2a28a93-905c-4042-bce8-dab0fd809f89": {
+        "id": "e2a28a93-905c-4042-bce8-dab0fd809f89",
+        "type": "bash",
+        "name": "iter++",
+        "position": {
+          "x": 150,
+          "y": 1140
+        },
+        "command": "echo $(({{iteration}}+1))",
+        "capture_output": true,
+        "output_variable": "iteration",
+        "output_type": "int",
+        "working_directory": "",
+        "continue_on_error": false,
+        "exit_code_variable": "",
+        "disable_auto_git": true,
+        "git_tag": null
+      },
+      "4249b040-10c5-4288-874c-9513fab7e0c8": {
+        "id": "4249b040-10c5-4288-874c-9513fab7e0c8",
+        "type": "refresh",
+        "name": "REFRESH",
+        "position": {
+          "x": 470,
+          "y": 590
+        }
+      },
+      "9513f309-0477-400e-a55a-299d49cb8794": {
+        "id": "9513f309-0477-400e-a55a-299d49cb8794",
+        "type": "prompt",
+        "name": "SYNTHESIZE REPORT",
+        "position": {
+          "x": 470,
+          "y": 700
+        },
+        "prompt": "You are a research synthesizer. Your job is to produce a comprehensive, well-cited research report.\n\nORIGINAL RESEARCH QUESTION: $1\n\nRead these files containing all the research gathered:\n1. /tmp/fc-research/plan.md \u2014 the original research plan\n2. /tmp/fc-research/knowledge.md \u2014 ALL accumulated findings from every search iteration\n3. /tmp/fc-research/sources.json \u2014 all sources with URLs, titles, and key facts\n\nNow write a comprehensive research report following these guidelines:\n- ORGANIZE by theme or sub-question, NOT by source or iteration\n- CROSS-REFERENCE facts across multiple sources, noting where they agree or disagree\n- Use INLINE CITATIONS like [1], [2] etc. linked to the sources list\n- Include a SUMMARY section at the top (3-5 key takeaways)\n- Include a SOURCES section at the end with numbered references and URLs\n- Note any CAVEATS about source reliability or gaps in the research\n- Target 2000-4000 words \u2014 be comprehensive but avoid repetition\n\nWrite the complete report to /tmp/fc-research/report.md\n\nThen return the structured output.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "report_word_count": {
+              "type": "integer"
+            },
+            "num_sources_cited": {
+              "type": "integer"
+            },
+            "confidence_level": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "report_word_count",
+            "num_sources_cited",
+            "confidence_level"
+          ]
+        },
+        "sound_effect": null,
+        "disable_auto_git": true,
+        "git_tag": null
+      },
+      "3cb9a286-5685-47fe-90f8-6f406f33dd45": {
+        "id": "3cb9a286-5685-47fe-90f8-6f406f33dd45",
+        "type": "bash",
+        "name": "PRINT REPORT",
+        "position": {
+          "x": 470,
+          "y": 850
+        },
+        "command": "echo '=== RESEARCH COMPLETE ===' && echo 'Report: /tmp/fc-research/report.md' && echo 'Sources: {{num_sources_cited}} cited' && echo 'Confidence: {{confidence_level}}' && echo 'Word count: ~{{report_word_count}}'",
+        "capture_output": true,
+        "output_variable": "",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": true,
+        "exit_code_variable": "",
+        "disable_auto_git": true,
+        "git_tag": null
+      },
+      "432dc33b-53d4-4f57-a36f-99150155170c": {
+        "id": "432dc33b-53d4-4f57-a36f-99150155170c",
+        "type": "end",
+        "name": "END",
+        "position": {
+          "x": 470,
+          "y": 950
+        }
+      }
+    },
+    "connections": [
+      {
+        "id": "3f485abb-327b-457c-bd39-2f7fb31bfb8c",
+        "source_block_id": "1f7d8aae-2d0e-42bb-8c88-3669074c783d",
+        "target_block_id": "7f5ad181-70b7-4d48-90cb-7b29914e7af1",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "eb4b11fc-4c9e-4a44-bb20-7715d1095dcb",
+        "source_block_id": "7f5ad181-70b7-4d48-90cb-7b29914e7af1",
+        "target_block_id": "c23532df-eff7-4592-b43f-98f5c4a5618f",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "4fa85182-bbb4-4479-af9d-257d1cacda5b",
+        "source_block_id": "c23532df-eff7-4592-b43f-98f5c4a5618f",
+        "target_block_id": "33d2e454-ae1a-4057-808f-76354b165189",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "c2767835-76b9-42b5-ba14-60a652dbd1a0",
+        "source_block_id": "33d2e454-ae1a-4057-808f-76354b165189",
+        "target_block_id": "d6cd1512-c422-4b72-bdaf-b48455204805",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "6faf676b-8cc2-424a-81ff-28b49071d8e0",
+        "source_block_id": "d6cd1512-c422-4b72-bdaf-b48455204805",
+        "target_block_id": "3605c52a-369e-4d1c-91ae-4ecf46dda2e0",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "fce7c7c7-63d5-4675-b9e6-17f02af65e6e",
+        "source_block_id": "3605c52a-369e-4d1c-91ae-4ecf46dda2e0",
+        "target_block_id": "9ed42ce1-2a80-4b74-94f9-31a12bb1f943",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "7465ea34-1bd1-4b94-8fa0-d8e1ac5e8f8c",
+        "source_block_id": "3605c52a-369e-4d1c-91ae-4ecf46dda2e0",
+        "target_block_id": "4249b040-10c5-4288-874c-9513fab7e0c8",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "ab39bc07-a8b0-41f9-bc3e-00d70f27bfe1",
+        "source_block_id": "9ed42ce1-2a80-4b74-94f9-31a12bb1f943",
+        "target_block_id": "95f4f55d-2cd9-477b-afd7-ece332e3e3fe",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "7b62ddc1-4c93-4a07-97d8-a85aeea69f97",
+        "source_block_id": "9ed42ce1-2a80-4b74-94f9-31a12bb1f943",
+        "target_block_id": "4249b040-10c5-4288-874c-9513fab7e0c8",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "31b4731d-a439-4232-a014-2becce692c3d",
+        "source_block_id": "95f4f55d-2cd9-477b-afd7-ece332e3e3fe",
+        "target_block_id": "7b06767a-49f7-449b-ad27-acfb320ebbc7",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "db979195-687e-4e49-96ea-a82ae22c0af5",
+        "source_block_id": "7b06767a-49f7-449b-ad27-acfb320ebbc7",
+        "target_block_id": "73a9b6da-6765-4d33-aa0a-7c91cb440fcf",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "5b69a20c-ee27-4296-8750-168e44a9edcd",
+        "source_block_id": "73a9b6da-6765-4d33-aa0a-7c91cb440fcf",
+        "target_block_id": "e2a28a93-905c-4042-bce8-dab0fd809f89",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "e515e32e-95a8-4fdf-b6c1-3918427a93a7",
+        "source_block_id": "e2a28a93-905c-4042-bce8-dab0fd809f89",
+        "target_block_id": "3605c52a-369e-4d1c-91ae-4ecf46dda2e0",
+        "source_port": "left",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "39417981-aa33-46c5-988f-13a9dc37a865",
+        "source_block_id": "4249b040-10c5-4288-874c-9513fab7e0c8",
+        "target_block_id": "9513f309-0477-400e-a55a-299d49cb8794",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "d163923c-12cb-43e0-a270-db2545c94263",
+        "source_block_id": "9513f309-0477-400e-a55a-299d49cb8794",
+        "target_block_id": "3cb9a286-5685-47fe-90f8-6f406f33dd45",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "fc177547-90e6-42cc-b072-7e35a600ca96",
+        "source_block_id": "3cb9a286-5685-47fe-90f8-6f406f33dd45",
+        "target_block_id": "432dc33b-53d4-4f57-a36f-99150155170c",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "1f7d8aae-2d0e-42bb-8c88-3669074c783d"
+  },
+  "metadata": {
+    "created": "2026-02-27T08:17:56.111171",
+    "modified": "2026-02-27T08:17:56.111171",
+    "version": "1.0",
+    "author": null,
+    "tags": [
+      "research",
+      "web-search",
+      "synthesis"
+    ]
+  },
+  "arguments": [
+    {
+      "name": "research-question",
+      "description": "The research question to investigate",
+      "required": true,
+      "default": null
+    }
+  ]
+}

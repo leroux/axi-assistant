@@ -1,0 +1,286 @@
+{
+  "id": "code-quality-audit-001",
+  "name": "code-quality-audit",
+  "description": "Performs comprehensive code quality audit and fixes issues",
+  "flowchart": {
+    "blocks": {
+      "start-6": {
+        "id": "start-6",
+        "type": "start",
+        "name": "START",
+        "position": {
+          "x": 100,
+          "y": 50
+        }
+      },
+      "prompt-audit": {
+        "id": "prompt-audit",
+        "type": "prompt",
+        "name": "AUDIT CODE QUALITY",
+        "position": {
+          "x": 100,
+          "y": 150
+        },
+        "prompt": "Perform a comprehensive code quality audit of the entire codebase.\n\nReview for:\n1. **Architecture & Organization**: Does the code follow good architectural patterns? Is it well-organized?\n2. **Error Handling**: Are errors handled properly? Edge cases covered?\n3. **Security**: Any security vulnerabilities or concerns?\n4. **Performance**: Any obvious performance issues or inefficiencies?\n5. **Code Duplication**: Excessive duplication that should be refactored?\n6. **Documentation**: Are complex parts documented? Are comments helpful and accurate?\n7. **Code Style**: Consistent style, naming conventions, formatting?\n8. **Best Practices**: Following language/framework best practices?\n\nPrioritize issues as: CRITICAL, HIGH, MEDIUM, LOW\n\nWrite detailed audit report to ./audits/CODE_QUALITY_AUDIT.md\n\nDO NOT fix anything yet.\n\nOutput summary of findings:",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "criticalIssues": {
+              "type": "integer"
+            },
+            "highIssues": {
+              "type": "integer"
+            },
+            "mediumIssues": {
+              "type": "integer"
+            },
+            "lowIssues": {
+              "type": "integer"
+            },
+            "hasIssues": {
+              "type": "boolean"
+            }
+          },
+          "required": ["hasIssues", "criticalIssues", "highIssues"]
+        },
+        "sound_effect": null
+      },
+      "branch-has-issues": {
+        "id": "branch-has-issues",
+        "type": "branch",
+        "name": "HAS ISSUES?",
+        "position": {
+          "x": 150,
+          "y": 250
+        },
+        "condition": "hasIssues"
+      },
+      "prompt-fix-critical": {
+        "id": "prompt-fix-critical",
+        "type": "prompt",
+        "name": "FIX CRITICAL",
+        "position": {
+          "x": 350,
+          "y": 250
+        },
+        "prompt": "Fix all CRITICAL priority issues identified in ./audits/CODE_QUALITY_AUDIT.md\n\nThese are the most important issues that could cause serious problems.\n\nMake fixes carefully and thoroughly.\n\nUpdate the audit doc to mark critical issues as FIXED.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "prompt-fix-high": {
+        "id": "prompt-fix-high",
+        "type": "prompt",
+        "name": "FIX HIGH",
+        "position": {
+          "x": 350,
+          "y": 350
+        },
+        "prompt": "Fix all HIGH priority issues identified in ./audits/CODE_QUALITY_AUDIT.md\n\nThese are important issues that should be addressed.\n\nUpdate the audit doc to mark high issues as FIXED.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "prompt-fix-medium": {
+        "id": "prompt-fix-medium",
+        "type": "prompt",
+        "name": "FIX MEDIUM",
+        "position": {
+          "x": 350,
+          "y": 450
+        },
+        "prompt": "Fix MEDIUM priority issues identified in ./audits/CODE_QUALITY_AUDIT.md\n\nFocus on issues that improve code maintainability and quality.\n\nUpdate the audit doc to mark medium issues as FIXED.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "prompt-consider-low": {
+        "id": "prompt-consider-low",
+        "type": "prompt",
+        "name": "CONSIDER LOW",
+        "position": {
+          "x": 350,
+          "y": 550
+        },
+        "prompt": "Review LOW priority issues in ./audits/CODE_QUALITY_AUDIT.md\n\nFix ones that are quick wins (low effort, decent value).\n\nFor others, document them for future consideration but don't fix now.\n\nUpdate the audit doc accordingly.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "bash-verify": {
+        "id": "bash-verify",
+        "type": "bash",
+        "name": "VERIFY TESTS STILL PASS",
+        "position": {
+          "x": 350,
+          "y": 650
+        },
+        "command": "./run_all_tests.sh &> test_results_post_audit.txt",
+        "capture_output": true,
+        "output_variable": "",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": true,
+        "exit_code_variable": "exitCode"
+      },
+      "branch-tests-pass": {
+        "id": "branch-tests-pass",
+        "type": "branch",
+        "name": "TESTS PASS?",
+        "position": {
+          "x": 350,
+          "y": 750
+        },
+        "condition": "exitCode == 0"
+      },
+      "prompt-fix-regressions": {
+        "id": "prompt-fix-regressions",
+        "type": "prompt",
+        "name": "FIX REGRESSIONS",
+        "position": {
+          "x": 600,
+          "y": 750
+        },
+        "prompt": "The audit fixes broke some tests!\n\nReview test_results_post_audit.txt and fix the regressions.\n\nEither:\n1. Fix bugs introduced by the audit fixes\n2. Revert problematic audit fixes if they caused more harm than good\n\nPrioritize keeping tests passing.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "end-6": {
+        "id": "end-6",
+        "type": "end",
+        "name": "END",
+        "position": {
+          "x": 150,
+          "y": 850
+        }
+      }
+    },
+    "connections": [
+      {
+        "id": "conn-44",
+        "source_block_id": "start-6",
+        "target_block_id": "prompt-audit",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-45",
+        "source_block_id": "prompt-audit",
+        "target_block_id": "branch-has-issues",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-46",
+        "source_block_id": "branch-has-issues",
+        "target_block_id": "prompt-fix-critical",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-47",
+        "source_block_id": "prompt-fix-critical",
+        "target_block_id": "prompt-fix-high",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-48",
+        "source_block_id": "prompt-fix-high",
+        "target_block_id": "prompt-fix-medium",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-49",
+        "source_block_id": "prompt-fix-medium",
+        "target_block_id": "prompt-consider-low",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-50",
+        "source_block_id": "prompt-consider-low",
+        "target_block_id": "bash-verify",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-51",
+        "source_block_id": "bash-verify",
+        "target_block_id": "branch-tests-pass",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-52",
+        "source_block_id": "branch-tests-pass",
+        "target_block_id": "end-6",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-53",
+        "source_block_id": "branch-tests-pass",
+        "target_block_id": "prompt-fix-regressions",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-54",
+        "source_block_id": "prompt-fix-regressions",
+        "target_block_id": "bash-verify",
+        "source_port": "top",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-55",
+        "source_block_id": "branch-has-issues",
+        "target_block_id": "end-6",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "start-6"
+  },
+  "metadata": {
+    "created": "2025-01-08T00:00:00.000000",
+    "modified": "2025-01-08T00:00:00.000000",
+    "version": "1.0",
+    "author": "autonomous-system",
+    "tags": ["quality", "refactoring"]
+  },
+  "arguments": []
+}

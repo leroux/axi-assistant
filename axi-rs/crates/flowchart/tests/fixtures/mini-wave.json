@@ -1,0 +1,235 @@
+{
+  "id": "d4e5f6a7-b8c9-0123-def0-123456789abc",
+  "name": "mini-wave",
+  "description": "Process a small batch of features with dedicated research phases",
+  "flowchart": {
+    "blocks": {
+      "start-block": {
+        "id": "start-block",
+        "type": "start",
+        "name": "Start",
+        "position": {
+          "x": 200,
+          "y": 50
+        }
+      },
+      "research-testing-block": {
+        "id": "research-testing-block",
+        "type": "prompt",
+        "name": "Research Testing",
+        "position": {
+          "x": 200,
+          "y": 150
+        },
+        "prompt": "Read CURRENT_BATCH.md to see which features need tests and the research directory path. Read ARCHITECTURE.md to understand the testing framework. Read FEATURE_DAG.csv to understand the features.\n\nConduct research on how to effectively test the features in this batch. Synthesize your findings into the batch research directory (see CURRENT_BATCH.md for the path, e.g., ./research-docs/batch-001/TESTING.md).\n\n**Research Activities:**\n- Query ./how-to-be-a-good-coder for testing best practices relevant to these feature types\n- Research how to use the testing framework specified in ARCHITECTURE.md\n- Research e2e testing patterns for the specific feature types in this batch\n- If web features: research Playwright patterns for the UI interactions needed\n- If API features: research API testing patterns\n- Identify edge cases and error conditions to test\n\n**Output: ./research-docs/batch-NNN/TESTING.md**\nSynthesize findings into a structured document covering:\n1. Testing approach for each feature in the batch\n2. Specific test cases to implement (happy path, error cases, edge cases)\n3. Testing patterns and utilities to use\n4. Setup/teardown requirements\n5. Any dependencies between tests\n\nThis document will be used by the next step to create the actual tests.\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "refresh-after-testing-research-block": {
+        "id": "refresh-after-testing-research-block",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 200,
+          "y": 250
+        }
+      },
+      "make-tests-block": {
+        "id": "make-tests-block",
+        "type": "prompt",
+        "name": "Make Tests",
+        "position": {
+          "x": 200,
+          "y": 350
+        },
+        "prompt": "We are doing test-driven development. Read CURRENT_BATCH.md to see which features need tests and the research directory path. Read ARCHITECTURE.md to understand the testing framework and approach. Read FEATURE_DAG.csv to understand what each feature in the batch should do.\n\nRead the testing research document from the batch research directory (see CURRENT_BATCH.md for path, e.g., ./research-docs/batch-001/TESTING.md) for guidance on testing approach.\n\nThe features in CURRENT_BATCH.md have NOT been implemented yet. You are writing tests for features that will be implemented in the future. The tests are expected to fail until the features are implemented.\n\nCreate comprehensive tests for all features in CURRENT_BATCH.md. The testing strategy should be:\n\n**PRIMARY FOCUS: End-to-End (e2e) and Vertical Feature Testing**\n- Each feature should have direct vertical tests that validate the complete user-facing functionality works end-to-end\n- For web features, use Playwright MCP (browser automation) to test actual user interactions\n- For API features, test complete request/response cycles from client to database and back\n- For CLI features, test actual command execution and output\n- Tests should validate the feature from the user's perspective, not just internal functions\n\n**CRITICAL: No Cheating**\n- Tests must NEVER use mocks, stubs, or placeholders that bypass real functionality\n- Tests must NEVER be skipped or marked pending\n- Tests must NEVER use fallbacks or failsafes that hide missing functionality\n- Tests must NEVER pass trivially or vacuously\n- If a test cannot verify real functionality, it is not a valid test\n\n**CRITICAL: No Performance Metrics**\n- Tests must NOT include specific timing/performance assertions (e.g., 'must complete in <100ms', 'response time under 500ms')\n- Tests must NOT assert on execution speed, throughput, or latency\n- Tests verify CORRECTNESS and BEHAVIOR, not performance characteristics\n- Performance testing is separate from functional testing - this is functional testing only\n- Timeouts are acceptable only as failure conditions (to prevent hanging), not as performance requirements\n\n**Test Requirements:**\n- Cover all functionality described in the feature descriptions\n- Follow the testing patterns established in ARCHITECTURE.md and the research document\n- Be independent and runnable (each test can run in isolation)\n- Include both positive test cases (happy path) and negative test cases (error conditions)\n- Test edge cases and boundary conditions\n- Prioritize e2e tests over unit tests - we want to verify features actually work for users\n- Timeouts should be considered failures and set reasonably\n\n**MCP Tools:**\n- Use Playwright MCP (mcp__playwright) for web UI testing when applicable\n- Use other MCP tools as needed for comprehensive testing\n\nIf this is the first batch (Hello World), also set up the testing infrastructure according to ARCHITECTURE.md, including Playwright if needed for web features.\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "refresh-after-tests-block": {
+        "id": "refresh-after-tests-block",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 200,
+          "y": 450
+        }
+      },
+      "research-implementation-block": {
+        "id": "research-implementation-block",
+        "type": "prompt",
+        "name": "Research Implementation",
+        "position": {
+          "x": 200,
+          "y": 550
+        },
+        "prompt": "Read CURRENT_BATCH.md to see which features to implement and the research directory path. Read ARCHITECTURE.md to understand the architecture and tech stack. Read FEATURE_DAG.csv to understand what each feature should do.\n\nConduct research on how to effectively implement the features in this batch. Synthesize your findings into the batch research directory (see CURRENT_BATCH.md for the path, e.g., ./research-docs/batch-001/IMPLEMENTATION.md).\n\n**Research Activities:**\n- Query ./how-to-be-a-good-coder for implementation patterns relevant to these feature types\n- Research libraries or utilities that could help implement these features\n- Research how similar features are typically implemented\n- Use ./research for scratch work and quick prototypes if needed\n- Identify potential challenges or gotchas\n\n**Output: ./research-docs/batch-NNN/IMPLEMENTATION.md**\nSynthesize findings into a structured document covering:\n1. Implementation approach for each feature\n2. Libraries or utilities to use\n3. Code patterns to follow\n4. Integration points with existing code\n5. Potential challenges and how to address them\n6. Any prototyping results from ./research\n\nThis document will be used by the next step to implement the features.\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "refresh-after-impl-research-block": {
+        "id": "refresh-after-impl-research-block",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 200,
+          "y": 650
+        }
+      },
+      "dev-block": {
+        "id": "dev-block",
+        "type": "prompt",
+        "name": "Develop Features",
+        "position": {
+          "x": 200,
+          "y": 750
+        },
+        "prompt": "Read CURRENT_BATCH.md to see which features to implement and the research directory path. Read ARCHITECTURE.md to understand the architecture and tech stack. Read FEATURE_DAG.csv to understand what each feature should do and its dependencies.\n\nRead the implementation research document from the batch research directory (see CURRENT_BATCH.md for path, e.g., ./research-docs/batch-001/IMPLEMENTATION.md) for guidance on implementation approach.\n\nImplement all features in CURRENT_BATCH.md. Your implementation should:\n- Follow the architecture specified in ARCHITECTURE.md\n- Use the patterns and libraries identified in the research document\n- Satisfy the feature descriptions in FEATURE_DAG.csv\n- Pass the tests created in the previous step\n- Be well-structured, modular, and maintainable\n- Include appropriate error handling\n- Integrate properly with existing code\n\nIf this is the first batch (Hello World), also set up the project structure according to ARCHITECTURE.md.\n\nFocus on making the tests pass. The code should be production-quality.\n\nDO NOT USE TEMP DIRECTORIES. DO EVERYTHING IN THIS DIRECTORY/SUBDIRECTORIES.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "refresh-after-dev-block": {
+        "id": "refresh-after-dev-block",
+        "type": "refresh",
+        "name": "Refresh",
+        "position": {
+          "x": 200,
+          "y": 850
+        }
+      },
+      "run-tests-block": {
+        "id": "run-tests-block",
+        "type": "command",
+        "name": "Run Tests",
+        "position": {
+          "x": 200,
+          "y": 950
+        },
+        "command_name": "mini-wave-run-tests",
+        "arguments": "",
+        "inherit_variables": false,
+        "merge_output": false
+      },
+      "end-block": {
+        "id": "end-block",
+        "type": "end",
+        "name": "End",
+        "position": {
+          "x": 200,
+          "y": 1050
+        }
+      }
+    },
+    "connections": [
+      {
+        "id": "conn-start-to-research-testing",
+        "source_block_id": "start-block",
+        "target_block_id": "research-testing-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-research-testing-to-refresh",
+        "source_block_id": "research-testing-block",
+        "target_block_id": "refresh-after-testing-research-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-refresh-to-maketests",
+        "source_block_id": "refresh-after-testing-research-block",
+        "target_block_id": "make-tests-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-maketests-to-refresh",
+        "source_block_id": "make-tests-block",
+        "target_block_id": "refresh-after-tests-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-refresh-to-research-impl",
+        "source_block_id": "refresh-after-tests-block",
+        "target_block_id": "research-implementation-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-research-impl-to-refresh",
+        "source_block_id": "research-implementation-block",
+        "target_block_id": "refresh-after-impl-research-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-refresh-to-dev",
+        "source_block_id": "refresh-after-impl-research-block",
+        "target_block_id": "dev-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-dev-to-refresh",
+        "source_block_id": "dev-block",
+        "target_block_id": "refresh-after-dev-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-refresh-to-runtests",
+        "source_block_id": "refresh-after-dev-block",
+        "target_block_id": "run-tests-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-runtests-to-end",
+        "source_block_id": "run-tests-block",
+        "target_block_id": "end-block",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "start-block"
+  },
+  "metadata": {
+    "created": "2025-01-15T00:00:00",
+    "modified": "2026-01-03T00:00:00",
+    "version": "1.0",
+    "author": null,
+    "tags": []
+  },
+  "arguments": []
+}

@@ -34,7 +34,7 @@ pub fn validate(flowchart: &Flowchart) -> Result<(), Vec<ValidationError>> {
     let has_end = flowchart
         .blocks
         .values()
-        .any(|b| matches!(b.data, BlockData::End));
+        .any(|b| matches!(b.data, BlockData::End | BlockData::Exit { .. }));
     if !has_end {
         errors.push(ValidationError::NoEndBlock);
     }
@@ -118,6 +118,7 @@ mod tests {
         Block {
             name: String::new(),
             data,
+            extra: HashMap::new(),
         }
     }
 

@@ -1,0 +1,117 @@
+{
+  "id": "2f9a4a39-44fa-4723-9224-310fd62956c3",
+  "name": "single-wave",
+  "description": "",
+  "flowchart": {
+    "blocks": {
+      "481be488-5673-41eb-9ac2-df114b42bcb3": {
+        "id": "481be488-5673-41eb-9ac2-df114b42bcb3",
+        "type": "start",
+        "name": "Start",
+        "position": {
+          "x": 250,
+          "y": 50
+        }
+      },
+      "6719471d-2f46-4c5b-bb1c-b17697f171f7": {
+        "id": "6719471d-2f46-4c5b-bb1c-b17697f171f7",
+        "type": "command",
+        "name": "Wave Dev",
+        "position": {
+          "x": 150,
+          "y": 250
+        },
+        "command_name": "wave-dev",
+        "arguments": "$1",
+        "inherit_variables": false,
+        "merge_output": false
+      },
+      "1fd93e9f-a8ca-4380-a506-4a9554530a1d": {
+        "id": "1fd93e9f-a8ca-4380-a506-4a9554530a1d",
+        "type": "command",
+        "name": "Wave Run Tests",
+        "position": {
+          "x": 250,
+          "y": 350
+        },
+        "command_name": "wave-run-tests",
+        "arguments": "$1",
+        "inherit_variables": false,
+        "merge_output": false
+      },
+      "b6708df5-a52b-4247-a9c3-02cb2b8a89da": {
+        "id": "b6708df5-a52b-4247-a9c3-02cb2b8a89da",
+        "type": "end",
+        "name": "End",
+        "position": {
+          "x": 100,
+          "y": 350
+        }
+      },
+      "a3fdcb33-f246-4774-8cd6-dd0d0e91c262": {
+        "id": "a3fdcb33-f246-4774-8cd6-dd0d0e91c262",
+        "type": "command",
+        "name": "Wave Make Tests",
+        "position": {
+          "x": 300,
+          "y": 150
+        },
+        "command_name": "wave-make-tests",
+        "arguments": "$1",
+        "inherit_variables": false,
+        "merge_output": false
+      }
+    },
+    "connections": [
+      {
+        "id": "12dabcd5-86d2-483b-9c1f-c158ef80c7c6",
+        "source_block_id": "6719471d-2f46-4c5b-bb1c-b17697f171f7",
+        "target_block_id": "1fd93e9f-a8ca-4380-a506-4a9554530a1d",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "02e01cbe-fe21-4921-922c-dc8e22e57821",
+        "source_block_id": "1fd93e9f-a8ca-4380-a506-4a9554530a1d",
+        "target_block_id": "b6708df5-a52b-4247-a9c3-02cb2b8a89da",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "97f45887-346c-4dc2-a173-401b02a3587c",
+        "source_block_id": "481be488-5673-41eb-9ac2-df114b42bcb3",
+        "target_block_id": "a3fdcb33-f246-4774-8cd6-dd0d0e91c262",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "adaf58c9-8932-47ec-8609-f8ea055063cb",
+        "source_block_id": "a3fdcb33-f246-4774-8cd6-dd0d0e91c262",
+        "target_block_id": "6719471d-2f46-4c5b-bb1c-b17697f171f7",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "481be488-5673-41eb-9ac2-df114b42bcb3"
+  },
+  "metadata": {
+    "created": "2025-11-30T11:18:23.597382",
+    "modified": "2025-12-17T11:52:17.101069",
+    "version": "1.0",
+    "author": null,
+    "tags": []
+  },
+  "arguments": []
+}

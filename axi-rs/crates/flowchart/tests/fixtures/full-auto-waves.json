@@ -1,0 +1,94 @@
+{
+  "id": "69ec8505-9bd4-4b9a-af59-198ee76a1b8f",
+  "name": "full-auto-waves",
+  "description": "",
+  "flowchart": {
+    "blocks": {
+      "4cbc2ad1-73d8-4d22-879a-c34301e75301": {
+        "id": "4cbc2ad1-73d8-4d22-879a-c34301e75301",
+        "type": "start",
+        "name": "Start",
+        "position": {
+          "x": 100,
+          "y": 50
+        }
+      },
+      "c8833059-0241-4f4e-b0dc-f79f37a95e0f": {
+        "id": "c8833059-0241-4f4e-b0dc-f79f37a95e0f",
+        "type": "command",
+        "name": "Create Waves",
+        "position": {
+          "x": 100,
+          "y": 150
+        },
+        "command_name": "create-waves",
+        "arguments": "",
+        "inherit_variables": false,
+        "merge_output": false
+      },
+      "eba272d0-22a1-43c1-a2e3-88df16fff6d8": {
+        "id": "eba272d0-22a1-43c1-a2e3-88df16fff6d8",
+        "type": "command",
+        "name": "Dev-Test All Waves",
+        "position": {
+          "x": 100,
+          "y": 250
+        },
+        "command_name": "all-waves",
+        "arguments": "",
+        "inherit_variables": false,
+        "merge_output": false
+      },
+      "a64da47c-b7d8-401a-917b-08c526c7c480": {
+        "id": "a64da47c-b7d8-401a-917b-08c526c7c480",
+        "type": "end",
+        "name": "End",
+        "position": {
+          "x": 100,
+          "y": 350
+        }
+      }
+    },
+    "connections": [
+      {
+        "id": "39adb8d9-58ed-4c2d-9e3e-fe13ebbffd8f",
+        "source_block_id": "4cbc2ad1-73d8-4d22-879a-c34301e75301",
+        "target_block_id": "c8833059-0241-4f4e-b0dc-f79f37a95e0f",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "6da42cd5-159e-4811-8547-ca3b928260fc",
+        "source_block_id": "c8833059-0241-4f4e-b0dc-f79f37a95e0f",
+        "target_block_id": "eba272d0-22a1-43c1-a2e3-88df16fff6d8",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "0389bbd5-8e0d-4c5f-9181-e5649b8e6406",
+        "source_block_id": "eba272d0-22a1-43c1-a2e3-88df16fff6d8",
+        "target_block_id": "a64da47c-b7d8-401a-917b-08c526c7c480",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "4cbc2ad1-73d8-4d22-879a-c34301e75301"
+  },
+  "metadata": {
+    "created": "2025-11-30T11:24:21.277675",
+    "modified": "2025-11-30T12:15:52.289200",
+    "version": "1.0",
+    "author": null,
+    "tags": []
+  },
+  "arguments": []
+}

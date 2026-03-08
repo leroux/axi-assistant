@@ -1,0 +1,252 @@
+{
+  "id": "integration-validator-001",
+  "name": "integration-validator",
+  "description": "Validates that all phases integrate correctly and creates integration tests",
+  "flowchart": {
+    "blocks": {
+      "start-3": {
+        "id": "start-3",
+        "type": "start",
+        "name": "START",
+        "position": {
+          "x": 100,
+          "y": 50
+        }
+      },
+      "prompt-analyze": {
+        "id": "prompt-analyze",
+        "type": "prompt",
+        "name": "ANALYZE INTEGRATION",
+        "position": {
+          "x": 100,
+          "y": 150
+        },
+        "prompt": "Review the entire codebase and all phase design docs in ./design_docs/phases/\n\nAnalyze how the different phases integrate together:\n- Are there any integration issues between components?\n- Do the APIs/interfaces match between phases?\n- Are there missing connections or glue code?\n- Does the integration match the original design in ./design_docs/$1?\n\nDO NOT make fixes yet - just analyze.\n\nWrite your analysis to ./audits/INTEGRATION_ANALYSIS.md\n\nAnswer: Are there integration issues that need to be fixed?",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "hasIssues": {
+              "type": "boolean"
+            },
+            "issueCount": {
+              "type": "integer"
+            }
+          },
+          "required": ["hasIssues"]
+        },
+        "sound_effect": null
+      },
+      "branch-issues": {
+        "id": "branch-issues",
+        "type": "branch",
+        "name": "ISSUES FOUND?",
+        "position": {
+          "x": 150,
+          "y": 250
+        },
+        "condition": "hasIssues"
+      },
+      "prompt-fix": {
+        "id": "prompt-fix",
+        "type": "prompt",
+        "name": "FIX INTEGRATION",
+        "position": {
+          "x": 350,
+          "y": 250
+        },
+        "prompt": "Fix the integration issues identified in ./audits/INTEGRATION_ANALYSIS.md\n\nMake minimal, targeted changes to ensure all components work together correctly.\n\nUpdate ./audits/INTEGRATION_ANALYSIS.md with what you fixed.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "refresh-1": {
+        "id": "refresh-1",
+        "type": "refresh",
+        "name": "REFRESH",
+        "position": {
+          "x": 350,
+          "y": 350
+        }
+      },
+      "prompt-tests": {
+        "id": "prompt-tests",
+        "type": "prompt",
+        "name": "CREATE INTEGRATION TESTS",
+        "position": {
+          "x": 150,
+          "y": 450
+        },
+        "prompt": "Create integration tests that verify the different phases/components work together correctly.\n\nFocus on:\n- Cross-module interactions\n- Data flow between components\n- End-to-end workflows that span multiple phases\n\nCreate tests in ./tests/integration/\n\nDon't run the tests yet.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "bash-run-tests": {
+        "id": "bash-run-tests",
+        "type": "bash",
+        "name": "RUN TESTS",
+        "position": {
+          "x": 150,
+          "y": 550
+        },
+        "command": "cd tests/integration && bash ../../run_integration_tests.sh 2>&1 || true",
+        "capture_output": true,
+        "output_variable": "testOutput",
+        "output_type": "string",
+        "working_directory": "",
+        "continue_on_error": true,
+        "exit_code_variable": "exitCode"
+      },
+      "branch-tests-pass": {
+        "id": "branch-tests-pass",
+        "type": "branch",
+        "name": "TESTS PASS?",
+        "position": {
+          "x": 150,
+          "y": 650
+        },
+        "condition": "exitCode == 0"
+      },
+      "prompt-fix-tests": {
+        "id": "prompt-fix-tests",
+        "type": "prompt",
+        "name": "FIX TEST FAILURES",
+        "position": {
+          "x": 400,
+          "y": 650
+        },
+        "prompt": "The integration tests failed. Exit code: {{exitCode}}\n\nAnalyze the failures and fix the issues.\n\nFocus on real integration problems, not test bugs.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "end-3": {
+        "id": "end-3",
+        "type": "end",
+        "name": "END",
+        "position": {
+          "x": 150,
+          "y": 750
+        }
+      }
+    },
+    "connections": [
+      {
+        "id": "conn-13",
+        "source_block_id": "start-3",
+        "target_block_id": "prompt-analyze",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-14",
+        "source_block_id": "prompt-analyze",
+        "target_block_id": "branch-issues",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-15",
+        "source_block_id": "branch-issues",
+        "target_block_id": "prompt-fix",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-16",
+        "source_block_id": "prompt-fix",
+        "target_block_id": "refresh-1",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-17",
+        "source_block_id": "refresh-1",
+        "target_block_id": "prompt-analyze",
+        "source_port": "left",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-18",
+        "source_block_id": "branch-issues",
+        "target_block_id": "prompt-tests",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-19",
+        "source_block_id": "prompt-tests",
+        "target_block_id": "bash-run-tests",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-20",
+        "source_block_id": "bash-run-tests",
+        "target_block_id": "branch-tests-pass",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-21",
+        "source_block_id": "branch-tests-pass",
+        "target_block_id": "end-3",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-22",
+        "source_block_id": "branch-tests-pass",
+        "target_block_id": "prompt-fix-tests",
+        "source_port": "right",
+        "target_port": "left",
+        "is_true_path": false,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "conn-23",
+        "source_block_id": "prompt-fix-tests",
+        "target_block_id": "bash-run-tests",
+        "source_port": "top",
+        "target_port": "right",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "start-3"
+  },
+  "metadata": {
+    "created": "2025-01-08T00:00:00.000000",
+    "modified": "2025-01-08T00:00:00.000000",
+    "version": "1.0",
+    "author": "autonomous-system",
+    "tags": ["validation", "integration"]
+  },
+  "arguments": []
+}
