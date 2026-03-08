@@ -76,6 +76,9 @@ pub struct AgentSession {
     pub context_window: u64,
     /// SDK MCP servers available to this agent (handled in-process via control protocol).
     pub sdk_mcp_servers: HashMap<String, McpServer>,
+    /// Pending flowchart invocation queued by the `run_flowchart` MCP tool.
+    /// Format: (command_name, args). Injected after the current turn completes.
+    pub pending_flowchart: Option<(String, String)>,
 }
 
 impl AgentSession {
@@ -104,6 +107,7 @@ impl AgentSession {
             context_tokens: 0,
             context_window: 0,
             sdk_mcp_servers: HashMap::new(),
+            pending_flowchart: None,
         }
     }
 

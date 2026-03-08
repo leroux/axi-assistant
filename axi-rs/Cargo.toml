@@ -9,6 +9,7 @@ members = [
     "crates/flowchart",
     "crates/flowchart-runner",
     "crates/flowcoder",
+    "crates/flowcoder-engine",
 ]
 
 [workspace.package]

@@ -147,7 +147,7 @@ fn run_initial_prompt(state: &Arc<BotState>, agent_name: &str, prompt: &str) {
     let state = Arc::clone(state);
     let name = agent_name.to_string();
     let prompt = prompt.to_string();
-    let stream_handler = crate::bridge::make_stream_handler(Arc::clone(&state));
+    let stream_handler = crate::claude_process::make_stream_handler(Arc::clone(&state));
 
     tokio::spawn(async move {
         let content = crate::types::MessageContent::Text(prompt);
@@ -595,7 +595,7 @@ pub fn create_master_server(state: Arc<BotState>) -> McpServer {
                     crate::registry::SpawnRequest {
                         name: name.clone(),
                         cwd: cwd.clone(),
-                        agent_type: Some("claude_code".to_string()),
+                        agent_type: None, // uses config default
                         resume,
                         system_prompt,
                         mcp_servers: mcp_servers_cfg,
@@ -845,7 +845,7 @@ pub fn create_master_server(state: Arc<BotState>) -> McpServer {
                     &content[..content.len().min(200)]
                 );
 
-                let handler = crate::bridge::make_stream_handler(Arc::clone(&state));
+                let handler = crate::claude_process::make_stream_handler(Arc::clone(&state));
                 let result = crate::messaging::deliver_inter_agent_message(
                     state,
                     &sender,
@@ -920,7 +920,7 @@ pub fn create_agent_server(state: Arc<BotState>) -> McpServer {
                     crate::registry::SpawnRequest {
                         name: name.clone(),
                         cwd: cwd.clone(),
-                        agent_type: Some("claude_code".to_string()),
+                        agent_type: None, // uses config default
                         resume,
                         system_prompt,
                         mcp_servers: mcp_servers_cfg,
@@ -1127,6 +1127,13 @@ pub fn build_sdk_mcp_config(
     config.insert("axi".to_string(), sdk_server_json(&axi));
     servers.insert("axi".to_string(), axi);
 
+    // Flowcoder — run_flowchart tool for flowcoder-type agents
+    if state.config.flowcoder_enabled {
+        let flowcoder = create_flowcoder_server(Arc::clone(state), agent_name.to_string());
+        config.insert("flowcoder".to_string(), sdk_server_json(&flowcoder));
+        servers.insert("flowcoder".to_string(), flowcoder);
+    }
+
     // Playwright — external stdio server (not SDK, handled by Claude CLI directly)
     config.insert(
         "playwright".to_string(),
@@ -1137,6 +1144,99 @@ pub fn build_sdk_mcp_config(
     );
 
     (servers, Value::Object(config))
+}
+
+/// Create the flowcoder MCP server with the `run_flowchart` tool.
+///
+/// This allows agents to programmatically invoke flowcharts. The tool
+/// sets `pending_flowchart` on the session, which gets injected as a
+/// synthetic message after the current turn completes.
+fn create_flowcoder_server(state: Arc<BotState>, agent_name: String) -> McpServer {
+    let mut server = McpServer::new("flowcoder", "1.0.0");
+
+    let state_run = state.clone();
+    let agent_name_run = agent_name.clone();
+    server.add_tool(
+        "run_flowchart",
+        "Run a flowchart command. The flowchart will execute after the current turn completes, preserving conversation context.",
+        json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Name of the flowchart command to run (e.g. 'story', 'test-fix-loop')"
+                },
+                "args": {
+                    "type": "string",
+                    "description": "Arguments for the flowchart command"
+                }
+            },
+            "required": ["command"]
+        }),
+        move |args| {
+            let state = state_run.clone();
+            let agent_name = agent_name_run.clone();
+            async move {
+                let command = get_str(&args, "command");
+                let args_str = get_opt_str(&args, "args").unwrap_or_default();
+
+                if command.is_empty() {
+                    return ToolResult::error("Error: 'command' is required.");
+                }
+
+                // Check if command exists in search paths
+                let commands = crate::flowcoder::list_flowchart_commands();
+                let exists = commands.iter().any(|c| c.name == command);
+                if !exists {
+                    let available: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+                    return ToolResult::error(format!(
+                        "Unknown flowchart command '{}'. Available: {:?}",
+                        command, available
+                    ));
+                }
+
+                // Set pending_flowchart on the session
+                {
+                    let mut sessions = state.sessions.lock().await;
+                    if let Some(session) = sessions.get_mut(&agent_name) {
+                        session.pending_flowchart = Some((command.clone(), args_str.clone()));
+                    }
+                }
+
+                ToolResult::text(format!(
+                    "Flowchart '{}' queued with args '{}'. Will run after this turn completes.",
+                    command, args_str
+                ))
+            }
+        },
+    );
+
+    // list_flowcharts tool
+    server.add_tool(
+        "list_flowcharts",
+        "List available flowchart commands.",
+        json!({"type": "object", "properties": {}}),
+        move |_args| {
+            async move {
+                let commands = crate::flowcoder::list_flowchart_commands();
+                if commands.is_empty() {
+                    return ToolResult::text("No flowchart commands found.");
+                }
+
+                let mut output = String::from("Available flowcharts:\n");
+                for cmd in &commands {
+                    if cmd.description.is_empty() {
+                        output.push_str(&format!("  /{}\n", cmd.name));
+                    } else {
+                        output.push_str(&format!("  /{} — {}\n", cmd.name, cmd.description));
+                    }
+                }
+                ToolResult::text(output)
+            }
+        },
+    );
+
+    server
 }
 
 // ---------------------------------------------------------------------------

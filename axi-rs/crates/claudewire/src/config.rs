@@ -44,6 +44,12 @@ pub struct Config {
     pub include_partial_messages: bool,
     pub verbose: bool,
     pub debug_to_stderr: bool,
+    /// Use `--print` mode (non-interactive pipe mode). Required for standalone
+    /// engine binaries that don't use the SDK entrypoint.
+    pub print_mode: bool,
+    /// Re-emit user messages from stdin back on stdout for acknowledgment.
+    /// Only works with `--print` + stream-json.
+    pub replay_user_messages: bool,
 }
 
 impl Config {
@@ -52,13 +58,22 @@ impl Config {
     /// This is THE place that knows about Claude CLI flag names.
     /// Returns args starting with "claude" as argv[0].
     pub fn to_cli_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "claude".into(),
+        let mut args = vec!["claude".into()];
+
+        if self.print_mode {
+            args.push("--print".into());
+        }
+
+        args.extend([
             "--output-format".into(),
             "stream-json".into(),
             "--input-format".into(),
             "stream-json".into(),
-        ];
+        ]);
+
+        if self.replay_user_messages {
+            args.push("--replay-user-messages".into());
+        }
 
         if self.verbose {
             args.push("--verbose".into());

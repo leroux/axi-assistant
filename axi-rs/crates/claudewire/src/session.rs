@@ -32,6 +32,10 @@ pub type KillFn =
     Box<dyn Fn(String) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> + Send + Sync>;
 
 /// `CliSession` manages a Claude CLI process and routes messages through channels.
+/// Function to send a signal to a process.
+pub type SignalFn =
+    Box<dyn Fn(Signal) -> bool + Send + Sync>;
+
 pub struct CliSession {
     name: String,
     reconnecting: bool,
@@ -40,6 +44,7 @@ pub struct CliSession {
     tx: Option<mpsc::UnboundedSender<ProcessEvent>>,
     send_stdin: SendStdinFn,
     kill: KillFn,
+    signal: SignalFn,
     is_alive: Box<dyn Fn() -> bool + Send + Sync>,
     ready: bool,
     cli_exited: bool,
@@ -59,6 +64,8 @@ impl CliSession {
         reconnecting: bool,
         stderr_callback: Option<StderrCallback>,
     ) -> Self {
+        // Procmux-backed sessions have no direct PID — signal is a no-op
+        let signal: SignalFn = Box::new(|_| false);
         Self {
             name,
             reconnecting,
@@ -67,6 +74,7 @@ impl CliSession {
             tx: Some(tx),
             send_stdin,
             kill,
+            signal,
             is_alive,
             ready: true,
             cli_exited: false,
@@ -88,6 +96,8 @@ impl CliSession {
         let mut cmd = Command::new(&args[0]);
         cmd.args(&args[1..]);
         cmd.envs(env);
+        // Prevent Claude CLI from detecting nested sessions
+        cmd.env_remove("CLAUDECODE");
 
         Self::from_command(cmd, name, stderr_callback)
     }
@@ -194,6 +204,16 @@ impl CliSession {
             })
         });
 
+        // Build the signal function — send any signal to the process
+        let signal_pid = pid;
+        let signal_fn: SignalFn = Box::new(move |sig| {
+            if let Some(pid) = signal_pid {
+                signal::kill(Pid::from_raw(pid as i32), sig).is_ok()
+            } else {
+                false
+            }
+        });
+
         // Build the kill function
         let kill_pid = pid;
         let kill: KillFn = Box::new(move |_name| {
@@ -228,6 +248,7 @@ impl CliSession {
             tx: Some(event_tx),
             send_stdin,
             kill,
+            signal: signal_fn,
             is_alive,
             ready: true,
             cli_exited: false,
@@ -380,6 +401,12 @@ impl CliSession {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Send a signal to the underlying process. Returns `true` if the signal was sent.
+    /// For procmux-backed sessions this is a no-op (returns `false`).
+    pub fn send_signal(&self, sig: Signal) -> bool {
+        (self.signal)(sig)
     }
 }
 

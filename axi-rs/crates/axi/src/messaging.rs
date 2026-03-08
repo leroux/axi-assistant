@@ -81,7 +81,7 @@ pub async fn process_message(
         }
     }
 
-    crate::bridge::send_query(state, name, content).await;
+    crate::claude_process::send_query(state, name, content).await;
 
     let success = stream_with_retry(state, name, stream_handler).await;
     if !success {
@@ -130,7 +130,7 @@ async fn stream_with_retry(
         tokio::time::sleep(std::time::Duration::from_secs_f64(delay)).await;
 
         let retry_content = MessageContent::Text("Continue from where you left off.".to_string());
-        crate::bridge::send_query(state, name, &retry_content).await;
+        crate::claude_process::send_query(state, name, &retry_content).await;
 
         let error = stream_handler(name).await;
         if error.is_none() {
@@ -270,6 +270,9 @@ pub async fn run_initial_prompt(
     )
     .await;
 
+    // Check for pending flowchart (queued by run_flowchart MCP tool)
+    inject_pending_flowchart(state, name).await;
+
     let should_yield = state.scheduler().await.should_yield(name).await;
     if !should_yield {
         process_message_queue(state, name, stream_handler).await;
@@ -390,7 +393,10 @@ pub async fn process_message_queue(
             }
 
             match process_message(state, name, &message.content, stream_handler).await {
-                Ok(()) => {}
+                Ok(()) => {
+                    // Check for pending flowchart after each successful turn
+                    inject_pending_flowchart(state, name).await;
+                }
                 Err(e) => {
                     warn!(
                         "Error processing queued message for '{}': {}",
@@ -406,6 +412,38 @@ pub async fn process_message_queue(
                     session.activity = ActivityState::default();
                 }
             }
+        }
+    }
+}
+
+/// If the agent has a `pending_flowchart` set (by the `run_flowchart` MCP tool),
+/// inject a synthetic `/command args` message at the front of the message queue.
+/// The engine intercepts this as a flowchart command.
+async fn inject_pending_flowchart(state: &BotState, name: &str) {
+    let pending = {
+        let mut sessions = state.sessions.lock().await;
+        sessions
+            .get_mut(name)
+            .and_then(|s| s.pending_flowchart.take())
+    };
+
+    if let Some((command, args)) = pending {
+        debug!(
+            "Injecting pending flowchart for '{}': /{} {}",
+            name, command, args
+        );
+        let content = if args.is_empty() {
+            format!("/{command}")
+        } else {
+            format!("/{command} {args}")
+        };
+        let queued = super::types::QueuedMessage {
+            content: MessageContent::Text(content),
+            metadata: None,
+        };
+        let mut sessions = state.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(name) {
+            session.message_queue.push_front(queued);
         }
     }
 }

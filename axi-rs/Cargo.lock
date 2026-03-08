@@ -624,6 +624,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowcoder-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "claudewire",
+ "flowchart",
+ "flowchart-runner",
+ "nix",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

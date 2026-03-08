@@ -1,34 +1,43 @@
+//! `EngineSession` — implements `flowchart_runner::Session` around `CliSession`.
+//!
+//! Mirrors `flowcoder/src/claude_session.rs` with one key difference:
+//! `control_requests` are relayed to the engine's stdout (for the outer client
+//! to handle), and responses are read from the router's `control_response` channel.
+
+use std::time::Instant;
+
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::debug;
+
+use claudewire::config::Config;
+use claudewire::session::CliSession;
 use flowchart_runner::error::ExecutionError;
 use flowchart_runner::protocol::Protocol;
 use flowchart_runner::session::{QueryResult, Session};
 
-use claudewire::config::Config;
-use claudewire::session::CliSession;
+use crate::events;
 
-use std::time::Instant;
-
-/// Callback for handling control requests during a query.
-/// Takes a `control_request` JSON, returns a `control_response` JSON.
-pub type ControlCallback = Box<dyn Fn(&serde_json::Value) -> serde_json::Value + Send + Sync>;
-
-/// Session implementation backed by Claude CLI via `claudewire::CliSession`.
-pub struct ClaudeSession {
+/// Session backed by an inner Claude CLI subprocess.
+///
+/// Relays `control_requests` to engine stdout (the outer client) and reads
+/// `control_responses` from the router's dedicated channel.
+pub struct EngineSession {
     config: Config,
     name: String,
     cli: Option<CliSession>,
     total_cost: f64,
     session_id: Option<String>,
-    control_callback: Option<ControlCallback>,
-    debug: bool,
+    control_response_rx: mpsc::UnboundedReceiver<serde_json::Value>,
+    cancel: CancellationToken,
 }
 
-impl ClaudeSession {
-    /// Create a new Claude session. Spawns the CLI process immediately.
+impl EngineSession {
     pub fn new(
         config: Config,
         name: String,
-        control_callback: Option<ControlCallback>,
-        debug: bool,
+        control_response_rx: mpsc::UnboundedReceiver<serde_json::Value>,
+        cancel: CancellationToken,
     ) -> anyhow::Result<Self> {
         let cli = CliSession::spawn(&config, name.clone(), None)?;
         Ok(Self {
@@ -37,19 +46,36 @@ impl ClaudeSession {
             cli: Some(cli),
             total_cost: 0.0,
             session_id: None,
-            control_callback,
-            debug,
+            control_response_rx,
+            cancel,
         })
     }
 
-    /// Get the current session ID (from the last result message).
+    /// Borrow the inner `CliSession` mutably.
+    pub const fn cli_mut(&mut self) -> Option<&mut CliSession> {
+        self.cli.as_mut()
+    }
+
+    /// Current session ID from the last result message.
     #[allow(dead_code)]
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
+
+    /// Borrow the `control_response` receiver mutably (for proxy mode).
+    pub const fn control_response_rx_mut(
+        &mut self,
+    ) -> &mut mpsc::UnboundedReceiver<serde_json::Value> {
+        &mut self.control_response_rx
+    }
+
+    /// Replace the cancellation token (used when starting a new flowchart).
+    pub fn set_cancel(&mut self, cancel: CancellationToken) {
+        self.cancel = cancel;
+    }
 }
 
-impl Session for ClaudeSession {
+impl Session for EngineSession {
     async fn query(
         &mut self,
         prompt: &str,
@@ -64,7 +90,7 @@ impl Session for ClaudeSession {
 
         let start = Instant::now();
 
-        // Send user message
+        // Send user message to inner Claude
         let user_msg = serde_json::json!({
             "type": "user",
             "message": {
@@ -76,14 +102,20 @@ impl Session for ClaudeSession {
             .await
             .map_err(|e| ExecutionError::Session(e.to_string()))?;
 
-        // Read messages until result
         let mut response_parts: Vec<String> = Vec::new();
         let mut cost_usd = 0.0;
         let mut duration_ms = 0u64;
         let mut session_id = None;
 
         loop {
-            let msg = cli.read_message().await;
+            // Race: cancel token vs reading next message
+            let msg = tokio::select! {
+                () = self.cancel.cancelled() => {
+                    return Err(ExecutionError::Session("Cancelled".into()));
+                }
+                msg = cli.read_message() => msg,
+            };
+
             let msg = match msg {
                 Some(m) => m,
                 None => {
@@ -100,23 +132,19 @@ impl Session for ClaudeSession {
 
             match msg_type {
                 "system" | "rate_limit_event" | "keep_alive" | "tool_progress"
-                | "tool_use_summary" | "auth_status" | "prompt_suggestion" => {
-                    if self.debug {
-                        eprintln!("[debug] {msg_type}: {}", summarize_msg(&msg));
-                    }
+                | "tool_use_summary" | "auth_status" | "prompt_suggestion"
+                | "user" => {
+                    debug!("{msg_type}: {}", summarize_msg(&msg));
                 }
 
                 "assistant" => {
-                    // Extract text from assistant message
                     if let Some(text) = extract_assistant_text(&msg) {
                         response_parts.push(text);
                     }
-                    // Forward to protocol
                     protocol.on_forwarded_message(&msg, block_id, block_name);
                 }
 
                 "stream_event" => {
-                    // Extract text_delta for streaming display
                     if let Some(text) = extract_stream_text(&msg) {
                         protocol.on_stream_text(&text);
                     }
@@ -124,33 +152,42 @@ impl Session for ClaudeSession {
                 }
 
                 "control_request" => {
-                    // Handle control request via callback
-                    let response = if let Some(cb) = &self.control_callback {
-                        cb(&msg)
-                    } else {
-                        // Default: deny
-                        let request_id = msg
-                            .get("request_id")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("");
-                        serde_json::json!({
-                            "type": "control_response",
-                            "response": {
-                                "subtype": "permissions_response",
-                                "request_id": request_id,
-                                "response": {"allowed": false}
+                    // Relay to engine stdout for the outer client
+                    events::emit_raw(&msg);
+
+                    // Wait for response from the router's control_response channel
+                    let response = tokio::select! {
+                        () = self.cancel.cancelled() => {
+                            return Err(ExecutionError::Session("Cancelled during control_request".into()));
+                        }
+                        resp = self.control_response_rx.recv() => {
+                            if let Some(r) = resp { r } else {
+                                // Channel closed — construct a deny response
+                                let request_id = msg
+                                    .get("request_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("");
+                                serde_json::json!({
+                                    "type": "control_response",
+                                    "response": {
+                                        "subtype": "permissions_response",
+                                        "request_id": request_id,
+                                        "response": {"allowed": false}
+                                    }
+                                })
                             }
-                        })
+                        }
                     };
+
                     let _ = cli.write(&response.to_string()).await;
                 }
 
                 "result" => {
-                    // Extract final data
-                    if let Some(c) = msg.get("total_cost_usd").and_then(serde_json::Value::as_f64)
+                    if let Some(c) =
+                        msg.get("total_cost_usd").and_then(serde_json::Value::as_f64)
                     {
                         cost_usd = c;
-                        self.total_cost = c; // total_cost_usd is cumulative
+                        self.total_cost = c; // cumulative
                     }
                     if let Some(d) = msg.get("duration_ms").and_then(serde_json::Value::as_i64) {
                         duration_ms = d as u64;
@@ -160,13 +197,12 @@ impl Session for ClaudeSession {
                         self.session_id = Some(s.to_owned());
                     }
 
-                    // Use result text if no assistant parts collected
                     if response_parts.is_empty()
-                        && let Some(r) = msg.get("result").and_then(serde_json::Value::as_str) {
-                            response_parts.push(r.to_owned());
-                        }
+                        && let Some(r) = msg.get("result").and_then(serde_json::Value::as_str)
+                    {
+                        response_parts.push(r.to_owned());
+                    }
 
-                    // Check for error
                     if msg.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
                         let err_text = response_parts.join("");
                         return Err(ExecutionError::Session(err_text));
@@ -176,9 +212,7 @@ impl Session for ClaudeSession {
                 }
 
                 _ => {
-                    if self.debug {
-                        eprintln!("[debug] UNHANDLED {msg_type}: {msg}");
-                    }
+                    debug!("UNHANDLED {msg_type}: {}", summarize_msg(&msg));
                 }
             }
         }
@@ -195,12 +229,10 @@ impl Session for ClaudeSession {
     }
 
     async fn clear(&mut self) -> Result<(), ExecutionError> {
-        // Stop existing session
         if let Some(mut cli) = self.cli.take() {
             cli.stop().await;
         }
 
-        // Spawn new session with same config (cost survives)
         let cli = CliSession::spawn(&self.config, self.name.clone(), None)
             .map_err(|e| ExecutionError::Session(e.to_string()))?;
         self.cli = Some(cli);
@@ -214,10 +246,10 @@ impl Session for ClaudeSession {
     }
 
     async fn interrupt(&mut self) -> Result<(), ExecutionError> {
-        tracing::debug!("Interrupt requested — sending SIGINT to inner Claude");
+        debug!("Interrupt requested — sending SIGINT to inner Claude");
         if let Some(cli) = self.cli.as_ref()
             && !cli.send_signal(nix::sys::signal::Signal::SIGINT) {
-                tracing::debug!("SIGINT not supported, falling back to stop");
+                debug!("SIGINT not supported on this session, falling back to stop");
                 if let Some(mut cli) = self.cli.take() {
                     cli.stop().await;
                 }
@@ -232,7 +264,6 @@ impl Session for ClaudeSession {
 
 /// Extract text content from an assistant message.
 fn extract_assistant_text(msg: &serde_json::Value) -> Option<String> {
-    // Try message.content (list of content blocks)
     if let Some(content) = msg
         .get("message")
         .and_then(|m| m.get("content"))
@@ -241,16 +272,16 @@ fn extract_assistant_text(msg: &serde_json::Value) -> Option<String> {
         let mut parts = Vec::new();
         for block in content {
             if block.get("type").and_then(serde_json::Value::as_str) == Some("text")
-                && let Some(text) = block.get("text").and_then(serde_json::Value::as_str) {
-                    parts.push(text.to_owned());
-                }
+                && let Some(text) = block.get("text").and_then(serde_json::Value::as_str)
+            {
+                parts.push(text.to_owned());
+            }
         }
         if !parts.is_empty() {
             return Some(parts.join(""));
         }
     }
 
-    // Try message.content as string
     if let Some(text) = msg
         .get("message")
         .and_then(|m| m.get("content"))
@@ -259,40 +290,9 @@ fn extract_assistant_text(msg: &serde_json::Value) -> Option<String> {
         return Some(text.to_owned());
     }
 
-    // Try top-level content
-    if let Some(text) = msg.get("content").and_then(serde_json::Value::as_str) {
-        return Some(text.to_owned());
-    }
-
-    None
-}
-
-/// One-line summary of a message for debug output.
-/// Prints key fields without dumping the entire JSON.
-fn summarize_msg(msg: &serde_json::Value) -> String {
-    let mut parts = Vec::new();
-    if let Some(subtype) = msg.get("subtype").and_then(serde_json::Value::as_str) {
-        parts.push(format!("subtype={subtype}"));
-    }
-    if let Some(sid) = msg.get("session_id").and_then(serde_json::Value::as_str) {
-        parts.push(format!("session={}", &sid[..sid.len().min(12)]));
-    }
-    if let Some(info) = msg.get("rate_limit_info")
-        && let Some(remaining) = info.get("requests_remaining")
-    {
-        parts.push(format!("remaining={remaining}"));
-    }
-    if parts.is_empty() {
-        // Fall back to compact JSON, truncated
-        let s = msg.to_string();
-        if s.len() > 200 {
-            format!("{}...", &s[..200])
-        } else {
-            s
-        }
-    } else {
-        parts.join(" ")
-    }
+    msg.get("content")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 /// Extract streaming text delta from a `stream_event` message.
@@ -309,5 +309,29 @@ fn extract_stream_text(msg: &serde_json::Value) -> Option<String> {
         return None;
     }
 
-    delta.get("text").and_then(serde_json::Value::as_str).map(str::to_owned)
+    delta
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// One-line summary of a message for debug output.
+fn summarize_msg(msg: &serde_json::Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(subtype) = msg.get("subtype").and_then(serde_json::Value::as_str) {
+        parts.push(format!("subtype={subtype}"));
+    }
+    if let Some(sid) = msg.get("session_id").and_then(serde_json::Value::as_str) {
+        parts.push(format!("session={}", &sid[..sid.len().min(12)]));
+    }
+    if parts.is_empty() {
+        let s = msg.to_string();
+        if s.len() > 200 {
+            format!("{}...", &s[..200])
+        } else {
+            s
+        }
+    } else {
+        parts.join(" ")
+    }
 }
