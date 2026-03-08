@@ -6,6 +6,7 @@ members = [
     "crates/axi-config",
     "crates/axi",
     "crates/discordquery",
+    "crates/flowchart",
 ]
 
 [workspace.package]

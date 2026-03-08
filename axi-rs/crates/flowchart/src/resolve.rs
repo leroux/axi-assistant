@@ -17,7 +17,7 @@ pub struct CommandInfo {
 /// Search order:
 /// 1. Current directory: `cwd/commands/<name>.json`, `cwd/<name>.json`
 /// 2. Each search path: `path/<name>.json`, `path/commands/<name>.json`
-/// 3. Home directory: `~/.flowcoder/commands/<name>.json`
+/// 3. Home directory: `~/.flowchart/commands/<name>.json`
 pub fn resolve_command(name: &str, search_paths: &[PathBuf]) -> Result<Command, ResolveError> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -35,7 +35,7 @@ pub fn resolve_command(name: &str, search_paths: &[PathBuf]) -> Result<Command, 
 
     // Home directory
     if let Some(home) = home_dir() {
-        candidates.push(home.join(".flowcoder").join("commands").join(format!("{name}.json")));
+        candidates.push(home.join(".flowchart").join("commands").join(format!("{name}.json")));
     }
 
     for candidate in &candidates {
@@ -74,7 +74,7 @@ pub fn list_commands(search_paths: &[PathBuf]) -> Vec<CommandInfo> {
         dirs.push(sp.join("commands"));
     }
     if let Some(home) = home_dir() {
-        dirs.push(home.join(".flowcoder").join("commands"));
+        dirs.push(home.join(".flowchart").join("commands"));
     }
 
     let mut result = Vec::new();

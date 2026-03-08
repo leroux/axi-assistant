@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use flowcoder::{parse_command, Action, GraphWalker};
+use flowchart::{parse_command, Action, GraphWalker};
 
 fn main() {
     let json = include_str!("../tests/fixtures/story.json");
