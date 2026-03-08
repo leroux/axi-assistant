@@ -252,6 +252,11 @@ impl GraphWalker {
         &self.variables
     }
 
+    /// Mutable access to variables (e.g., to inject structured output fields).
+    pub const fn variables_mut(&mut self) -> &mut HashMap<String, String> {
+        &mut self.variables
+    }
+
     /// Process blocks until we hit one that needs external IO.
     fn advance(&mut self) -> Action {
         loop {
