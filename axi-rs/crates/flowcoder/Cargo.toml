@@ -1,0 +1,25 @@
+[package]
+name = "flowcoder"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "flowcoder"
+path = "src/main.rs"
+
+[dependencies]
+flowchart = { path = "../flowchart" }
+flowchart-runner = { path = "../flowchart-runner" }
+claudewire = { path = "../claudewire" }
+tokio = { workspace = true }
+tokio-util = "0.7"
+nix = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+
+[lints]
+workspace = true
