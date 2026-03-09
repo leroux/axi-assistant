@@ -18,6 +18,9 @@ mod state;
 mod streaming;
 mod todos;
 
+// --- Activity tracking ---
+mod activity;
+
 // --- Agent orchestration ---
 mod lifecycle;
 mod messaging;

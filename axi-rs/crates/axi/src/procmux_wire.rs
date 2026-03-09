@@ -6,7 +6,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use claudewire::types::{CommandResult, ExitEvent, ProcessEvent, StderrEvent, StdoutEvent};
+use claudewire::types::{ExitEvent, ProcessEvent, StderrEvent, StdoutEvent};
+
+/// Result of a procmux command (spawn, subscribe, kill, list, interrupt).
+pub struct CommandResult {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub already_running: bool,
+    pub replayed: Option<u64>,
+    pub status: Option<String>,
+    pub idle: Option<bool>,
+    pub agents: Vec<String>,
+}
 use procmux::client::{ProcessMsg, ProcmuxConnection};
 
 /// Helper: extract agents list from procmux's Option<Value> to Vec<String>.
@@ -49,7 +60,7 @@ impl ProcmuxProcessConnection {
             ok: result.ok,
             error: result.error,
             already_running: result.already_running.unwrap_or(false),
-            replayed: result.replayed,
+            replayed: result.replayed.map(|n| n as u64),
             status: result.status,
             idle: result.idle,
             agents: extract_agents(result.agents.as_ref()),
@@ -62,7 +73,7 @@ impl ProcmuxProcessConnection {
             ok: result.ok,
             error: result.error,
             already_running: result.already_running.unwrap_or(false),
-            replayed: result.replayed,
+            replayed: result.replayed.map(|n| n as u64),
             status: result.status,
             idle: result.idle,
             agents: extract_agents(result.agents.as_ref()),

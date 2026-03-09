@@ -214,7 +214,7 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
                             let mut sessions = state_ref.sessions.lock().await;
                             if let Some(session) = sessions.get_mut(&name) {
                                 session.last_activity = chrono::Utc::now();
-                                session.activity = claudewire::events::ActivityState::default();
+                                session.activity = crate::activity::ActivityState::default();
                             }
                         }
                         Ok(Err(e)) => {
@@ -233,6 +233,7 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
                 }
                 // query_lock dropped — sleep_agent can now check is_processing correctly
                 crate::messaging::process_message_queue(&state_ref, &name, &stream_handler).await;
+                crate::lifecycle::post_awaiting_input(&state_ref, &name).await;
                 crate::lifecycle::sleep_agent(&state_ref, &name, false).await;
             }
         });
@@ -311,21 +312,6 @@ async fn handle_text_command(
             let _ = dc.send_message(ch, "Agent interrupted.").await;
         }
         "flowchart" => {
-            if !state.config.flowcoder_enabled {
-                let _ = dc.send_message(ch, "Flowcoder is not enabled.").await;
-                return;
-            }
-
-            let is_flowcoder = {
-                let sessions = state.sessions.lock().await;
-                sessions.get(&agent_name).map(|s| s.agent_type == "flowcoder").unwrap_or(false)
-            };
-
-            if !is_flowcoder {
-                let _ = dc.send_message(ch, "Flowcharts are only available for **flowcoder** agents.").await;
-                return;
-            }
-
             let cmd_args = parts.get(1).copied().unwrap_or("");
             if cmd_args.is_empty() {
                 let _ = dc.send_message(ch, "Usage: `//flowchart <command> [args]`").await;
@@ -343,7 +329,7 @@ async fn handle_text_command(
 
             let is_busy = {
                 let sessions = state.sessions.lock().await;
-                sessions.get(&agent_name).map(|s| crate::lifecycle::is_processing(s)).unwrap_or(false)
+                sessions.get(&agent_name).is_some_and(crate::lifecycle::is_processing)
             };
 
             if is_busy {

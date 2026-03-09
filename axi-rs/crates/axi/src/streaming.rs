@@ -217,7 +217,7 @@ pub async fn show_tool_progress(
         None => return,
     };
 
-    let display_name = claudewire::events::tool_display(tool_name);
+    let display_name = crate::activity::tool_display(tool_name);
     let content = format!("*{display_name}...*");
     match discord.send_message(channel_id, &content).await {
         Ok(resp) => {

@@ -57,7 +57,7 @@ pub fn get_search_paths(extra: &[&str]) -> Vec<String> {
 pub fn build_engine_cli_args(
     engine_binary: &Path,
     search_paths: &[String],
-    claude_args: Vec<String>,
+    claude_args: &[String],
 ) -> Vec<String> {
     let mut args = vec![engine_binary.to_string_lossy().to_string()];
 
@@ -171,7 +171,7 @@ mod tests {
             "--print".to_string(),
         ];
 
-        let args = build_engine_cli_args(&engine, &search, claude_args);
+        let args = build_engine_cli_args(&engine, &search, &claude_args);
 
         assert_eq!(args[0], "/usr/bin/flowcoder-engine");
         assert_eq!(args[1], "--search-path");
@@ -188,7 +188,7 @@ mod tests {
         let search = vec!["/a".to_string(), "/b".to_string()];
         let claude_args = vec!["claude".to_string()];
 
-        let args = build_engine_cli_args(&engine, &search, claude_args);
+        let args = build_engine_cli_args(&engine, &search, &claude_args);
 
         assert_eq!(args[1], "--search-path");
         assert_eq!(args[2], "/a");

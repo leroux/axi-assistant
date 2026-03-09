@@ -186,16 +186,15 @@ impl CliSession {
         let is_alive: Box<dyn Fn() -> bool + Send + Sync> = Box::new(move || {
             if let Some(pid) = pid {
                 // Signal 0 checks if process exists without sending a signal
-                signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+                signal::kill(Pid::from_raw(pid.cast_signed()), None).is_ok()
             } else {
                 false
             }
         });
 
         // Build the stdin sender
-        let stdin_sender = stdin_tx.clone();
         let send_stdin: SendStdinFn = Box::new(move |_name, data| {
-            let tx = stdin_sender.clone();
+            let tx = stdin_tx.clone();
             Box::pin(async move {
                 let mut bytes = serde_json::to_vec(&data)?;
                 bytes.push(b'\n');
@@ -208,7 +207,7 @@ impl CliSession {
         let signal_pid = pid;
         let signal_fn: SignalFn = Box::new(move |sig| {
             if let Some(pid) = signal_pid {
-                signal::kill(Pid::from_raw(pid as i32), sig).is_ok()
+                signal::kill(Pid::from_raw(pid.cast_signed()), sig).is_ok()
             } else {
                 false
             }
@@ -219,7 +218,7 @@ impl CliSession {
         let kill: KillFn = Box::new(move |_name| {
             Box::pin(async move {
                 if let Some(pid) = kill_pid {
-                    signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
+                    signal::kill(Pid::from_raw(pid.cast_signed()), Signal::SIGTERM).ok();
                 }
                 Ok(())
             })

@@ -952,11 +952,6 @@ async fn handle_restart_agent(ctx: &Context, command: &CommandInteraction, state
 }
 
 async fn handle_flowchart(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    if !state.config.flowcoder_enabled {
-        let _ = respond_ephemeral(ctx, command, "Flowcoder is not enabled.").await;
-        return;
-    }
-
     let agent_name = if let Some(n) = resolve_agent_name(command, state).await {
         n
     } else {
@@ -964,30 +959,16 @@ async fn handle_flowchart(ctx: &Context, command: &CommandInteraction, state: &B
         return;
     };
 
-    // Verify agent is a flowcoder agent
-    let (is_flowcoder, is_busy) = {
+    let is_busy = {
         let sessions = state.sessions.lock().await;
         if let Some(session) = sessions.get(&agent_name) {
-            (
-                session.agent_type == "flowcoder",
-                crate::lifecycle::is_processing(session),
-            )
+            crate::lifecycle::is_processing(session)
         } else {
             let _ = respond_ephemeral(ctx, command, &format!("Agent '{agent_name}' not found.")).await;
             return;
         }
     };
     let channel_id = state.channel_for_agent(&agent_name).await;
-
-    if !is_flowcoder {
-        let _ = respond_ephemeral(
-            ctx,
-            command,
-            "Flowcharts are only available for **flowcoder** agents.",
-        )
-        .await;
-        return;
-    }
 
     if is_busy {
         let _ = respond_ephemeral(
@@ -1030,12 +1011,7 @@ async fn handle_flowchart(ctx: &Context, command: &CommandInteraction, state: &B
     .await;
 }
 
-async fn handle_flowchart_list(ctx: &Context, command: &CommandInteraction, state: &BotState) {
-    if !state.config.flowcoder_enabled {
-        let _ = respond_ephemeral(ctx, command, "Flowcoder is not enabled.").await;
-        return;
-    }
-
+async fn handle_flowchart_list(ctx: &Context, command: &CommandInteraction, _state: &BotState) {
     let commands = crate::flowcoder::list_flowchart_commands();
 
     if commands.is_empty() {

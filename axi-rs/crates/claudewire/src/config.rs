@@ -102,29 +102,29 @@ impl Config {
             args.extend(["--permission-mode".into(), self.permission_mode.clone()]);
         }
 
-        if let Some(prompt) = &self.append_system_prompt {
-            if !prompt.is_empty() {
-                args.extend(["--append-system-prompt".into(), prompt.clone()]);
-            }
+        if let Some(prompt) = &self.append_system_prompt
+            && !prompt.is_empty()
+        {
+            args.extend(["--append-system-prompt".into(), prompt.clone()]);
         }
 
         // MCP servers — merge SDK + external into one --mcp-config
         {
             let mut merged = serde_json::Map::new();
 
-            if let Some(sdk) = &self.mcp_servers.sdk {
-                if let Some(obj) = sdk.as_object() {
-                    for (k, v) in obj {
-                        merged.insert(k.clone(), v.clone());
-                    }
+            if let Some(sdk) = &self.mcp_servers.sdk
+                && let Some(obj) = sdk.as_object()
+            {
+                for (k, v) in obj {
+                    merged.insert(k.clone(), v.clone());
                 }
             }
 
-            if let Some(ext) = &self.mcp_servers.external {
-                if let Some(obj) = ext.as_object() {
-                    for (k, v) in obj {
-                        merged.insert(k.clone(), v.clone());
-                    }
+            if let Some(ext) = &self.mcp_servers.external
+                && let Some(obj) = ext.as_object()
+            {
+                for (k, v) in obj {
+                    merged.insert(k.clone(), v.clone());
                 }
             }
 
@@ -178,7 +178,7 @@ impl Config {
     /// Build environment variables for the Claude CLI process.
     ///
     /// This is THE place that knows about SDK env var names.
-    /// Sets what claude-code-sdk's SubprocessCLITransport.connect() sets.
+    /// Sets what claude-code-sdk's `SubprocessCLITransport.connect()` sets.
     pub fn to_env(&self) -> HashMap<String, String> {
         let mut env = HashMap::new();
 

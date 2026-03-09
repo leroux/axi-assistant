@@ -5,13 +5,13 @@ use tracing::{debug, info, warn};
 
 use crate::state::BotState;
 use crate::types::{AgentSession, HubError, QueuedMessage};
-use claudewire::events::ActivityState;
+use crate::activity::ActivityState;
 
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-pub fn is_awake(session: &AgentSession) -> bool {
+pub const fn is_awake(session: &AgentSession) -> bool {
     session.awake
 }
 
@@ -27,10 +27,33 @@ pub fn reset_activity(session: &mut AgentSession) {
     session.last_activity = Utc::now();
     session.idle_reminder_count = 0;
     session.activity = ActivityState {
-        phase: claudewire::events::Phase::Starting,
+        phase: crate::activity::Phase::Starting,
         query_started: Some(Utc::now()),
         ..Default::default()
     };
+}
+
+// ---------------------------------------------------------------------------
+// Awaiting input sentinel
+// ---------------------------------------------------------------------------
+
+pub async fn post_awaiting_input(state: &BotState, name: &str) {
+    if !state.config.show_awaiting_input {
+        return;
+    }
+    let mentions: String = state
+        .config
+        .allowed_user_ids
+        .iter()
+        .map(|uid| format!("<@{uid}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::frontend::post_system(
+        state,
+        name,
+        &format!("Bot has finished responding and is awaiting input. {mentions}"),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------

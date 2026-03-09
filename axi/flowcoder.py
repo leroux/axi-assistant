@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import shutil
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import ClaudeAgentOptions
@@ -126,12 +126,12 @@ def _build_claude_cli_args(options: Any) -> list[str]:
     elif isinstance(sp, str):
         cmd.extend(["--system-prompt", sp])
     elif isinstance(sp, dict):
-        sp_d: dict[str, Any] = sp
+        sp_d = cast("dict[str, Any]", sp)
         if sp_d.get("type") == "preset" and "append" in sp_d:
             cmd.extend(["--append-system-prompt", str(sp_d["append"])])
 
     # Tools base set
-    tools = getattr(options, "tools", None)
+    tools: list[str] | str | None = getattr(options, "tools", None)
     if tools is not None:
         if isinstance(tools, list):
             cmd.extend(["--tools", ",".join(tools) if tools else ""])
@@ -195,10 +195,10 @@ def _build_claude_cli_args(options: Any) -> list[str]:
     mcp = getattr(options, "mcp_servers", None)
     if mcp:
         if isinstance(mcp, dict):
-            mcp_d: dict[str, Any] = mcp
+            mcp_d = cast("dict[str, Any]", mcp)
             servers_for_cli: dict[str, Any] = {}
             for name, srv_config in mcp_d.items():
-                if isinstance(srv_config, dict) and srv_config.get("type") == "sdk":
+                if isinstance(srv_config, dict) and cast("dict[str, Any]", srv_config).get("type") == "sdk":
                     # Skip SDK MCP servers — engine can't do SDK handshake
                     continue
                 servers_for_cli[name] = srv_config
@@ -257,7 +257,7 @@ def _build_claude_cli_args(options: Any) -> list[str]:
     # Output format / JSON schema
     output_fmt = getattr(options, "output_format", None)
     if isinstance(output_fmt, dict):
-        fmt_d: dict[str, Any] = output_fmt
+        fmt_d = cast("dict[str, Any]", output_fmt)
         if fmt_d.get("type") == "json_schema":
             schema: Any = fmt_d.get("schema")
             if schema is not None:

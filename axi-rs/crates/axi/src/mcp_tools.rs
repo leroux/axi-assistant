@@ -4,6 +4,7 @@
 //! Tool handlers capture shared state via Arc closures.
 
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::Arc;
 
 use chrono::{Datelike, Local, Timelike, Weekday};
@@ -47,20 +48,20 @@ fn parse_id(args: &ToolArgs, key: &str) -> Option<u64> {
 fn build_spawned_prompt(
     state: &BotState,
     cwd: &str,
-    packs: Option<Vec<String>>,
-    compact_instructions: Option<String>,
-) -> Option<Value> {
-    let pack_strs: Option<Vec<&str>> = packs.as_ref().map(|v| v.iter().map(String::as_str).collect());
+    packs: Option<&[String]>,
+    compact_instructions: Option<&str>,
+) -> Value {
+    let pack_strs: Option<Vec<&str>> = packs.map(|v| v.iter().map(String::as_str).collect());
     let preset = state.prompt_builder.spawned_agent_prompt(
         cwd,
         pack_strs.as_deref(),
-        compact_instructions.as_deref(),
+        compact_instructions,
     );
-    Some(json!({
+    json!({
         "type": "custom_preset",
         "preset": preset.preset,
         "custom_instructions": preset.append,
-    }))
+    })
 }
 
 /// Build the MCP servers JSON config for an agent.
@@ -180,7 +181,7 @@ pub fn create_utils_server(state: Arc<BotState>) -> McpServer {
     let cfg = Arc::new(state.config.clone());
 
     // get_date_and_time
-    let cfg_dt = cfg.clone();
+    let cfg_dt = cfg;
     server.add_tool(
         "get_date_and_time",
         "Get the current date and time with logical day/week calculations. \
@@ -577,9 +578,9 @@ pub fn create_master_server(state: Arc<BotState>) -> McpServer {
                 let mcp_names_for_config = mcp_server_names.clone();
 
                 // Build system prompt
-                let system_prompt = build_spawned_prompt(
-                    &state, &cwd, packs, compact_instructions,
-                );
+                let system_prompt = Some(build_spawned_prompt(
+                    &state, &cwd, packs.as_deref(), compact_instructions.as_deref(),
+                ));
 
                 // Build MCP servers config
                 let mcp_servers_cfg = build_mcp_servers(&state, &name, &cwd, mcp_server_names);
@@ -768,7 +769,7 @@ pub fn create_master_server(state: Arc<BotState>) -> McpServer {
 
                 // Rebuild with fresh prompt but same session_id
                 let is_master = name == state.config.master_agent_name;
-                let system_prompt = build_spawned_prompt(&state, &cwd, None, None);
+                let system_prompt = Some(build_spawned_prompt(&state, &cwd, None, None));
                 crate::registry::rebuild_session(
                     &state,
                     &name,
@@ -908,7 +909,7 @@ pub fn create_agent_server(state: Arc<BotState>) -> McpServer {
                 let cwd = get_opt_str(&args, "cwd")
                     .unwrap_or_else(|| default_agent_cwd(&state, &name));
 
-                let system_prompt = build_spawned_prompt(&state, &cwd, None, None);
+                let system_prompt = Some(build_spawned_prompt(&state, &cwd, None, None));
                 let mcp_servers_cfg = build_mcp_servers(&state, &name, &cwd, None);
 
                 if resume.is_some() {
@@ -1038,7 +1039,7 @@ pub fn create_agent_server(state: Arc<BotState>) -> McpServer {
                     }
                 };
 
-                let system_prompt = build_spawned_prompt(&state, &cwd, None, None);
+                let system_prompt = Some(build_spawned_prompt(&state, &cwd, None, None));
                 crate::registry::rebuild_session(
                     &state,
                     &name,
@@ -1070,7 +1071,7 @@ pub fn create_agent_server(state: Arc<BotState>) -> McpServer {
 // SDK MCP config builder — determines which MCP servers each agent gets
 // ---------------------------------------------------------------------------
 
-/// Convert an McpServer to the JSON config entry for `--mcp-config`.
+/// Convert an `McpServer` to the JSON config entry for `--mcp-config`.
 /// SDK servers use `{"type": "sdk", "name": "...", "version": "..."}`.
 fn sdk_server_json(server: &McpServer) -> Value {
     json!({
@@ -1088,8 +1089,8 @@ fn sdk_server_json(server: &McpServer) -> Value {
 ///
 /// Server assignment (matching Python `_build_mcp_servers` + `sdk_mcp_servers_for_cwd`):
 /// - All agents: utils, schedule, discord
-/// - Master: axi (master version with restart + send_message)
-/// - Regular agents: axi (spawned version without restart/send_message)
+/// - Master: axi (master version with restart + `send_message`)
+/// - Regular agents: axi (spawned version without restart/`send_message`)
 pub fn build_sdk_mcp_config(
     state: &Arc<BotState>,
     agent_name: &str,
@@ -1154,8 +1155,8 @@ pub fn build_sdk_mcp_config(
 fn create_flowcoder_server(state: Arc<BotState>, agent_name: String) -> McpServer {
     let mut server = McpServer::new("flowcoder", "1.0.0");
 
-    let state_run = state.clone();
-    let agent_name_run = agent_name.clone();
+    let state_run = state;
+    let agent_name_run = agent_name;
     server.add_tool(
         "run_flowchart",
         "Run a flowchart command. The flowchart will execute after the current turn completes, preserving conversation context.",
@@ -1190,8 +1191,7 @@ fn create_flowcoder_server(state: Arc<BotState>, agent_name: String) -> McpServe
                 if !exists {
                     let available: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
                     return ToolResult::error(format!(
-                        "Unknown flowchart command '{}'. Available: {:?}",
-                        command, available
+                        "Unknown flowchart command '{command}'. Available: {available:?}"
                     ));
                 }
 
@@ -1204,8 +1204,7 @@ fn create_flowcoder_server(state: Arc<BotState>, agent_name: String) -> McpServe
                 }
 
                 ToolResult::text(format!(
-                    "Flowchart '{}' queued with args '{}'. Will run after this turn completes.",
-                    command, args_str
+                    "Flowchart '{command}' queued with args '{args_str}'. Will run after this turn completes."
                 ))
             }
         },
@@ -1226,9 +1225,9 @@ fn create_flowcoder_server(state: Arc<BotState>, agent_name: String) -> McpServe
                 let mut output = String::from("Available flowcharts:\n");
                 for cmd in &commands {
                     if cmd.description.is_empty() {
-                        output.push_str(&format!("  /{}\n", cmd.name));
+                        let _ = writeln!(output, "  /{}", cmd.name);
                     } else {
-                        output.push_str(&format!("  /{} — {}\n", cmd.name, cmd.description));
+                        let _ = writeln!(output, "  /{} — {}", cmd.name, cmd.description);
                     }
                 }
                 ToolResult::text(output)

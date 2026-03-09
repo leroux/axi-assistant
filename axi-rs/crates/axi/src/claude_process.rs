@@ -10,20 +10,20 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::activity;
 use crate::procmux_wire::translate_process_msg;
 use crate::state::BotState;
 use crate::streaming;
 use crate::types::MessageContent;
 use claudewire::config::{Config as CliConfig, McpServers};
-use claudewire::events;
-use claudewire::transport::BridgeTransport;
+use claudewire::session::CliSession;
 
 // ---------------------------------------------------------------------------
 // Transport registry
 // ---------------------------------------------------------------------------
 
-/// Shared per-agent `BridgeTransport` storage.
-pub type TransportMap = Mutex<HashMap<String, Arc<Mutex<BridgeTransport>>>>;
+/// Shared per-agent `CliSession` storage.
+pub type TransportMap = Mutex<HashMap<String, Arc<Mutex<CliSession>>>>;
 
 /// Create a new empty transport map.
 pub fn new_transport_map() -> TransportMap {
@@ -54,7 +54,7 @@ pub async fn create_client(
     let reconnecting = resume_session_id.is_some();
 
     // Get session config
-    let (cwd, agent_type, system_prompt, mcp_servers, sdk_mcp_json, plan_mode) = {
+    let (cwd, _agent_type, system_prompt, mcp_servers, sdk_mcp_json, plan_mode) = {
         let sessions = state.sessions.lock().await;
         let session = sessions
             .get(name)
@@ -86,23 +86,20 @@ pub async fn create_client(
         plan_mode,
     );
 
-    let cli_args = if agent_type == "flowcoder" && state.config.flowcoder_enabled {
-        match crate::flowcoder::get_engine_binary() {
-            Some(engine) => {
-                let search_paths = crate::flowcoder::get_search_paths(&[]);
-                info!("Spawning flowcoder engine for '{}': {}", name, engine.display());
-                // Flowcoder strips SDK MCP servers (engine can't do SDK handshake)
-                let mut fc_config = cli_config.clone();
-                fc_config.mcp_servers.sdk = None;
-                crate::flowcoder::build_engine_cli_args(&engine, &search_paths, fc_config.to_cli_args())
-            }
-            None => {
-                warn!("flowcoder-engine not found on PATH, falling back to claude CLI for '{}'", name);
-                cli_config.to_cli_args()
-            }
+    let cli_args = match crate::flowcoder::get_engine_binary() {
+        Some(engine) => {
+            let search_paths = crate::flowcoder::get_search_paths(&[]);
+            info!("Spawning flowcoder engine for '{}': {}", name, engine.display());
+            // Flowcoder strips SDK MCP servers (engine can't do SDK handshake)
+            let mut fc_config = cli_config.clone();
+            fc_config.mcp_servers.sdk = None;
+            crate::flowcoder::build_engine_cli_args(&engine, &search_paths, &fc_config.to_cli_args())
         }
-    } else {
-        cli_config.to_cli_args()
+        None => {
+            anyhow::bail!(
+                "flowcoder-engine binary not found on PATH for agent '{name}'"
+            );
+        }
     };
 
     // Build environment — SDK control protocol vars + system essentials
@@ -145,10 +142,10 @@ pub async fn create_client(
         }
     });
 
-    // Build BridgeTransport closures
+    // Build CliSession closures
     let conn_for_stdin = conn.clone();
     let stdin_name = name.to_string();
-    let send_stdin: claudewire::transport::SendStdinFn = Box::new(move |_name, data| {
+    let send_stdin: claudewire::session::SendStdinFn = Box::new(move |_name, data| {
         let conn = conn_for_stdin.clone();
         let name = stdin_name.clone();
         Box::pin(async move { conn.send_stdin(&name, data).await })
@@ -156,7 +153,7 @@ pub async fn create_client(
 
     let conn_for_kill = conn.clone();
     let kill_name = name.to_string();
-    let kill: claudewire::transport::KillFn = Box::new(move |_name| {
+    let kill: claudewire::session::KillFn = Box::new(move |_name| {
         let conn = conn_for_kill.clone();
         let name = kill_name.clone();
         Box::pin(async move { conn.kill(&name).await.map(|_| ()) })
@@ -166,7 +163,7 @@ pub async fn create_client(
     let is_alive: Box<dyn Fn() -> bool + Send + Sync> =
         Box::new(move || conn_for_alive.is_alive());
 
-    let transport = BridgeTransport::new(
+    let transport = CliSession::new(
         name.to_string(),
         event_rx,
         event_tx,
@@ -236,7 +233,7 @@ pub async fn send_query(state: &BotState, name: &str, content: &MessageContent) 
         MessageContent::Blocks(blocks) => serde_json::Value::Array(blocks.clone()),
     };
 
-    let msg = events::make_user_message(&json_content);
+    let msg = activity::make_user_message(&json_content);
     let msg_str = serde_json::to_string(&msg).unwrap_or_default();
 
     let mut transport = transport.lock().await;
@@ -331,7 +328,7 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
         {
             let mut sessions = state.sessions.lock().await;
             if let Some(session) = sessions.get_mut(agent_name) {
-                events::update_activity(&mut session.activity, &event);
+                activity::update_activity(&mut session.activity, &event);
             }
         }
 
@@ -544,7 +541,7 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
             }
 
             "rate_limit_event" => {
-                if let Some(parsed) = events::parse_rate_limit_event(&event) {
+                if let Some(parsed) = activity::parse_rate_limit_event(&event) {
                     debug!(
                         "Rate limit for '{}': type={} status={} util={:?}",
                         agent_name,
@@ -704,7 +701,7 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
             // ---- Engine-specific events (flowchart execution) ----
             "flowchart_start" => {
                 let command = event.get("command").and_then(|v| v.as_str()).unwrap_or("?");
-                let block_count = event.get("block_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let block_count = event.get("block_count").and_then(serde_json::Value::as_u64).unwrap_or(0);
                 info!(
                     "Flowchart started for '{}': command={}, blocks={}",
                     agent_name, command, block_count
@@ -718,8 +715,8 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
             "block_start" => {
                 let block_name = event.get("block_name").and_then(|v| v.as_str()).unwrap_or("?");
                 let block_type = event.get("block_type").and_then(|v| v.as_str()).unwrap_or("?");
-                let block_index = event.get("block_index").and_then(|v| v.as_u64()).unwrap_or(0);
-                let total = event.get("total_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+                let block_index = event.get("block_index").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let total = event.get("total_blocks").and_then(serde_json::Value::as_u64).unwrap_or(0);
                 debug!(
                     "Block started for '{}': {} ({}) [{}/{}]",
                     agent_name, block_name, block_type, block_index + 1, total
@@ -728,8 +725,8 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
 
             "block_complete" => {
                 let block_name = event.get("block_name").and_then(|v| v.as_str()).unwrap_or("?");
-                let success = event.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-                let duration_ms = event.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                let success = event.get("success").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                let duration_ms = event.get("duration_ms").and_then(serde_json::Value::as_u64).unwrap_or(0);
                 debug!(
                     "Block complete for '{}': {} success={} ({}ms)",
                     agent_name, block_name, success, duration_ms
@@ -777,9 +774,9 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
 
             "flowchart_complete" => {
                 let status = event.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                let blocks_executed = event.get("blocks_executed").and_then(|v| v.as_u64()).unwrap_or(0);
-                let duration_ms = event.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-                let cost = event.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let blocks_executed = event.get("blocks_executed").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let duration_ms = event.get("duration_ms").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let cost = event.get("cost_usd").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
                 info!(
                     "Flowchart complete for '{}': status={}, blocks={}, {}ms, ${:.4}",
                     agent_name, status, blocks_executed, duration_ms, cost
@@ -858,7 +855,7 @@ fn should_auto_compact(context_tokens: u64, context_window: u64, threshold: f64)
 async fn check_auto_compact(
     state: &BotState,
     agent_name: &str,
-    transport: &Arc<Mutex<BridgeTransport>>,
+    transport: &Arc<Mutex<CliSession>>,
 ) {
     let (context_tokens, context_window) = {
         let sessions = state.sessions.lock().await;
@@ -891,14 +888,15 @@ async fn check_auto_compact(
     // Send /compact as user message
     let compact_msg = MessageContent::Text("/compact".to_string());
     let json_content = serde_json::Value::String("/compact".to_string());
-    let msg = events::make_user_message(&json_content);
+    let msg = activity::make_user_message(&json_content);
     let msg_str = serde_json::to_string(&msg).unwrap_or_default();
 
-    let mut transport = transport.lock().await;
-    if let Err(e) = transport.write(&msg_str).await {
-        warn!("Failed to send auto-compact for '{}': {}", agent_name, e);
+    {
+        let mut session = transport.lock().await;
+        if let Err(e) = session.write(&msg_str).await {
+            warn!("Failed to send auto-compact for '{}': {}", agent_name, e);
+        }
     }
-    drop(transport);
 
     // Note: The compact response will be handled by the next stream_response call
     // since the caller (process_message) will loop if there's more to process.
@@ -919,7 +917,7 @@ async fn handle_permission_request(
     request_id: &str,
     tool_name: &str,
     tool_input: &serde_json::Value,
-    _transport: &Arc<Mutex<BridgeTransport>>,
+    _transport: &Arc<Mutex<CliSession>>,
 ) -> serde_json::Value {
     let channel_id = match state.channel_for_agent(agent_name).await {
         Some(ch) => ch.get(),
@@ -1207,7 +1205,7 @@ async fn handle_exit_plan_mode(
 /// Handle an MCP message from Claude CLI for an SDK-type MCP server.
 ///
 /// Routes JSON-RPC methods (`initialize`, `tools/list`, `tools/call`,
-/// `notifications/initialized`) to the appropriate McpServer instance
+/// `notifications/initialized`) to the appropriate `McpServer` instance
 /// stored on the agent's session.
 async fn handle_mcp_message(
     state: &BotState,
@@ -1292,7 +1290,7 @@ async fn handle_mcp_message(
             let mut response_data = serde_json::json!({
                 "content": result.content,
             });
-            if let Some(true) = result.is_error {
+            if result.is_error == Some(true) {
                 response_data["is_error"] = serde_json::json!(true);
             }
 
@@ -1324,7 +1322,7 @@ async fn handle_mcp_message(
 
 /// Build a `claudewire::config::Config` from session state.
 ///
-/// Every field is set explicitly — no hidden defaults from Config::default().
+/// Every field is set explicitly — no hidden defaults from `Config::default()`.
 /// This is Axi's policy for how to invoke Claude CLI.
 fn build_cli_config(
     config_path: &std::path::Path,
@@ -1355,10 +1353,12 @@ fn build_cli_config(
         effort: Some("high".into()),
         sandbox_enabled: true,
         auto_allow_bash_if_sandboxed: true,
-        resume: resume_session_id.map(|s| s.to_string()),
+        resume: resume_session_id.map(ToString::to_string),
         include_partial_messages: true,
         verbose: true,
         debug_to_stderr: true,
+        print_mode: false,
+        replay_user_messages: false,
     }
 }
 
@@ -1802,7 +1802,7 @@ mod tests {
     async fn permission_request_auto_allows_unknown_tools() {
         let (_server, state) = setup_state().await;
         let transport = Arc::new(Mutex::new(
-            BridgeTransport::new(
+            CliSession::new(
                 "test-agent".to_string(),
                 tokio::sync::mpsc::unbounded_channel().1,
                 tokio::sync::mpsc::unbounded_channel().0,
@@ -1826,7 +1826,7 @@ mod tests {
     async fn permission_request_no_channel_auto_allows() {
         let (_server, state) = setup_state().await;
         let transport = Arc::new(Mutex::new(
-            BridgeTransport::new(
+            CliSession::new(
                 "unknown-agent".to_string(),
                 tokio::sync::mpsc::unbounded_channel().1,
                 tokio::sync::mpsc::unbounded_channel().0,
@@ -1862,7 +1862,7 @@ mod tests {
         }
 
         let transport = Arc::new(Mutex::new(
-            BridgeTransport::new(
+            CliSession::new(
                 "test-agent".to_string(),
                 tokio::sync::mpsc::unbounded_channel().1,
                 tokio::sync::mpsc::unbounded_channel().0,
@@ -1900,7 +1900,7 @@ mod tests {
         }
 
         let transport = Arc::new(Mutex::new(
-            BridgeTransport::new(
+            CliSession::new(
                 "test-agent".to_string(),
                 tokio::sync::mpsc::unbounded_channel().1,
                 tokio::sync::mpsc::unbounded_channel().0,
@@ -1935,7 +1935,7 @@ mod tests {
         }
 
         let transport = Arc::new(Mutex::new(
-            BridgeTransport::new(
+            CliSession::new(
                 "test-agent".to_string(),
                 tokio::sync::mpsc::unbounded_channel().1,
                 tokio::sync::mpsc::unbounded_channel().0,

@@ -14,7 +14,7 @@ use crate::lifecycle;
 use crate::registry;
 use crate::state::BotState;
 use crate::types::{HubError, MessageContent};
-use claudewire::events::ActivityState;
+use crate::activity::ActivityState;
 
 /// Callback: consume the SDK stream, render to user, return error or None.
 pub type StreamHandlerFn = Arc<
@@ -225,7 +225,7 @@ pub async fn run_initial_prompt(
             if let Some(session) = sessions.get_mut(name) {
                 session.last_activity = Utc::now();
                 session.activity = ActivityState {
-                    phase: claudewire::events::Phase::Starting,
+                    phase: crate::activity::Phase::Starting,
                     query_started: Some(Utc::now()),
                     ..Default::default()
                 };
@@ -278,6 +278,7 @@ pub async fn run_initial_prompt(
         process_message_queue(state, name, stream_handler).await;
     }
 
+    lifecycle::post_awaiting_input(state, name).await;
     lifecycle::sleep_agent(state, name, false).await;
 }
 

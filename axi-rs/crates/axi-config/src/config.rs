@@ -163,7 +163,7 @@ impl Config {
             killed_category_name: "Killed".to_string(),
             master_agent_name: "axi-master".to_string(),
             default_agent_type: std::env::var("DEFAULT_AGENT_TYPE")
-                .unwrap_or_else(|_| "claude_code".to_string()),
+                .unwrap_or_else(|_| "flowcoder".to_string()),
             idle_reminder_thresholds: vec![
                 Duration::from_secs(30 * 60),
                 Duration::from_secs(3 * 3600),
@@ -217,7 +217,7 @@ impl Config {
             axi_category_name: "Axi".to_string(),
             killed_category_name: "Killed".to_string(),
             master_agent_name: "axi-master".to_string(),
-            default_agent_type: "claude_code".to_string(),
+            default_agent_type: "flowcoder".to_string(),
             idle_reminder_thresholds: vec![Duration::from_secs(1800)],
             allowed_cwds: vec![base_dir.to_path_buf()],
             admin_allowed_cwds: Vec::new(),

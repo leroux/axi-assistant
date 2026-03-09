@@ -61,7 +61,7 @@ pub struct BotState {
     pub agent_channels: RwLock<HashMap<String, ChannelId>>,
     /// Guild infrastructure (categories), set during `on_ready`.
     pub infra: RwLock<Option<GuildInfrastructure>>,
-    /// Per-agent `BridgeTransport` storage.
+    /// Per-agent `CliSession` storage.
     pub transports: claude_process::TransportMap,
     /// Prompt builder for constructing system prompts.
     pub prompt_builder: PromptBuilder,

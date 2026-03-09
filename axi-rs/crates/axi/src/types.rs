@@ -9,7 +9,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
-use claudewire::events::ActivityState;
+use crate::activity::ActivityState;
 
 use crate::mcp_protocol::McpServer;
 
@@ -77,7 +77,7 @@ pub struct AgentSession {
     /// SDK MCP servers available to this agent (handled in-process via control protocol).
     pub sdk_mcp_servers: HashMap<String, McpServer>,
     /// Pending flowchart invocation queued by the `run_flowchart` MCP tool.
-    /// Format: (command_name, args). Injected after the current turn completes.
+    /// Format: (`command_name`, args). Injected after the current turn completes.
     pub pending_flowchart: Option<(String, String)>,
 }
 
@@ -85,7 +85,7 @@ impl AgentSession {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            agent_type: "claude_code".to_string(),
+            agent_type: "flowcoder".to_string(),
             awake: false,
             cwd: String::new(),
             query_lock: Arc::new(Mutex::new(())),
@@ -111,7 +111,7 @@ impl AgentSession {
         }
     }
 
-    pub fn is_awake(&self) -> bool {
+    pub const fn is_awake(&self) -> bool {
         self.awake
     }
 }
