@@ -1,2 +1,0 @@
-extend = "axi-py/pyproject.toml"
-extend-exclude = ["research"]

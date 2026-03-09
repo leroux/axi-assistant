@@ -3,7 +3,7 @@
 ## Test Instance Safety
 
 - **NEVER tear down or stop a test instance created by others without explicit user approval.** Instances may be in active use by other agents or the user. Always ask first.
-- When all bot tokens are in use, use `axi_test.py up <name> --wait` to reserve a slot and wait (polls every 10s, times out after 2 hours). **Do not** automatically tear down an existing instance to free a slot.
+- When all bot tokens are in use, use `axi_test.py up <name> --wait` (from the repo root) to reserve a slot and wait (polls every 10s, times out after 2 hours). **Do not** automatically tear down an existing instance to free a slot.
 - If `--wait` times out, ask the user how to proceed.
 - **Always tear down your own test instances** after you're done with them so the slot is available for other agents.
 - **NEVER restart, stop, or signal the production Axi bot process.** You must only restart your own test instances via `axi_test.py restart <name>`. Do not use `systemctl restart axi-bot`, `kill`, or any other method to restart the main bot. Only the master agent (axi-master) can restart itself via `axi_restart`. If your task requires a production restart, ask the user to do it.
@@ -26,14 +26,14 @@ Humans using Claude Code on the server can edit your code directly (the supervis
 
 Run these via Bash:
 
-- **`uv run python axi_test.py up <name> [--guild GUILD] [--wait] [--wait-timeout SECS]`** — Reserve a bot/guild slot for a test instance. Writes `.env` and creates the data directory. Use `--wait` to poll until a bot token slot is available (default timeout: 2 hours).
-- **`uv run python axi_test.py down <name>`** — Release a bot/guild reservation.
-- **`uv run python axi_test.py restart <name>`** — Restart a test instance after code changes.
-- **`uv run python axi_test.py list`** — Show all test instances and their status.
-- **`uv run python axi_test.py merge [-m MSG] [--timeout SECS]`** — Squash-merge current branch into main via merge queue. Waits for queue turn, verifies fast-forward, squashes all commits into one. If main moved ahead, exits with code 1 (rebase and resubmit). No-op if already in main.
-- **`uv run python axi_test.py queue [show|drop] [--all]`** — Show merge queue status, or drop entries. `drop` removes your branch; `drop --all` clears the queue.
-- **`uv run python axi_test.py msg <name> "<message>" [--timeout SECS]`** — Send a message to a test instance and wait for its response.
-- **`uv run python axi_test.py logs <name>`** — Tail the test instance's journal logs.
+- **`uv run --directory axi-py python ../axi_test.py up <name> [--guild GUILD] [--wait] [--wait-timeout SECS]`** — Reserve a bot/guild slot for a test instance. Writes `.env` and creates the data directory. Use `--wait` to poll until a bot token slot is available (default timeout: 2 hours).
+- **`uv run --directory axi-py python ../axi_test.py down <name>`** — Release a bot/guild reservation.
+- **`uv run --directory axi-py python ../axi_test.py restart <name>`** — Restart a test instance after code changes.
+- **`uv run --directory axi-py python ../axi_test.py list`** — Show all test instances and their status.
+- **`uv run --directory axi-py python ../axi_test.py merge [-m MSG] [--timeout SECS]`** — Squash-merge current branch into main via merge queue. Waits for queue turn, verifies fast-forward, squashes all commits into one. If main moved ahead, exits with code 1 (rebase and resubmit). No-op if already in main.
+- **`uv run --directory axi-py python ../axi_test.py queue [show|drop] [--all]`** — Show merge queue status, or drop entries. `drop` removes your branch; `drop --all` clears the queue.
+- **`uv run --directory axi-py python ../axi_test.py msg <name> "<message>" [--timeout SECS]`** — Send a message to a test instance and wait for its response.
+- **`uv run --directory axi-py python ../axi_test.py logs <name>`** — Tail the test instance's journal logs.
 
 ### Test Guilds
 
@@ -57,13 +57,13 @@ Exceptions: pure research agents, design-only agents, agents working on external
 
 **Agent workflow:**
 1. **Edit files** in cwd (all edits naturally go to the right place)
-2. **Reserve a test slot**: `uv run python axi_test.py up <name> --wait` — only when ready to test
-3. **Restart**: `uv run python axi_test.py restart <name>`
+2. **Reserve a test slot**: `uv run --directory axi-py python ../axi_test.py up <name> --wait` — only when ready to test
+3. **Restart**: `uv run --directory axi-py python ../axi_test.py restart <name>`
 4. **Test via Discord MCP**: Use `discord_send_message` to the test guild, then `discord_read_messages` or `python -m discordquery wait` to check the response
 5. **Iterate**: Repeat 1-4 until it works
-6. **Tear down**: `uv run python axi_test.py down <name>` — always release the slot when done testing
+6. **Tear down**: `uv run --directory axi-py python ../axi_test.py down <name>` — always release the slot when done testing
 7. **Commit**: `git add -A && git commit -m "description"`
-8. **Merge to main**: `uv run python axi_test.py merge` — submits to merge queue, waits for turn, squash-merges into main. If it exits with code 1 ("main has moved ahead"), run `git rebase main` and retry the merge.
+8. **Merge to main**: `uv run --directory axi-py python ../axi_test.py merge` — submits to merge queue, waits for turn, squash-merges into main. If it exits with code 1 ("main has moved ahead"), run `git rebase main` and retry the merge.
 9. **Restart**: Tell the parent to restart so it picks up the merged changes (spawned agents do NOT have `axi_restart` — only the master can restart itself)
 
 ### Fast Message Polling

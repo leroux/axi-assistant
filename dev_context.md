@@ -17,7 +17,7 @@ This file is appended to the system prompt for agents working on the axi-assista
 
 - `bot.py` — Main bot code (all instances run same code, behavior differs via env vars)
 - `supervisor.py` — Process supervisor (manages bot.py lifecycle)
-- `axi_test.py` — CLI for test instances (up/down/restart/list/merge/msg/logs)
+- `axi_test.py` — CLI for test instances (top-level; up/down/restart/list/merge/msg/logs)
 - `axi-test@.service` — Systemd template unit for Python test instances
 - `axi-rs/systemd/axi-test-bot@.service` — Systemd template unit for Rust test bot
 - `axi-rs/systemd/axi-test-procmux@.service` — Systemd template unit for Rust test procmux

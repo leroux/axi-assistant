@@ -9,7 +9,8 @@ import pytest
 
 from .helpers import Discord
 
-WORKTREE_DIR = Path(__file__).parent.parent
+AXI_PY_DIR = Path(__file__).parent.parent
+WORKTREE_DIR = AXI_PY_DIR.parent
 
 
 def _systemctl_env() -> dict[str, str]:
@@ -216,8 +217,8 @@ def test_shutdown_rejection(discord: Discord, master_channel: str):
 
     # Restart the instance regardless
     subprocess.run(
-        ["uv", "run", "python", "axi_test.py", "restart", "smoke-test"],
-        cwd=str(WORKTREE_DIR),
+        ["uv", "run", "python", "../axi_test.py", "restart", "smoke-test"],
+        cwd=str(AXI_PY_DIR),
         capture_output=True,
         timeout=30,
     )
@@ -283,8 +284,8 @@ def test_channel_reconstruction(discord: Discord, master_channel: str):
     # Restart the instance
     latest = discord.latest_message_id(master_channel)
     subprocess.run(
-        ["uv", "run", "python", "axi_test.py", "restart", "smoke-test"],
-        cwd=str(WORKTREE_DIR),
+        ["uv", "run", "python", "../axi_test.py", "restart", "smoke-test"],
+        cwd=str(AXI_PY_DIR),
         capture_output=True,
         timeout=30,
     )

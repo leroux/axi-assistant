@@ -87,7 +87,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "test_*.py" = ["F841", "T20", "PT012"]  # test files: unused vars, print, complex pytest.raises
-"axi/axi_test.py" = ["T20"]     # CLI tool — print() is expected
 "packages/discordquery/discordquery/__main__.py" = ["T20"]  # CLI entry point
 "packages/discordquery/discordquery/query.py" = ["T20"]  # CLI tool
 "packages/discordquery/discordquery/wait.py" = ["T20"]   # CLI tool

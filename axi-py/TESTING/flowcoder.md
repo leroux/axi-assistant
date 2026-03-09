@@ -18,14 +18,14 @@ Flowcoder agents are a superset of Claude Code agents. They support normal conve
 cd /home/ubuntu/axi-tests/<worktree>
 
 # Create and start a test instance
-PYTHONPATH=. .venv/bin/python axi/axi_test.py up <name> --wait
+PYTHONPATH=. .venv/bin/python ../axi_test.py up <name> --wait
 
 # Add flowcoder config to the test instance .env
 echo 'FLOWCODER_ENABLED=true' >> /home/ubuntu/axi-tests/<name>/.env
 echo 'CLAUDE_MODEL=claude-haiku-4-5-20251001' >> /home/ubuntu/axi-tests/<name>/.env
 
 # Restart to pick up .env changes
-PYTHONPATH=. .venv/bin/python axi/axi_test.py restart <name>
+PYTHONPATH=. .venv/bin/python ../axi_test.py restart <name>
 ```
 
 ## Sending Messages
@@ -145,7 +145,7 @@ After spawning a flowcoder agent and interacting with it:
 
 ```bash
 # Restart the bot
-PYTHONPATH=. .venv/bin/python axi/axi_test.py restart <name>
+PYTHONPATH=. .venv/bin/python ../axi_test.py restart <name>
 ```
 
 Then check logs:
@@ -208,7 +208,7 @@ for c in client.get(f'/guilds/{GUILD}/channels').json():
 Always tear down test instances when done:
 
 ```bash
-PYTHONPATH=. .venv/bin/python axi/axi_test.py down <name>
+PYTHONPATH=. .venv/bin/python ../axi_test.py down <name>
 ```
 
 ## Key Architecture Notes

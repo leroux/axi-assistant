@@ -50,7 +50,7 @@ def _restart_bot() -> None:
     """Restart the bot with a clean session (no --resume)."""
     (INSTANCE_DIR / ".master_session_id").unlink(missing_ok=True)
     subprocess.run(
-        ["uv", "run", "python", "axi/axi_test.py", "restart", INSTANCE_NAME],
+        ["uv", "run", "python", "../axi_test.py", "restart", INSTANCE_NAME],
         cwd=str(AXI_PY_DIR),
         capture_output=True,
         timeout=30,
@@ -69,7 +69,7 @@ def instance_env():
     env_path = WORKTREE_DIR / ".env"
     if not env_path.exists():
         pytest.skip(
-            f"No .env file at {env_path}. Run `uv run python axi_test.py up {INSTANCE_NAME}` first."
+            f"No .env file at {env_path}. Run `uv run --directory axi-py python ../axi_test.py up {INSTANCE_NAME}` first."
         )
     return _read_env(env_path)
 
