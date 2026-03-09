@@ -7,13 +7,13 @@ repos:
     hooks:
       - id: fixit
         name: fixit
-        entry: uv run --no-sync python -m fixit lint
+        entry: uv run --directory axi-py --no-sync python -m fixit lint
         language: system
         types: [python]
         pass_filenames: true
       - id: pyright
         name: pyright
-        entry: uv run --no-sync pyright
+        entry: uv run --directory axi-py --no-sync pyright
         language: system
         types: [python]
         pass_filenames: false

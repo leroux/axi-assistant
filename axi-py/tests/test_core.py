@@ -244,10 +244,10 @@ def test_startup_notification(discord: Discord, master_channel: str, instance_en
     latest = discord.latest_message_id(master_channel)
 
     # Restart the instance
-    worktree = pytest.importorskip("pathlib").Path(__file__).parent.parent
+    axi_py_dir = pytest.importorskip("pathlib").Path(__file__).parent.parent
     subprocess.run(
         ["uv", "run", "python", "axi/axi_test.py", "restart", "smoke-test"],
-        cwd=str(worktree),
+        cwd=str(axi_py_dir),
         capture_output=True,
         timeout=30,
     )

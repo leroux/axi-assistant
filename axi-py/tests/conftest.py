@@ -9,7 +9,8 @@ import pytest
 
 from .helpers import Discord
 
-WORKTREE_DIR = Path(__file__).parent.parent
+AXI_PY_DIR = Path(__file__).parent.parent
+WORKTREE_DIR = AXI_PY_DIR.parent
 DATA_DIR = WORKTREE_DIR.parent / f"{WORKTREE_DIR.name}-data"
 TEST_CONFIG = Path.home() / ".config/axi/test-config.json"
 INSTANCE_NAME = "smoke-test"
@@ -50,7 +51,7 @@ def _restart_bot() -> None:
     (INSTANCE_DIR / ".master_session_id").unlink(missing_ok=True)
     subprocess.run(
         ["uv", "run", "python", "axi/axi_test.py", "restart", INSTANCE_NAME],
-        cwd=str(WORKTREE_DIR),
+        cwd=str(AXI_PY_DIR),
         capture_output=True,
         timeout=30,
     )
