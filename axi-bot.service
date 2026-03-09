@@ -1,18 +1,22 @@
 [Unit]
 Description=Axi Personal Assistant Discord Bot
-After=network-online.target
-Wants=network-online.target
+After=axi-procmux.service
+Wants=axi-procmux.service
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
-User=ubuntu
 WorkingDirectory=/home/ubuntu/axi-assistant
-ExecStart=/home/ubuntu/.local/bin/uv run python -m axi.supervisor
-ExecReload=kill -HUP $MAINPID
+EnvironmentFile=/home/ubuntu/axi-assistant/.env
+ExecStart=/bin/bash -c 'exec "$AXI_RS_BINARY"'
 Restart=always
-RestartSec=10
+RestartPreventExitStatus=0 SIGTERM
+SuccessExitStatus=42
+RestartSec=2
 TimeoutStopSec=15
-Environment="PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="HOME=/home/ubuntu"
+Environment="PATH=/home/ubuntu/.cargo/bin:/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [Install]
 WantedBy=default.target
