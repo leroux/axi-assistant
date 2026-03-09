@@ -9,6 +9,7 @@
 //! Stdin/stdout protocol: NDJSON, superset of claudewire stream-json.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -98,7 +99,16 @@ async fn main() -> Result<()> {
     let mut protocol = EngineProtocol::new();
     let mut message_rx = message_rx;
 
-    debug!("Engine started, entering main loop");
+    debug!("Engine started");
+
+    // Drain startup control_requests (SDK MCP initialization handshake).
+    // The inner Claude CLI may send control_request messages during MCP server
+    // initialization before it's ready for user input. We must handle these
+    // before entering the main loop, otherwise the inner CLI blocks waiting
+    // for control_responses that never come (deadlock).
+    drain_startup_control_requests(&mut session).await;
+
+    debug!("Startup drain complete, entering main loop");
 
     // Install SIGINT handler — trap and forward as cancel (don't die)
     let sigint_cancel = cancel.clone();
@@ -287,6 +297,80 @@ async fn try_run_flowchart(
         was_command: true,
         message_rx: cr_result.message_rx,
         buffered: cr_result.buffered,
+    }
+}
+
+/// Drain `control_request` messages from the inner CLI during startup.
+///
+/// When the inner Claude CLI has SDK MCP servers (`{"type":"sdk"}`), it sends
+/// `control_request` messages during MCP initialization (initialize, tools/list)
+/// before accepting any user input. These must be forwarded to the outer client
+/// and responses relayed back before the first user message is sent.
+///
+/// Without this drain, the engine's main loop blocks waiting for user messages
+/// while the inner CLI blocks waiting for `control_responses` — a deadlock.
+///
+/// With `--resume`, session loading can take 10–30 seconds before MCP init
+/// starts, so the first-message timeout must be generous.
+async fn drain_startup_control_requests(session: &mut EngineSession) {
+    let mut count = 0u32;
+    let mut got_any = false;
+
+    loop {
+        // Before any message: wait up to 60s for the inner CLI to start
+        // producing output (session loading with --resume can be slow).
+        // After the first message: 2s timeout between messages.
+        // After a control_request: 2s to allow for follow-up MCP handshake.
+        let timeout = if got_any {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(60)
+        };
+
+        let cli = match session.cli_mut() {
+            Some(c) => c,
+            None => break,
+        };
+
+        let result = tokio::time::timeout(timeout, cli.read_message()).await;
+
+        match result {
+            Ok(Some(msg)) => {
+                got_any = true;
+                let msg_type = msg
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+
+                if msg_type == "control_request" {
+                    count += 1;
+                    debug!("Startup: control_request #{count}");
+                    events::emit_raw(&msg);
+
+                    // Wait for the outer client to send back a control_response
+                    if let Some(response) = session.control_response_rx_mut().recv().await {
+                        if let Some(cli) = session.cli_mut() {
+                            let _ = cli.write(&response.to_string()).await;
+                        }
+                    } else {
+                        debug!("Startup: control_response channel closed");
+                        break;
+                    }
+                } else {
+                    debug!("Startup: forwarding {msg_type} message");
+                    events::emit_raw(&msg);
+                }
+            }
+            Ok(None) => {
+                debug!("Startup: inner CLI exited during drain");
+                break;
+            }
+            Err(_) => {
+                // Timeout — no more startup messages, initialization complete
+                debug!("Startup drain: handled {count} control_requests");
+                break;
+            }
+        }
     }
 }
 

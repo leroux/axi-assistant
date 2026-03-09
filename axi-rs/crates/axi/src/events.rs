@@ -181,6 +181,8 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
         // Agent is awake — send the query in a background task
         let state_ref = Arc::clone(&state);
         let name = agent_name.clone();
+        let user_msg_channel = msg.channel_id.get();
+        let user_msg_id = msg.id.get();
         let stream_handler = make_stream_handler(Arc::clone(&state));
         tokio::spawn(async move {
             let query_lock = {
@@ -216,6 +218,10 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
                                 session.last_activity = chrono::Utc::now();
                                 session.activity = crate::activity::ActivityState::default();
                             }
+                            // Add ✅ reaction to the user's message
+                            let _ = state_ref.discord_client.add_reaction(
+                                user_msg_channel, user_msg_id, "\u{2705}",
+                            ).await;
                         }
                         Ok(Err(e)) => {
                             warn!("Query error for '{}': {}", name, e);
@@ -238,15 +244,30 @@ pub async fn handle_message(ctx: &Context, msg: &Message) {
             }
         });
     } else {
-        debug!(
-            "Agent '{}' not awake, message queued",
-            agent_name
-        );
-        // Add hourglass reaction to indicate message is queued
-        let _ = state
-            .discord_client
-            .add_reaction(msg.channel_id.get(), msg.id.get(), "\u{23f3}")
-            .await;
+        // Check if this is a killed agent (session removed but channel mapping persists)
+        let is_killed = {
+            let sessions = state.sessions.lock().await;
+            !sessions.contains_key(&agent_name)
+        };
+        if is_killed {
+            let _ = state
+                .discord_client
+                .send_message(
+                    msg.channel_id.get(),
+                    &format!("*System:* Agent **{agent_name}** has been killed. Messages are no longer accepted."),
+                )
+                .await;
+        } else {
+            debug!(
+                "Agent '{}' not awake, message queued",
+                agent_name
+            );
+            // Add hourglass reaction to indicate message is queued
+            let _ = state
+                .discord_client
+                .add_reaction(msg.channel_id.get(), msg.id.get(), "\u{23f3}")
+                .await;
+        }
     }
 }
 

@@ -87,6 +87,10 @@ impl Config {
             args.push("--debug-to-stderr".into());
         }
 
+        // Route permission prompts through the control protocol (stdio)
+        // so the bot can auto-approve or ask the user via Discord.
+        args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
+
         if !self.model.is_empty() {
             args.extend(["--model".into(), self.model.clone()]);
         }

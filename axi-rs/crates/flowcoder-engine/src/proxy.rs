@@ -18,6 +18,11 @@ pub async fn proxy_query_session(
     session: &mut EngineSession,
     user_msg: &serde_json::Value,
 ) -> Option<serde_json::Value> {
+    // Drain any pending control_requests before writing the user message.
+    // This prevents the inner CLI from reading a user message on stdin when
+    // it's still expecting a control_response during MCP initialization.
+    drain_pending_messages(session).await;
+
     // Send user message to inner Claude
     let cli = session.cli_mut()?;
     if let Err(e) = cli.write(&user_msg.to_string()).await {
@@ -100,6 +105,45 @@ pub fn extract_command_name(msg: &serde_json::Value) -> Option<(String, String)>
 
     debug!("Detected potential flowchart command: /{name} {args}");
     Some((name, args))
+}
+
+/// Drain any buffered messages from the inner CLI, handling `control_request`s.
+///
+/// Uses a short timeout (100ms) — only drains what's already in the buffer.
+/// This is a safety net for `control_request`s that arrived after the startup
+/// drain completed but before the first user message.
+async fn drain_pending_messages(session: &mut EngineSession) {
+    while let Some(cli) = session.cli_mut() {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            cli.read_message(),
+        )
+        .await;
+
+        match result {
+            Ok(Some(msg)) => {
+                let msg_type = msg
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+
+                if msg_type == "control_request" {
+                    debug!("Pre-query drain: control_request");
+                    events::emit_raw(&msg);
+
+                    if let Some(response) = session.control_response_rx_mut().recv().await
+                        && let Some(cli) = session.cli_mut()
+                    {
+                        let _ = cli.write(&response.to_string()).await;
+                    }
+                } else {
+                    debug!("Pre-query drain: forwarding {msg_type}");
+                    events::emit_raw(&msg);
+                }
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ def test_basic_response(discord: Discord, master_channel: str):
 def test_status_command(discord: Discord, master_channel: str):
     """Test 2: //status returns agent info."""
     msgs = discord.send_and_wait(
-        master_channel, "//status", sentinel=False, timeout=15.0
+        master_channel, "// status", sentinel=False, timeout=15.0
     )
     text = discord.bot_response_text(msgs)
     # //status should mention the agent name and state
@@ -30,40 +30,40 @@ def test_status_command(discord: Discord, master_channel: str):
 
 def test_debug_toggle(discord: Discord, master_channel: str):
     """Test 3: //debug toggles debug mode."""
-    # Turn on
+    # Toggle once
     msgs = discord.send_and_wait(
-        master_channel, "//debug on", sentinel=False, timeout=15.0
+        master_channel, "// debug", sentinel=False, timeout=15.0
     )
     text = discord.bot_response_text(msgs)
-    assert "on" in text.lower()
+    assert "debug mode" in text.lower()
 
-    # Turn off
+    # Toggle again
     msgs = discord.send_and_wait(
-        master_channel, "//debug off", sentinel=False, timeout=15.0
+        master_channel, "// debug", sentinel=False, timeout=15.0
     )
     text = discord.bot_response_text(msgs)
-    assert "off" in text.lower()
+    assert "debug mode" in text.lower()
 
 
 def test_clear_context(discord: Discord, master_channel: str):
     """Test 5: //clear confirms context cleared."""
-    msg_id = discord.send(master_channel, "//clear")
-    # //clear is instant but produces system messages. Poll for them.
+    msg_id = discord.send(master_channel, "// clear")
+    # //clear sends /clear to agent and also posts "Sent /clear to agent."
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         msgs = discord.history(master_channel, limit=5, after=msg_id)
         text = "\n".join(m.get("content", "") for m in msgs).lower()
-        if "cleared" in text:
+        if "clear" in text:
             break
         time.sleep(1)
-    assert "cleared" in text
+    assert "clear" in text
     # Wait for any sentinel to clear
     time.sleep(3)
 
 
 def test_compact_context(discord: Discord, master_channel: str):
     """Test 6: //compact shows token count."""
-    msg_id = discord.send(master_channel, "//compact")
+    msg_id = discord.send(master_channel, "// compact")
     # //compact triggers API compaction. Poll until we see the result.
     deadline = time.monotonic() + 60
     text = ""
@@ -213,9 +213,9 @@ def test_emoji_reactions(discord: Discord, master_channel: str):
 
 def test_debug_mode_visibility(discord: Discord, master_channel: str):
     """Test 4: Debug mode shows tool calls with wrench emoji."""
-    # Enable debug
+    # Enable debug (toggle on)
     discord.send_and_wait(
-        master_channel, "//debug on", sentinel=False, timeout=15.0
+        master_channel, "// debug", sentinel=False, timeout=15.0
     )
     time.sleep(2)
 
@@ -232,9 +232,9 @@ def test_debug_mode_visibility(discord: Discord, master_channel: str):
         f"Expected debug tool output (wrench emoji), got: {text[:300]}"
     )
 
-    # Clean up — turn off debug
+    # Clean up — toggle debug off
     discord.send_and_wait(
-        master_channel, "//debug off", sentinel=False, timeout=15.0
+        master_channel, "// debug", sentinel=False, timeout=15.0
     )
 
 
@@ -244,16 +244,17 @@ def test_startup_notification(discord: Discord, master_channel: str, instance_en
     latest = discord.latest_message_id(master_channel)
 
     # Restart the instance
+    worktree = pytest.importorskip("pathlib").Path(__file__).parent.parent
     subprocess.run(
-        ["uv", "run", "python", "axi_test.py", "restart", "smoke-test"],
-        cwd=str(pytest.importorskip("pathlib").Path(__file__).parent.parent),
+        ["uv", "run", "python", "axi/axi_test.py", "restart", "smoke-test"],
+        cwd=str(worktree),
         capture_output=True,
         timeout=30,
     )
 
-    # Wait for the ready notification
+    # Wait for the ready notification (Rust bot needs time for procmux + bot restart)
     text = discord.poll_history(
-        master_channel, after=latest, check="ready", timeout=30.0
+        master_channel, after=latest, check="ready", timeout=60.0
     )
     assert "ready" in text.lower(), (
         f"Expected ready notification, got: {text[:200]}"
@@ -296,7 +297,7 @@ def test_auto_sleep_and_wake(discord: Discord, master_channel: str):
 
     # Check status — should be sleeping
     status_msgs = discord.send_and_wait(
-        master_channel, "//status", sentinel=False, timeout=15.0
+        master_channel, "// status", sentinel=False, timeout=15.0
     )
     status_text = discord.bot_response_text(status_msgs)
     # Note: //status shows master's status. We just verify the agent auto-slept

@@ -90,10 +90,9 @@ pub async fn create_client(
         Some(engine) => {
             let search_paths = crate::flowcoder::get_search_paths(&[]);
             info!("Spawning flowcoder engine for '{}': {}", name, engine.display());
-            // Flowcoder strips SDK MCP servers (engine can't do SDK handshake)
-            let mut fc_config = cli_config.clone();
-            fc_config.mcp_servers.sdk = None;
-            crate::flowcoder::build_engine_cli_args(&engine, &search_paths, &fc_config.to_cli_args())
+            // Engine relays control_request messages (including SDK MCP handshake)
+            // so SDK MCP servers are kept in the config.
+            crate::flowcoder::build_engine_cli_args(&engine, &search_paths, &cli_config.to_cli_args())
         }
         None => {
             anyhow::bail!(
@@ -101,6 +100,8 @@ pub async fn create_client(
             );
         }
     };
+
+    info!("CLI args for '{}': {:?}", name, cli_args);
 
     // Build environment — SDK control protocol vars + system essentials
     let env = cli_config.to_env();
@@ -377,6 +378,18 @@ async fn stream_response(state: &BotState, agent_name: &str) -> Option<String> {
                     debug!("Agent '{}' using tool: {}", agent_name, tool_name);
                     ctx.current_tool_name = Some(tool_name.to_string());
                     ctx.tool_input_json.clear();
+
+                    // Debug mode: post persistent tool usage message
+                    if ctx.debug {
+                        let ch = ctx.live_edit.as_ref().map(|le| le.channel_id)
+                            .or(ctx.channel_id);
+                        if let Some(ch) = ch {
+                            let display = activity::tool_display(tool_name);
+                            let _ = state.discord_client.send_message(
+                                ch, &format!("\u{1f527} {display}"),
+                            ).await;
+                        }
+                    }
 
                     // Show tool progress message
                     streaming::show_tool_progress(
@@ -1564,19 +1577,18 @@ mod tests {
     }
 
     #[test]
-    fn cli_config_flowcoder_strips_sdk_mcp() {
+    fn cli_config_flowcoder_keeps_sdk_mcp() {
+        // Engine relays control_request messages so SDK MCP servers are kept.
         let path = std::path::Path::new("/tmp/nonexistent-config.json");
         let external = serde_json::json!({"ext": {"command": "node"}});
         let sdk = serde_json::json!({"utils": {"type": "sdk"}});
-        let mut cfg = build_cli_config(path, None, None, Some(&external), &sdk, false);
-        // Flowcoder path: strip SDK MCP servers inline
-        cfg.mcp_servers.sdk = None;
+        let cfg = build_cli_config(path, None, None, Some(&external), &sdk, false);
         let args = cfg.to_cli_args();
         let mcp_idx = args.iter().position(|a| a == "--mcp-config").unwrap();
         let mcp_val: serde_json::Value = serde_json::from_str(&args[mcp_idx + 1]).unwrap();
         let servers = mcp_val.get("mcpServers").unwrap();
-        // SDK should be stripped, external preserved
-        assert!(servers.get("utils").is_none());
+        // Both SDK and external should be present
+        assert!(servers.get("utils").is_some());
         assert!(servers.get("ext").is_some());
     }
 

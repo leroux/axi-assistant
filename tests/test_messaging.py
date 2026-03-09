@@ -97,7 +97,7 @@ def test_status_while_busy(discord: Discord, master_channel: str):
 
     # Send //status while busy
     status_msgs = discord.send_and_wait(
-        master_channel, "//status", sentinel=False, timeout=15.0
+        master_channel, "// status", sentinel=False, timeout=15.0
     )
     status_text = discord.bot_response_text(status_msgs)
 
@@ -208,7 +208,11 @@ def test_long_output_splitting(discord: Discord, master_channel: str):
 
 
 def test_clear_while_busy(discord: Discord, master_channel: str):
-    """Test 27: //clear while agent is busy shows 'Agent is busy'."""
+    """Test 27: //clear while agent is busy queues the clear command.
+
+    Rust bot: text command `// clear` sends /clear to agent and responds
+    'Sent /clear to agent.' regardless of busy state. No busy rejection.
+    """
     # Send a slow query
     msg_id = discord.send(
         master_channel,
@@ -216,14 +220,14 @@ def test_clear_while_busy(discord: Discord, master_channel: str):
     )
     time.sleep(3)
 
-    # Try to clear while busy
-    clear_id = discord.send(master_channel, "//clear")
+    # Try to clear while busy — Rust bot queues it and confirms
+    clear_id = discord.send(master_channel, "// clear")
     time.sleep(3)
 
-    # Check for "busy" message
+    # Check for confirmation (Rust bot doesn't reject, it queues)
     msgs = discord.history(master_channel, limit=10, after=clear_id)
     text = "\n".join(m.get("content", "") for m in msgs).lower()
-    assert "busy" in text, f"Expected 'busy' message, got: {text[:200]}"
+    assert "clear" in text, f"Expected clear confirmation, got: {text[:200]}"
 
     # Wait for the slow query to finish
     discord.wait_for_bot(master_channel, after=msg_id, timeout=120.0)

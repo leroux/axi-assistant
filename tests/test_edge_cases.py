@@ -16,20 +16,20 @@ def test_empty_text_command(discord: Discord, master_channel: str):
 
 def test_unknown_text_command(discord: Discord, master_channel: str):
     """Test 47: Unknown '//xxx' falls through to agent."""
-    msgs = discord.send_and_wait(master_channel, "//unknowncmd", timeout=60.0)
+    msgs = discord.send_and_wait(master_channel, "// unknowncmd", timeout=60.0)
     text = discord.bot_response_text(msgs)
     assert len(text) > 0, "No response to unknown text command"
 
 
 def test_invalid_debug_arg(discord: Discord, master_channel: str):
-    """Test 48: '//debug badarg' shows usage."""
+    """Test 48: '// debug badarg' just toggles (Rust bot ignores extra args)."""
     msgs = discord.send_and_wait(
-        master_channel, "//debug badarg", sentinel=False, timeout=15.0
+        master_channel, "// debug badarg", sentinel=False, timeout=15.0
     )
     text = discord.bot_response_text(msgs)
-    # Should show usage or error
-    assert "usage" in text.lower() or "on" in text.lower() or "off" in text.lower(), (
-        f"Expected usage message, got: {text[:200]}"
+    # Rust bot ignores args and just toggles
+    assert "debug mode" in text.lower(), (
+        f"Expected debug toggle response, got: {text[:200]}"
     )
 
 
@@ -41,7 +41,7 @@ def test_context_clear_doesnt_erase_channel_history(discord: Discord, master_cha
 
     # Clear context
     discord.send_and_wait(
-        master_channel, "//clear", sentinel=False, timeout=15.0
+        master_channel, "// clear", sentinel=False, timeout=15.0
     )
 
     # Ask about the marker — agent should find it in channel history

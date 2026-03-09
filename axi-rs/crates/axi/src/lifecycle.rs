@@ -196,7 +196,32 @@ pub async fn wake_or_queue(
     metadata: Option<serde_json::Value>,
 ) -> bool {
     match wake_agent(state, name).await {
-        Ok(()) => true,
+        Ok(()) => {
+            // Agent is awake. Check if it's currently processing (query_lock held).
+            // If busy, queue the message — the running task's process_message_queue
+            // will pick it up. Spawning a competing task causes race conditions
+            // where the second task acquires the lock after the agent has slept.
+            let busy = {
+                let sessions = state.sessions.lock().await;
+                sessions.get(name).is_some_and(is_processing)
+            };
+            if busy {
+                let mut sessions = state.sessions.lock().await;
+                if let Some(session) = sessions.get_mut(name) {
+                    session
+                        .message_queue
+                        .push_back(QueuedMessage { content, metadata });
+                    let position = session.message_queue.len();
+                    debug!(
+                        "Agent '{}' is busy, queuing message (position {})",
+                        name, position
+                    );
+                }
+                false
+            } else {
+                true
+            }
+        }
         Err(HubError::ConcurrencyLimit(_)) => {
             let mut sessions = state.sessions.lock().await;
             if let Some(session) = sessions.get_mut(name) {

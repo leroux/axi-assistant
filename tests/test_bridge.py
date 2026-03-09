@@ -5,6 +5,9 @@ and lifecycle helpers.  All tests use real Unix sockets with ephemeral paths —
 no mocking of the wire protocol so we're testing actual serialization.
 
 Run with: pytest tests/test_bridge.py -v
+
+NOTE: These tests require Python procmux/claudewire/agenthub packages which
+are not available in the Rust rewrite. Skipped when those packages are missing.
 """
 
 from __future__ import annotations
@@ -17,25 +20,28 @@ import uuid
 
 import pytest
 
-from agenthub.procmux_wire import ProcmuxProcessConnection
-from claudewire import BridgeTransport
-from claudewire.types import StdoutEvent
-from procmux import (
-    ExitMsg,
-    StdoutMsg,
-)
-from procmux import (
-    ProcmuxConnection as BridgeConnection,
-)
-from procmux import (
-    ProcmuxServer as BridgeServer,
-)
-from procmux import (
-    connect as connect_to_bridge,
-)
-from procmux import (
-    ensure_running as ensure_bridge,
-)
+try:
+    from agenthub.procmux_wire import ProcmuxProcessConnection
+    from claudewire import BridgeTransport
+    from claudewire.types import StdoutEvent
+    from procmux import (
+        ExitMsg,
+        StdoutMsg,
+    )
+    from procmux import (
+        ProcmuxConnection as BridgeConnection,
+    )
+    from procmux import (
+        ProcmuxServer as BridgeServer,
+    )
+    from procmux import (
+        connect as connect_to_bridge,
+    )
+    from procmux import (
+        ensure_running as ensure_bridge,
+    )
+except ImportError:
+    pytestmark = pytest.mark.skip("Python bridge packages not available (Rust rewrite)")
 
 
 # Override conftest's autouse warmup — bridge tests don't need Discord.
