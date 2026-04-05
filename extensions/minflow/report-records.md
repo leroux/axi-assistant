@@ -20,4 +20,6 @@ Key update commands:
 2. If only one remains and its text is a broad task, replace it with plan -> implement -> test -> commit/push cards.
 3. Remove the original vague card.
 
+**Plan/design cards require explicit user approval.** Only mark them done when the user explicitly approves — e.g. "looks good", "approved", "go ahead and implement". Telling you to implement the plan counts as approval. Presenting a plan does not. When in doubt, ask.
+
 If the `minflow` CLI is not available, fall back to a RECORDS.md file in your working directory.

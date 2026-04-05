@@ -105,7 +105,7 @@ _master_append = _SOUL + "\n\n" + _DEV_CONTEXT + ("\n\n" + _USER_PROFILE if _USE
 MASTER_SYSTEM_PROMPT: SystemPromptPreset = {
     "type": "preset",
     "preset": "claude_code",
-    "append": _master_append.replace("{agent_name}", config.MASTER_AGENT_NAME),
+    "append": _master_append.replace("{agent_name}", config.MASTER_AGENT_NAME).replace("{cwd}", config.DEFAULT_CWD),
 }
 
 
@@ -189,7 +189,7 @@ def make_spawned_agent_system_prompt(
             "When summarizing/compacting this conversation, prioritize preserving:\n"
             f"- {compact_instructions}"
         )
-    append = append.replace("{agent_name}", agent_name)
+    append = append.replace("{agent_name}", agent_name).replace("{cwd}", cwd)
     return {
         "type": "preset",
         "preset": "claude_code",

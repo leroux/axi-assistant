@@ -1965,6 +1965,13 @@ def _register_agent_from_channel(channel: TextChannel, cwd: str) -> None:
         mcp_servers=mcp_servers,
     )
     discord_state(session).channel_id = channel.id
+    # Late-substitute channel info into system prompt
+    if isinstance(session.system_prompt, dict) and "append" in session.system_prompt:
+        session.system_prompt["append"] = (
+            session.system_prompt["append"]
+            .replace("{channel_id}", str(channel.id))
+            .replace("{channel_name}", channel.name)
+        )
     agents.agents[agent_name] = session
     agents.channel_to_agent[channel.id] = agent_name
 
@@ -2272,6 +2279,13 @@ async def _setup_guild_infrastructure(master_session: AgentSession) -> None:
         await channels.deduplicate_master_channel()
         master_channel = await agents.ensure_agent_channel(config.MASTER_AGENT_NAME)
         discord_state(master_session).channel_id = master_channel.id
+        # Late-substitute channel info into master system prompt
+        if isinstance(master_session.system_prompt, dict) and "append" in master_session.system_prompt:
+            master_session.system_prompt["append"] = (
+                master_session.system_prompt["append"]
+                .replace("{channel_id}", str(master_channel.id))
+                .replace("{channel_name}", master_channel.name)
+            )
         agents.channel_to_agent[master_channel.id] = config.MASTER_AGENT_NAME
         log.info("Guild infrastructure ready (guild=%s, master_channel=#%s)", config.DISCORD_GUILD_ID, master_channel.name)
 

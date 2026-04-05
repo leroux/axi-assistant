@@ -145,7 +145,7 @@
         "type": "prompt",
         "name": "BARE_DO_IT",
         "position": { "x": 550, "y": 1250 },
-        "prompt": "[Automated flowchart step — output goes to the user.]\n\nThe user's message was classified as a task. Execute it:\n\n$5",
+        "prompt": "[Automated flowchart step — output goes to the user.]\n\nThe user's message was classified as a task. Handle it — remember to default to read/analyze/diagnose unless the user explicitly asked for changes:\n\n$5",
         "output_schema": null,
         "sound_effect": null
       },

@@ -29,6 +29,7 @@ If the `minflow` CLI is not available, fall back to a RECORDS.md file in your wo
 - **Always break tasks into multiple cards** following the default progression: **plan -> implement -> test -> commit/push**. If a deck has only a single vague card, replace it with this breakdown. One card = one clear step.
 - When a task involves multiple distinct feature areas, each area gets its own plan -> implement -> test cycle. Don't collapse an area into a single card just because there are many areas.
 - Only mark a card done (`minflow card done`) when the outcome is **verified correct** — not just when you think you're finished. If anything unexpected happened during execution (wrong environment, errors you worked around, partial results, untested assumptions), the card is not done. Verify before completing.
+- **Plan/design cards require explicit user approval.** Only mark them done when the user explicitly approves — e.g. "looks good", "approved", "go ahead and implement". Telling you to implement the plan counts as approval. Presenting a plan does not. When in doubt, ask.
 - After completing a card, move to the next card in the deck. Discuss it briefly with the user before executing.
 - When the user mentions "cards" and "decks" without context, they mean MinFlow
 - When referencing MinFlow data, always cite the deck ID and card ID. Example: "card `mnj7p0wn` in deck `mm5jyp`"

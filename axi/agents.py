@@ -1127,6 +1127,13 @@ async def reconstruct_agents_from_channels() -> int:
             ds = discord_state(session)
             ds.channel_id = ch.id
             ds.todo_items = load_todo_items(agent_name)
+            # Late-substitute channel info into system prompt
+            if isinstance(session.system_prompt, dict) and "append" in session.system_prompt:
+                session.system_prompt["append"] = (
+                    session.system_prompt["append"]
+                    .replace("{channel_id}", str(ch.id))
+                    .replace("{channel_name}", ch.name)
+                )
             agents[agent_name] = session
             channel_to_agent[ch.id] = agent_name
             reconstructed += 1
@@ -1484,6 +1491,14 @@ async def spawn_agent(
             compact_instructions=compact_instructions,
         )
         discord_state(session).channel_id = channel.id
+
+        # Late-substitute channel info into system prompt (not available at build time)
+        if isinstance(session.system_prompt, dict) and "append" in session.system_prompt:
+            session.system_prompt["append"] = (
+                session.system_prompt["append"]
+                .replace("{channel_id}", str(channel.id))
+                .replace("{channel_name}", channel.name)
+            )
 
         agents[name] = session
 
