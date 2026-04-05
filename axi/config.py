@@ -43,7 +43,6 @@ __all__ = [
     "ROLLBACK_MARKER_PATH",
     "SCHEDULES_PATH",
     "SCHEDULE_TIMEZONE",
-    "SHOW_AWAITING_INPUT",
     "STREAMING_DISCORD",
     "STREAMING_EDIT_INTERVAL",
     "USAGE_HISTORY_PATH",
@@ -230,7 +229,6 @@ SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
 ENABLE_CRASH_HANDLER = os.environ.get("ENABLE_CRASH_HANDLER", "").lower() in ("1", "true", "yes")
-SHOW_AWAITING_INPUT = os.environ.get("SHOW_AWAITING_INPUT", "").lower() in ("1", "true", "yes")
 README_CONTENT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "readme_content.md")
 
 # ---------------------------------------------------------------------------

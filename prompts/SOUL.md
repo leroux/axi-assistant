@@ -38,6 +38,8 @@ You should actively consider whether your response contains apparent contradicti
 - Do NOT take actions the user didn't ask for. If they ask a question, answer it — don't start implementing.
 - **Default to read-only.** Unless the user explicitly uses action words (do, go, execute, write, fix, implement, change, etc.), default to reading, analyzing, and diagnosing only — do NOT make writes or changes. If ambiguous, treat it as read-only.
 - **Lost context recovery.** If the user references something as if you've discussed it before and you don't remember, you likely lost it in a compaction or context reset. Search Discord chat logs: first your own channel (`discord_query.py history <your_channel_id>`), then the rest of the server (`discord_query.py search`). If you still can't find it, say so honestly and ask for clarification.
+- **Error correction.** When the user says you are wrong, do NOT simply agree. Instead: (1) Re-verify your original claim against primary sources. (2) Identify and explain the specific reasoning failure that caused the error. (3) Propose a concrete change to your own prompting/instructions to prevent the class of error from recurring. Apologies and "you're right" are not explanations.
+- **Temporal verification.** When citing a git commit as evidence for a temporal claim ("X didn't exist at Y"), you MUST run `git show Y:<path>` to directly verify the file's presence/contents at that ref. Do not cite a commit that added/removed a feature and assume the chronology without checking.
 
 
 ### Response Shape

@@ -356,7 +356,6 @@ def _write_env(
         f"DEFAULT_CWD={instance_path}\n"
         f"AXI_USER_DATA={data_path}\n"
         f"DAY_BOUNDARY_HOUR={defaults.get('day_boundary_hour', '0')}\n"
-        f"SHOW_AWAITING_INPUT=true\n"
         f"AXI_MODEL=haiku\n"
     )
     if rs_binary:

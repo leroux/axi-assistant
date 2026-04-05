@@ -914,6 +914,9 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
             await _live_edit_finalize(ctx, session)
         await _flush_text(ctx, session, channel, "post_kill")
         log.info("STREAM_END[%s] result=killed msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
+        # Ping before sleeping — user needs to know the agent stopped
+        mentions = " ".join(f"<@{uid}>" for uid in config.ALLOWED_USER_IDS)
+        await channel.send(mentions)
         span.set_attributes({"stream.msg_total": ctx.msg_total, "stream.flush_count": ctx.flush_count})
         span.end()
         assert _sleep_agent_fn is not None
@@ -954,9 +957,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         await _flush_text(ctx, session, channel, "post_loop")
     log.info("STREAM_END[%s] result=ok msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
 
-    if config.SHOW_AWAITING_INPUT:
-        mentions = " ".join(f"<@{uid}>" for uid in config.ALLOWED_USER_IDS)
-        await channel.send(mentions)
+    mentions = " ".join(f"<@{uid}>" for uid in config.ALLOWED_USER_IDS)
+    await channel.send(mentions)
 
     ttfe_ms = (t_first_event - t0) * 1000 if t_first_event is not None else -1
     span.set_attributes({
