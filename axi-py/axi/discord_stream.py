@@ -733,7 +733,10 @@ async def _handle_system_message(
         if ctx:
             await _flush_text(ctx, session, channel, "block_start")
             ctx.text_buffer = ""
-            ctx.suppress_stream = bool(msg.data.get("data", {}).get("has_output_schema"))
+            ctx.suppress_stream = (
+                bool(msg.data.get("data", {}).get("has_output_schema"))
+                and not os.environ.get("FC_SHOW_OUTPUT_SCHEMA", "").lower() in ("1", "true", "yes")
+            )
         data = msg.data.get("data", {})
         block_name = data.get("block_name", "?")
         block_type = data.get("block_type", "?")
@@ -743,7 +746,7 @@ async def _handle_system_message(
             query_started=session.activity.query_started,
         )
         ds = discord_state(session)
-        if block_type not in _SILENT_BLOCK_TYPES and ds.fc_current_command not in _FC_QUIET_COMMANDS:
+        if block_type not in _SILENT_BLOCK_TYPES and (ds.debug or ds.fc_current_command not in _FC_QUIET_COMMANDS):
             await channel.send(f"\u25b6 **{block_name}** (`{block_type}`)")
 
     elif msg.subtype == "block_complete":
@@ -756,7 +759,7 @@ async def _handle_system_message(
             ctx.suppress_stream = False
         data = msg.data.get("data", {})
         ds = discord_state(session)
-        if not data.get("success", True) and ds.fc_current_command not in _FC_QUIET_COMMANDS:
+        if not data.get("success", True) and (ds.debug or ds.fc_current_command not in _FC_QUIET_COMMANDS):
             block_name = data.get("block_name", "?")
             await channel.send(f"> {block_name} **FAILED**")
 
@@ -925,10 +928,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         await _flush_text(ctx, session, channel, "post_loop")
     log.info("STREAM_END[%s] result=ok msgs=%d flushes=%d", stream_id, ctx.msg_total, ctx.flush_count)
 
-    if config.SHOW_AWAITING_INPUT:
-        mentions = " ".join(f"<@{uid}>" for uid in config.ALLOWED_USER_IDS)
-        assert _send_system is not None
-        await _send_system(channel, f"Bot has finished responding and is awaiting input. {mentions}")
+    mentions = " ".join(f"<@{uid}>" for uid in config.ALLOWED_USER_IDS)
+    await channel.send(mentions)
 
     ttfe_ms = (t_first_event - t0) * 1000 if t_first_event is not None else -1
     span.set_attributes({

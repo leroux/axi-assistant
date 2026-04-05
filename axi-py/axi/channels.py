@@ -528,6 +528,8 @@ _reorder_lock = asyncio.Lock()
 
 def mark_channel_active(channel_id: int) -> None:
     """Record activity on a channel and schedule a debounced reorder."""
+    if not config.CHANNEL_SORT_BY_RECENCY:
+        return
     _channel_activity[channel_id] = time.monotonic()
     _schedule_reorder()
 
