@@ -128,6 +128,20 @@ _file_fmt.converter = time.gmtime
 _file_handler.setFormatter(_file_fmt)
 log.addHandler(_file_handler)
 
+# Route discord.py's internal logger to our handlers so slash command errors
+# (autocomplete failures, command invocation errors) aren't silently dropped.
+_discord_logger = logging.getLogger("discord")
+_discord_logger.setLevel(logging.WARNING)
+_discord_logger.addHandler(_console_handler)
+_discord_logger.addHandler(_file_handler)
+
+# Route FlowCoder library loggers so execution errors aren't silently dropped.
+for _fc_logger_name in ("src.controllers", "src.services", "src.embedding"):
+    _fc_logger = logging.getLogger(_fc_logger_name)
+    _fc_logger.setLevel(logging.WARNING)
+    _fc_logger.addHandler(_console_handler)
+    _fc_logger.addHandler(_file_handler)
+
 # ---------------------------------------------------------------------------
 # Feature flags
 # ---------------------------------------------------------------------------

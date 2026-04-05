@@ -193,8 +193,10 @@ def _build_claude_cli_args(options: Any) -> list[str]:
         for d in options.add_dirs:
             cmd.extend(["--add-dir", str(d)])
 
-    # MCP servers — filter out SDK-type servers (engine doesn't support
-    # the SDK MCP initialize handshake)
+    # MCP servers — SDK-type servers (type: "sdk") are passed with the
+    # instance field stripped. The CLI sends mcp_message control requests
+    # back through the transport, and the SDK Query class routes them to
+    # the in-process MCP server instance.
     mcp = getattr(options, "mcp_servers", None)
     if mcp:
         if isinstance(mcp, dict):
@@ -202,9 +204,10 @@ def _build_claude_cli_args(options: Any) -> list[str]:
             servers_for_cli: dict[str, Any] = {}
             for name, srv_config in mcp_d.items():
                 if isinstance(srv_config, dict) and cast("dict[str, Any]", srv_config).get("type") == "sdk":
-                    # Skip SDK MCP servers — engine can't do SDK handshake
-                    continue
-                servers_for_cli[name] = srv_config
+                    # Strip instance field (Python object) — CLI only needs type+name
+                    servers_for_cli[name] = {k: v for k, v in cast("dict[str, Any]", srv_config).items() if k != "instance"}
+                else:
+                    servers_for_cli[name] = srv_config
             if servers_for_cli:
                 cmd.extend(["--mcp-config", json.dumps({"mcpServers": servers_for_cli})])
         else:

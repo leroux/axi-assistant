@@ -1471,7 +1471,6 @@ async def spawn_agent(
 
         mcp_names = list(extra_mcp_servers.keys()) if extra_mcp_servers else None
         prompt = make_spawned_agent_system_prompt(cwd, extensions=extensions, compact_instructions=compact_instructions, agent_name=name)
-        mcp_servers = _build_mcp_servers(name, cwd)
 
         session = AgentSession(
             name=name,
@@ -1985,6 +1984,22 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
                 log.info("Agent '%s' reconnected idle (between turns)", session.name)
 
             log.info("Reconnect complete for '%s'", session.name)
+
+            # Post system prompt to Discord for visibility (same as wake_agent)
+            ds = discord_state(session)
+            if not ds.system_prompt_posted and ds.channel_id:
+                ds.system_prompt_posted = True
+                prompt_channel = _bot.get_channel(ds.channel_id)
+                if prompt_channel and isinstance(prompt_channel, TextChannel):
+                    try:
+                        await post_system_prompt_to_channel(
+                            prompt_channel,
+                            session.system_prompt,
+                            is_resume=True,
+                            session_id=session.session_id,
+                        )
+                    except Exception:
+                        log.warning("Failed to post system prompt for '%s'", session.name, exc_info=True)
 
     except Exception:
         log.exception("Failed to reconnect agent '%s'", session.name)

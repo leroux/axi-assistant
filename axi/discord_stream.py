@@ -56,6 +56,26 @@ if TYPE_CHECKING:
 log = logging.getLogger("axi")
 _tracer = trace.get_tracer(__name__)
 
+
+async def _drain_and_send_stderr(session: AgentSession, channel: TextChannel) -> None:
+    """Drain stderr buffer and optionally send output as code blocks.
+
+    Always drains the buffer (to prevent unbounded growth).
+    Only sends to Discord when the agent has debug mode enabled
+    (session.agent_log is set), keeping channels clean in normal operation.
+    """
+    ds = discord_state(session)
+    with ds.stderr_lock:
+        msgs = list(ds.stderr_buffer)
+        ds.stderr_buffer.clear()
+    if not session.agent_log:
+        return
+    for stderr_msg in msgs:
+        stderr_text = stderr_msg.strip()
+        if stderr_text:
+            for part in split_message(f"```\n{stderr_text}\n```"):
+                await channel.send(part)
+
 # Explicit exports for re-export from agents.py (suppresses pyright reportPrivateUsage)
 __all__ = [
     "_LiveEditState",
@@ -823,6 +843,9 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                     len(ctx.text_buffer),
                 )
 
+            # Surface any stderr output (CLI warnings/errors) before handling the message
+            await _drain_and_send_stderr(session, channel)
+
             if isinstance(msg, StreamEvent):
                 await _handle_stream_event(ctx, session, channel, msg, typing_ctx)
             elif isinstance(msg, AssistantMessage):
@@ -847,6 +870,9 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                 ctx.text_buffer = ctx.text_buffer[:split_at]
                 await _flush_text(ctx, session, channel, "mid_turn_split")
                 ctx.text_buffer = remainder
+
+    # Post-loop stderr drain — catch anything emitted during final processing
+    await _drain_and_send_stderr(session, channel)
 
     if ctx.hit_rate_limit:
         # Finalize any in-flight streaming message (remove cursor)
