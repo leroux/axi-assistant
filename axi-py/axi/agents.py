@@ -261,6 +261,10 @@ def _wrap_content_with_soul(content: MessageContent, session: AgentSession) -> M
     return content
 
 
+# Public alias for use from main.py / agenthub integration
+wrap_content_with_soul = _wrap_content_with_soul
+
+
 def get_active_trace_tag(agent_name: str) -> str:
     """Return the trace tag for the agent's in-flight turn, or empty string."""
     return _active_trace_ids.get(agent_name, "")
@@ -367,17 +371,17 @@ def _build_mcp_servers(
 def _save_agent_config(
     agent_name: str,
     mcp_server_names: list[str] | None,
-    packs: list[str] | None = None,
+    extensions: list[str] | None = None,
 ) -> None:
-    """Persist per-agent config (MCP servers, packs) to disk."""
+    """Persist per-agent config (MCP servers, extensions) to disk."""
     config_dir = os.path.join(config.AXI_USER_DATA, "agents", agent_name)
     os.makedirs(config_dir, exist_ok=True)
     config_path = os.path.join(config_dir, "agent_config.json")
     data: dict[str, Any] = {}
     if mcp_server_names:
         data["mcp_servers"] = mcp_server_names
-    if packs is not None:
-        data["packs"] = packs
+    if extensions is not None:
+        data["extensions"] = extensions
     try:
         with open(config_path, "w") as f:
             json.dump(data, f, indent=2)
@@ -1049,7 +1053,7 @@ async def _rebuild_session(name: str, *, cwd: str | None = None, session_id: str
     old_mcp = getattr(session, "mcp_servers", None)
     resolved_cwd = cwd or old_cwd
     prompt = (
-        session.system_prompt if session and session.system_prompt else make_spawned_agent_system_prompt(resolved_cwd)
+        session.system_prompt if session and session.system_prompt else make_spawned_agent_system_prompt(resolved_cwd, agent_name=name)
     )
     prompt_hash = session.system_prompt_hash if session and session.system_prompt_hash else compute_prompt_hash(prompt)
     await end_session(name)
@@ -1104,8 +1108,8 @@ async def reconstruct_agents_from_channels() -> int:
                 continue
 
             agent_cfg = _load_agent_config(agent_name)
-            saved_packs = agent_cfg.get("packs")  # None = use defaults
-            prompt = make_spawned_agent_system_prompt(cwd, packs=saved_packs)
+            saved_ext = agent_cfg.get("extensions")  # None = use defaults
+            prompt = make_spawned_agent_system_prompt(cwd, extensions=saved_ext, agent_name=agent_name)
             mcp_names = agent_cfg.get("mcp_servers") or None
             extra_mcp = config.load_mcp_servers(mcp_names) if mcp_names else None
             mcp_servers = _build_mcp_servers(agent_name, cwd, extra_mcp_servers=extra_mcp)
@@ -1398,9 +1402,9 @@ async def restart_agent(name: str) -> AgentSession:
     if is_awake(session):
         await sleep_agent(session, force=True)
     agent_cfg = _load_agent_config(name)
-    saved_packs = agent_cfg.get("packs")
+    saved_ext = agent_cfg.get("extensions")
     new_prompt = make_spawned_agent_system_prompt(
-        session.cwd, packs=saved_packs, compact_instructions=session.compact_instructions
+        session.cwd, extensions=saved_ext, compact_instructions=session.compact_instructions, agent_name=name
     )
     session.system_prompt = new_prompt
     session.system_prompt_hash = compute_prompt_hash(new_prompt)
@@ -1432,7 +1436,7 @@ async def spawn_agent(
     agent_type: str = "flowcoder",
     command: str = "",
     command_args: str = "",
-    packs: list[str] | None = None,
+    extensions: list[str] | None = None,
     compact_instructions: str | None = None,
     extra_mcp_servers: dict[str, Any] | None = None,
 ) -> AgentSession:
@@ -1466,7 +1470,7 @@ async def spawn_agent(
         mcp_servers = _build_mcp_servers(name, cwd, extra_mcp_servers=extra_mcp_servers)
 
         mcp_names = list(extra_mcp_servers.keys()) if extra_mcp_servers else None
-        prompt = make_spawned_agent_system_prompt(cwd, packs=packs, compact_instructions=compact_instructions)
+        prompt = make_spawned_agent_system_prompt(cwd, extensions=extensions, compact_instructions=compact_instructions, agent_name=name)
         mcp_servers = _build_mcp_servers(name, cwd)
 
         session = AgentSession(
@@ -1485,8 +1489,8 @@ async def spawn_agent(
         agents[name] = session
 
         # Persist agent config for restart reconstruction
-        if mcp_names or packs is not None:
-            _save_agent_config(name, mcp_names, packs=packs)
+        resolved_ext = list(extensions) if extensions is not None else list(DEFAULT_EXTENSIONS)
+        _save_agent_config(name, mcp_names, extensions=resolved_ext)
         channel_to_agent[channel.id] = name
         _channels_mod.bot_creating_channels.discard(normalized)
         log.info("Agent '%s' registered (type=%s, cwd=%s, resume=%s)", name, agent_type, cwd, resume)

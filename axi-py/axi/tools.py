@@ -69,10 +69,10 @@ _tracer = trace.get_tracer(__name__)
                 "type": "string",
                 "description": "Arguments for the flowcoder command (shell-style string)",
             },
-            "packs": {
+            "extensions": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Optional list of pack names to load into this agent's system prompt. Defaults to the standard set. Pass [] to disable packs.",
+                "description": "Optional list of extension names to load into this agent's system prompt. Defaults to DEFAULT_EXTENSIONS. Pass [] to disable extensions.",
             },
             "no_worktree": {
                 "type": "boolean",
@@ -103,7 +103,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     agent_type = args.get("agent_type", "claude_code")
     fc_command = args.get("command", "")
     fc_command_args = args.get("command_args", "")
-    agent_packs = args.get("packs")  # None = use defaults, [] = no packs
+    agent_extensions = args.get("extensions")  # None = use defaults, [] = no extensions
     no_worktree = args.get("no_worktree", False)
     compact_instructions = args.get("compact_instructions")
     mcp_server_names: list[str] = args.get("mcp_servers") or []
@@ -196,7 +196,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
                 agent_type=agent_type,
                 command=fc_command,
                 command_args=fc_command_args,
-                packs=agent_packs,
+                extensions=agent_extensions,
                 compact_instructions=compact_instructions,
                 extra_mcp_servers=extra_mcp_servers,
             )
@@ -213,12 +213,12 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
                 pass
 
     log.info(
-        "Spawning agent '%s' via MCP tool (type=%s, cwd=%s, resume=%s, packs=%s)",
+        "Spawning agent '%s' via MCP tool (type=%s, cwd=%s, resume=%s, extensions=%s)",
         agent_name,
         agent_type,
         agent_cwd,
         agent_resume,
-        agent_packs,
+        agent_extensions,
     )
     # Guard against on_guild_channel_create race: mark channel as bot-created
     # BEFORE the background task runs, so the guard is already set when the
@@ -301,7 +301,7 @@ async def axi_kill_agent(args: McpArgs) -> McpResult:
     "axi_restart_agent",
     "Restart a single agent's CLI process with a fresh system prompt. "
     "Preserves session context (conversation history). The agent will pick up "
-    "any changes to SYSTEM_PROMPT.md, packs, or the core prompt on next wake.",
+    "any changes to SYSTEM_PROMPT.md, extensions, or the core prompt on next wake.",
     {
         "type": "object",
         "properties": {

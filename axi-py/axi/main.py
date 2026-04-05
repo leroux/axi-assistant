@@ -361,6 +361,9 @@ async def on_message(message: discord.Message) -> None:
     async def _discord_stream_handler(s: AgentSession) -> str | None:
         return await agents.stream_response_to_channel(s, channel)
 
+    # Route through /soul or /soul-flow flowcharts
+    content = agents.wrap_content_with_soul(content, session)
+
     assert agents.hub is not None
     result = await receive_user_message(
         agents.hub,
@@ -1890,7 +1893,7 @@ async def restart_including_bridge_cmd(interaction: discord.Interaction, force: 
 def _register_agent_from_channel(channel: TextChannel, cwd: str) -> None:
     """Register a sleeping agent session for a manually-created channel."""
     agent_name = channel.name
-    prompt = make_spawned_agent_system_prompt(cwd)
+    prompt = make_spawned_agent_system_prompt(cwd, agent_name=agent_name)
     mcp_servers: dict[str, Any] = {"utils": tools.utils_mcp_server}
     mcp_servers["schedule"] = make_schedule_mcp_server(agent_name, config.SCHEDULES_PATH, cwd)
 
@@ -2434,14 +2437,6 @@ async def on_ready() -> None:
 
         check_schedules.start()
         log.info("Schedule checker started")
-
-        # Start web frontend if enabled
-        if config.WEB_ENABLED:
-            from axi.hub_wiring import router as _hub_router
-
-            if _hub_router:
-                await _hub_router.start_all()
-                log.info("Web frontend started on port %d", config.WEB_PORT)
 
         rollback_info = _consume_json_marker(config.ROLLBACK_MARKER_PATH, "Rollback")
         crash_info = _consume_json_marker(config.CRASH_ANALYSIS_MARKER_PATH, "Crash analysis")

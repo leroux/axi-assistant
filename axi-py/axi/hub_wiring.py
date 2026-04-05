@@ -142,10 +142,4 @@ def create_hub(
     # Share the same sessions dict — gradual migration
     hub.sessions = sessions  # type: ignore[assignment]
 
-    # Give the web frontend a reference to the hub for message routing
-    if config.WEB_ENABLED:
-        web_fe = router.get("web")
-        if web_fe:
-            web_fe.set_hub(hub)  # type: ignore[union-attr]
-
     return hub

@@ -47,10 +47,13 @@ def get_engine_binary() -> str:
 
 def get_search_paths(extra: list[str] | None = None) -> list[str]:
     """Return flowchart command search paths."""
+    from axi import config
+
     default_search = _default_commands_dir()
+    bot_commands = os.path.join(config.BOT_DIR, "commands")
     env_raw = os.environ.get("FLOWCODER_SEARCH_PATH", "")
     env_paths = [p for p in env_raw.split(":") if p]
-    return [default_search] + env_paths + (extra or [])
+    return [default_search, bot_commands] + env_paths + (extra or [])
 
 
 def build_engine_cmd(

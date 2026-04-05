@@ -18,7 +18,7 @@ This file is appended to the system prompt for agents working on the axi-assista
 - `axi_test.py` — CLI for test instances (up/down/restart/list/merge/msg/logs)
 - `axi-test@.service` — Systemd template unit for test instances
 - `prompts/SOUL.md` — Shared personality prompt for all agents (identity, style, constraints)
-- `prompts/dev_context.md` — This file; axi dev context for agents working on the codebase
+- `prompts/axi_codebase_context.md` — This file; context for agents working on the axi codebase
 - `commands/soul.json` — Core /soul flowchart (message classification, task lifecycle, hook dispatch)
 - `extensions/` — Modular extensions: prompt.md (system prompt), commands/ (flowchart hooks), and/or prompt_hooks (in-prompt text injection)
 - `.env` — Instance-specific config (gitignored)
@@ -32,7 +32,7 @@ Read `/home/ubuntu/axi-user-data/CODE-PHILOSOPHY.md` for the principles guiding 
 
 Extension-specific concepts, tools, CLIs, and record IDs must never appear in core files. Keep core wording generic and let extensions provide the specific instructions.
 
-Core files: SOUL.md, soul.json, dev_context.md, bot.py, handlers.py, supervisor.py, prompts.py
+Core files: SOUL.md, soul.json, axi_codebase_context.md, bot.py, handlers.py, supervisor.py, prompts.py
 
 
 ## Important Patterns

@@ -69,7 +69,7 @@ def _load_prompt_file(path: str, variables: dict[str, str] | None = None) -> str
 _PROMPT_VARS = {"axi_user_data": config.AXI_USER_DATA, "bot_dir": config.BOT_DIR}
 
 _SOUL = _load_prompt_file(os.path.join(config.BOT_DIR, "SOUL.md"), _PROMPT_VARS)
-_DEV_CONTEXT = _load_prompt_file(os.path.join(config.BOT_DIR, "dev_context.md"), _PROMPT_VARS)
+_DEV_CONTEXT = _load_prompt_file(os.path.join(config.BOT_DIR, "axi_codebase_context.md"), _PROMPT_VARS)
 
 # User profile — loaded from repo root (one level above BOT_DIR/axi-py/)
 _PROFILE_DIR = os.path.join(os.path.dirname(config.BOT_DIR), "profile")
@@ -93,30 +93,6 @@ if os.path.isfile(_profile_path):
 # System prompt templates
 # ---------------------------------------------------------------------------
 
-# Mini system prompt for non-admin spawned agents (keeps context small)
-_AGENT_CONTEXT_PROMPT = """\
-You are an agent session in the Axi system — a personal assistant for a single user. \
-You communicate through a dedicated channel. The user reads your messages there. \
-Keep responses concise and well-formatted (markdown, code blocks).
-
-Key context:
-- You are one of several agent sessions. The master agent (Axi) coordinates via #axi-master.
-- Your working directory is set by whoever spawned you. Files you create/edit stay in that directory.
-- The user's timezone is US/Pacific.
-
-Sandbox policy:
-- You are authorized to use `dangerouslyDisableSandbox: true` for git operations and for curl/HTTP requests to `localhost:9100` (MinFlow task management API).
-- Do NOT disable the sandbox for anything else.
-
-Communication rules:
-- Never guess or fabricate answers. If you lack context, say so and look it up.
-- Do NOT use Skill or EnterWorktree tools — they are not supported.
-- AskUserQuestion IS supported — questions will be posted to the channel and the user's reply will be fed back as answers.
-- TodoWrite IS supported — use it to track progress on multi-step tasks. The todo list will be displayed automatically. Do NOT repeat or narrate the todo list contents in your text response — the user already sees it.
-- EnterPlanMode and ExitPlanMode ARE supported — use plan mode normally for non-trivial implementation tasks. Your plan will be posted for user approval.\
-""".format(**_PROMPT_VARS)
-
-
 def _is_axi_dev_cwd(cwd: str) -> bool:
     """Check if a working directory is within the axi-assistant codebase."""
     return cwd.startswith(config.BOT_DIR) or bool(config.BOT_WORKTREES_DIR and cwd.startswith(config.BOT_WORKTREES_DIR))
@@ -124,10 +100,11 @@ def _is_axi_dev_cwd(cwd: str) -> bool:
 
 # Master agent: soul + dev context + admin extensions
 _master_ext_text = extension_prompt_text(DEFAULT_EXTENSIONS, audience="admin")
+_master_append = _SOUL + "\n\n" + _DEV_CONTEXT + ("\n\n" + _USER_PROFILE if _USER_PROFILE else "") + ("\n\n" + _master_ext_text if _master_ext_text else "")
 MASTER_SYSTEM_PROMPT: SystemPromptPreset = {
     "type": "preset",
     "preset": "claude_code",
-    "append": _SOUL + "\n\n" + _DEV_CONTEXT + ("\n\n" + _USER_PROFILE if _USER_PROFILE else "") + ("\n\n" + _master_ext_text if _master_ext_text else ""),
+    "append": _master_append.replace("{agent_name}", config.MASTER_AGENT_NAME),
 }
 
 
@@ -166,14 +143,14 @@ def _load_cwd_prompt(cwd: str) -> tuple[str, str] | None:
 
 def make_spawned_agent_system_prompt(
     cwd: str,
-    packs: list[str] | None = None,
+    extensions: list[str] | None = None,
     compact_instructions: str | None = None,
+    agent_name: str = "unknown",
 ) -> SystemPromptPreset:
     """Build system prompt for a spawned agent based on its working directory.
 
-    packs: explicit list of extension names to include, or None for DEFAULT_EXTENSIONS.
-           Pass [] to disable extensions entirely. (Parameter named 'packs' for
-           backward compatibility with callers in agents.py and tool schemas.)
+    extensions: explicit list of extension names to include, or None for DEFAULT_EXTENSIONS.
+                Pass [] to disable extensions entirely.
     compact_instructions: if provided, appended as a compaction guidance section.
 
     If SYSTEM_PROMPT.md exists in the agent's CWD, its contents are appended
@@ -186,10 +163,10 @@ def make_spawned_agent_system_prompt(
         # Admin agent — full soul + dev context
         append = _SOUL + "\n\n" + _DEV_CONTEXT + ("\n\n" + _USER_PROFILE if _USER_PROFILE else "")
     else:
-        # Non-admin agent — mini context prompt
-        append = _AGENT_CONTEXT_PROMPT + ("\n\n" + _USER_PROFILE if _USER_PROFILE else "")
+        # Non-admin agent — soul + user profile (same as pre-migration 934842d)
+        append = _SOUL + ("\n\n" + _USER_PROFILE if _USER_PROFILE else "")
     audience = "admin" if is_admin else "general"
-    ext_names = list(packs if packs is not None else DEFAULT_EXTENSIONS)
+    ext_names = list(extensions if extensions is not None else DEFAULT_EXTENSIONS)
     ext_text = extension_prompt_text(ext_names, audience)
     if ext_text:
         append += "\n\n" + ext_text
@@ -211,6 +188,7 @@ def make_spawned_agent_system_prompt(
             "When summarizing/compacting this conversation, prioritize preserving:\n"
             f"- {compact_instructions}"
         )
+    append = append.replace("{agent_name}", agent_name)
     return {
         "type": "preset",
         "preset": "claude_code",
