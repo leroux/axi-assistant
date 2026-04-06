@@ -2374,6 +2374,8 @@ async def _send_startup_notification(
             crash_msg += "\nSpawning crash analysis agent..."
         await master_ch.send(crash_msg)
     await master_ch.send(f"*System:* Axi ready. ({startup_elapsed:.1f}s){trace_tag}")
+    mentions = " ".join(f"<@{uid}>" for uid in config.ALLOWED_USER_IDS)
+    await master_ch.send(mentions)
     log.info("Sent restart notification to master channel")
 
 
