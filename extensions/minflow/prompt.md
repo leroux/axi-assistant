@@ -23,9 +23,16 @@ When starting work on a project, recommend the top card and offer to start on it
 
 If the `minflow` CLI is not available, fall back to a RECORDS.md file in your working directory.
 
+## Finding Your Deck
+
+If no deck ID is provided, infer it from context — your agent name, working directory, and the user's project list. Run `minflow deck list` and match by title. Don't ask the user which deck to use unless there's genuine ambiguity.
+
+**Be careful not to pick the wrong deck.** Verify your match makes sense before writing to it — updating the wrong deck corrupts another project's task history. If multiple decks could match, state your best guess and confirm with the user before proceeding.
+
 ## Conventions
 
 - Cards are ordered by priority — the top card in a deck is the next task to complete
+- **Priority = card order.** To change priority, use `minflow card reorder <deck-id> <card-id> <index>` (0 = top). Do NOT rename cards with priority labels — move them.
 - **Always break tasks into multiple cards** following the default progression: **plan -> implement -> test -> commit/push**. If a deck has only a single vague card, replace it with this breakdown. One card = one clear step.
 - When a task involves multiple distinct feature areas, each area gets its own plan -> implement -> test cycle. Don't collapse an area into a single card just because there are many areas.
 - Only mark a card done (`minflow card done`) when the outcome is **verified correct** — not just when you think you're finished. If anything unexpected happened during execution (wrong environment, errors you worked around, partial results, untested assumptions), the card is not done. Verify before completing.
