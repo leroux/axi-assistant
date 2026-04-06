@@ -120,6 +120,42 @@ def prune_history() -> None:
         _save(config.HISTORY_PATH, pruned)
 
 
+# ---------------------------------------------------------------------------
+# Schedule skips (one-off cancellations)
+# ---------------------------------------------------------------------------
+
+
+def load_skips() -> list[dict[str, Any]]:
+    return _load(config.SKIPS_PATH)
+
+
+def save_skips(skips: list[dict[str, Any]]) -> None:
+    _save(config.SKIPS_PATH, skips)
+
+
+def prune_skips() -> None:
+    """Remove skip entries whose date has passed."""
+    skips = load_skips()
+    today = datetime.now(config.SCHEDULE_TIMEZONE).date()
+    pruned = [s for s in skips if datetime.strptime(s["skip_date"], "%Y-%m-%d").date() >= today]
+    if len(pruned) != len(skips):
+        save_skips(pruned)
+
+
+def check_skip(name: str) -> bool:
+    """Check if a recurring event should be skipped today.
+
+    Returns True if skipped (and removes the consumed entry).
+    """
+    skips = load_skips()
+    today = datetime.now(config.SCHEDULE_TIMEZONE).strftime("%Y-%m-%d")
+    for skip in skips:
+        if skip.get("name") == name and skip.get("skip_date") == today:
+            skips.remove(skip)
+            save_skips(skips)
+            return True
+    return False
+
 
 def _text(msg: str) -> dict[str, Any]:
     """Return a successful MCP tool response with a single text block."""

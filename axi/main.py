@@ -40,9 +40,11 @@ from axi.prompts import (
 )
 from axi.schedule_tools import (
     append_history,
+    check_skip,
     load_schedules,
     make_schedule_mcp_server,
     prune_history,
+    prune_skips,
     save_schedules,
     schedule_key,
     schedules_lock,
@@ -434,6 +436,10 @@ async def _fire_schedules(
                 if last_occurrence > agents.schedule_last_fired[skey]:
                     agents.schedule_last_fired[skey] = last_occurrence
 
+                    if check_skip(skey):
+                        log.info("Skipping recurring event (one-off skip): %s", name)
+                        continue
+
                     set_agent_context(entry.get("owner") or entry.get("session") or name)
                     set_trigger("schedule", name=name)
                     log.info("Firing recurring event: %s", name)
@@ -576,6 +582,7 @@ async def check_schedules() -> None:
         return
 
     prune_history()
+    prune_skips()
 
     now_utc = datetime.now(UTC)
     now_local = datetime.now(config.SCHEDULE_TIMEZONE)

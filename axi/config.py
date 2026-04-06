@@ -43,6 +43,7 @@ __all__ = [
     "ROLLBACK_MARKER_PATH",
     "SCHEDULES_PATH",
     "SCHEDULE_TIMEZONE",
+    "SKIPS_PATH",
     "STREAMING_DISCORD",
     "STREAMING_EDIT_INTERVAL",
     "USAGE_HISTORY_PATH",
@@ -252,6 +253,7 @@ intents = Intents(
 BOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOT_WORKTREES_DIR = os.path.join(os.path.dirname(BOT_DIR), "axi-tests")
 SCHEDULES_PATH = os.path.join(AXI_USER_DATA, "schedules.json")
+SKIPS_PATH = os.path.join(AXI_USER_DATA, "schedule_skips.json")
 HISTORY_PATH = os.path.join(AXI_USER_DATA, "schedule_history.json")
 ROLLBACK_MARKER_PATH = os.path.join(BOT_DIR, ".rollback_performed")
 CRASH_ANALYSIS_MARKER_PATH = os.path.join(BOT_DIR, ".crash_analysis")
