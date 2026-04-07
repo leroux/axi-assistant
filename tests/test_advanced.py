@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from .helpers import Discord
+from .conftest import agent_cwd
 
 AXI_PY_DIR = Path(__file__).parent.parent
 WORKTREE_DIR = AXI_PY_DIR.parent
@@ -37,7 +38,7 @@ def test_concurrency_limit_bypass(discord: Discord, master_channel: str):
             name = f"smoke-conc{i}"
             discord.send_and_wait(
                 master_channel,
-                f'Spawn an agent named "{name}" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/{name}" and prompt "Say OK"',
+                f'Spawn an agent named "{name}" with cwd "' + agent_cwd(name) + f'" and prompt "Say OK"',
                 timeout=180.0,
             )
             agents.append(name)
@@ -61,7 +62,7 @@ def test_packs_default(discord: Discord, master_channel: str):
     """Test 52: Spawned agent gets default packs in system prompt."""
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-packd" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-packd" and prompt "What packs or system prompt sections do you have? List any special instructions you were given."',
+        'Spawn an agent named "smoke-packd" with cwd "' + agent_cwd("smoke-packd") + '" and prompt "What packs or system prompt sections do you have? List any special instructions you were given."',
         timeout=180.0,
     )
     time.sleep(3)
@@ -83,7 +84,7 @@ def test_packs_empty(discord: Discord, master_channel: str):
     """Test 54: Spawning agent with packs=[] loads no packs."""
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-packe" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-packe" and prompt "Say OK" and packs=[]',
+        'Spawn an agent named "smoke-packe" with cwd "' + agent_cwd("smoke-packe") + '" and prompt "Say OK" and packs=[]',
         timeout=180.0,
     )
     time.sleep(3)
@@ -113,7 +114,7 @@ def test_packs_custom(discord: Discord, master_channel: str):
     pack_name = available[0]
     discord.send_and_wait(
         master_channel,
-        f'Spawn an agent named "smoke-packc" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-packc" and prompt "What instructions or packs do you have?" and packs=["{pack_name}"]',
+        f'Spawn an agent named "smoke-packc" with cwd "' + agent_cwd("smoke-packc") + f'" and prompt "What instructions or packs do you have?" and packs=["{pack_name}"]',
         timeout=180.0,
     )
     time.sleep(3)
@@ -146,7 +147,7 @@ def test_record_updater_spawns(discord: Discord, master_channel: str, instance_e
     # Spawn a short-lived agent
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-rec" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-rec" and prompt "Say exactly: DONE"',
+        'Spawn an agent named "smoke-rec" with cwd "' + agent_cwd("smoke-rec") + '" and prompt "Say exactly: DONE"',
         timeout=180.0,
     )
     time.sleep(3)
@@ -273,7 +274,7 @@ def test_channel_reconstruction(discord: Discord, master_channel: str):
     # Spawn an agent
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-recon" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-recon" and prompt "Say OK"',
+        'Spawn an agent named "smoke-recon" with cwd "' + agent_cwd("smoke-recon") + '" and prompt "Say OK"',
         timeout=180.0,
     )
     time.sleep(3)
@@ -323,7 +324,7 @@ def test_stranded_message_recovery(discord: Discord, master_channel: str):
     # Spawn an agent and let it go to sleep
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-strand" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-strand" and prompt "Say OK"',
+        'Spawn an agent named "smoke-strand" with cwd "' + agent_cwd("smoke-strand") + '" and prompt "Say OK"',
         timeout=180.0,
     )
     time.sleep(3)

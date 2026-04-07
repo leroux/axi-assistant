@@ -15,14 +15,14 @@ Flowcoder agents are a superset of Claude Code agents. They support normal conve
 
 ```bash
 # From the axi-assistant repo (or a worktree)
-cd /home/ubuntu/axi-tests/<worktree>
+cd ~/axi-tests/<worktree>
 
 # Create and start a test instance
 PYTHONPATH=. .venv/bin/python ../axi_test.py up <name> --wait
 
 # Add flowcoder config to the test instance .env
-echo 'FLOWCODER_ENABLED=true' >> /home/ubuntu/axi-tests/<name>/.env
-echo 'CLAUDE_MODEL=claude-haiku-4-5-20251001' >> /home/ubuntu/axi-tests/<name>/.env
+echo 'FLOWCODER_ENABLED=true' >> ~/axi-tests/<name>/.env
+echo 'CLAUDE_MODEL=claude-haiku-4-5-20251001' >> ~/axi-tests/<name>/.env
 
 # Restart to pick up .env changes
 PYTHONPATH=. .venv/bin/python ../axi_test.py restart <name>

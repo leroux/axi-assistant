@@ -4,6 +4,7 @@ import time
 
 from .helpers import Discord
 from .llm_judge import llm_assert
+from .conftest import agent_cwd
 
 # -- Tier 7: Spawn Validation --
 
@@ -12,7 +13,7 @@ def test_reserved_name_axi_master(discord: Discord, master_channel: str):
     """Test 38: Cannot spawn agent with reserved name 'axi-master'."""
     msgs = discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "axi-master" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/test" and prompt "test"',
+        'Spawn an agent named "axi-master" with cwd "' + agent_cwd("test") + '" and prompt "test"',
         timeout=60.0,
     )
     text = discord.bot_response_text(msgs)
@@ -44,7 +45,7 @@ def test_empty_agent_name(discord: Discord, master_channel: str):
     """Test 41: Cannot spawn agent with empty name."""
     msgs = discord.send_and_wait(
         master_channel,
-        'Spawn an agent with an empty name (name="") with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/test" and prompt "test"',
+        'Spawn an agent with an empty name (name="") with cwd "' + agent_cwd("test") + '" and prompt "test"',
         timeout=60.0,
     )
     text = discord.bot_response_text(msgs)
@@ -64,7 +65,7 @@ def test_cwd_write_enforcement(discord: Discord, master_channel: str):
     # Spawn agent with restricted CWD
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-cwd" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-cwd" and prompt "Wait for instructions."',
+        'Spawn an agent named "smoke-cwd" with cwd "' + agent_cwd("smoke-cwd") + '" and prompt "Wait for instructions."',
         timeout=180.0,
     )
     time.sleep(5)
@@ -78,7 +79,7 @@ def test_cwd_write_enforcement(discord: Discord, master_channel: str):
     # Ask agent to write outside CWD — specifically ask for Write tool (not Bash)
     msgs = discord.send_and_wait(
         agent_ch,
-        'Use the Write tool to create a file at /home/ubuntu/escape-test.txt with content "escaped". Do NOT use bash or echo, use only the Write tool.',
+        'Use the Write tool to create a file at /tmp/escape-test.txt with content "escaped". Do NOT use bash or echo, use only the Write tool.',
         timeout=60.0,
     )
     text = discord.bot_response_text(msgs)
@@ -99,7 +100,7 @@ def test_special_chars_in_name(discord: Discord, master_channel: str):
     """Test 40: Special characters in agent name get normalized."""
     msgs = discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "test@#$!" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/test-special" and prompt "Say OK"',
+        'Spawn an agent named "test@#$!" with cwd "' + agent_cwd("test-special") + '" and prompt "Say OK"',
         timeout=180.0,
     )
     text = discord.bot_response_text(msgs)
@@ -127,7 +128,7 @@ def test_ask_user_question(discord: Discord, master_channel: str):
     """Test 43: Spawned agent can use AskUserQuestion and it appears in Discord."""
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-ask" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-ask" and prompt "Wait for instructions."',
+        'Spawn an agent named "smoke-ask" with cwd "' + agent_cwd("smoke-ask") + '" and prompt "Wait for instructions."',
         timeout=180.0,
     )
     time.sleep(3)
@@ -170,7 +171,7 @@ def test_todo_write_display(discord: Discord, master_channel: str):
     """Test 44: Spawned agent can use TodoWrite and it displays in Discord."""
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-todo" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-todo" and prompt "Wait for instructions."',
+        'Spawn an agent named "smoke-todo" with cwd "' + agent_cwd("smoke-todo") + '" and prompt "Wait for instructions."',
         timeout=180.0,
     )
     time.sleep(3)

@@ -4,6 +4,7 @@ import time
 
 from .helpers import Discord
 from .llm_judge import llm_assert
+from .conftest import agent_cwd
 
 
 def test_empty_text_command(discord: Discord, master_channel: str):
@@ -67,7 +68,7 @@ def test_race_message_during_kill(discord: Discord, master_channel: str):
     # Spawn an agent
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-race" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-race" and prompt "Wait for instructions."',
+        'Spawn an agent named "smoke-race" with cwd "' + agent_cwd("smoke-race") + '" and prompt "Wait for instructions."',
         timeout=180.0,
     )
     time.sleep(3)

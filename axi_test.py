@@ -34,13 +34,14 @@ from dotenv import dotenv_values
 from discordquery import DiscordClient
 
 
-TESTS_DIR = os.environ.get("AXI_TESTS_DIR", "/home/ubuntu/axi-tests")
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+TESTS_DIR = os.environ.get("AXI_TESTS_DIR", os.path.join(os.path.dirname(REPO_DIR), "axi-tests"))
 CONFIG_PATH = os.path.expanduser("~/.config/axi/test-config.json")
 CONFIG_DIR = os.path.expanduser("~/.config/axi")
 SLOTS_FILE = os.path.join(CONFIG_DIR, ".test-slots.json")
 SLOTS_LOCK = os.path.join(CONFIG_DIR, ".test-slots.lock")
 SENTINEL = "Bot has finished responding"
-BOT_DIR = "/home/ubuntu/axi-assistant"
+BOT_DIR = REPO_DIR
 
 
 # --- Utilities ---

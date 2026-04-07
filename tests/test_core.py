@@ -7,6 +7,7 @@ import pytest
 
 from .helpers import Discord
 from .llm_judge import llm_assert
+from .conftest import agent_cwd
 
 # -- Tier 1: Core Features --
 
@@ -99,7 +100,7 @@ def test_agent_spawn_and_kill(discord: Discord, master_channel: str):
     # Spawn
     spawn_msgs = discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-lifecycle" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-lifecycle" and prompt "Say exactly: LIFECYCLE_ALIVE"',
+        'Spawn an agent named "smoke-lifecycle" with cwd "' + agent_cwd("smoke-lifecycle") + '" and prompt "Say exactly: LIFECYCLE_ALIVE"',
         timeout=180.0,
     )
     spawn_text = discord.bot_response_text(spawn_msgs)
@@ -165,7 +166,7 @@ def test_duplicate_live_agent_name(discord: Discord, master_channel: str):
     # Spawn the agent
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-dupe" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-dupe" and prompt "Say OK"',
+        'Spawn an agent named "smoke-dupe" with cwd "' + agent_cwd("smoke-dupe") + '" and prompt "Say OK"',
         timeout=180.0,
     )
     time.sleep(3)
@@ -173,7 +174,7 @@ def test_duplicate_live_agent_name(discord: Discord, master_channel: str):
     # Try to spawn another with the same name
     msgs = discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-dupe" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-dupe" and prompt "Say OK again"',
+        'Spawn an agent named "smoke-dupe" with cwd "' + agent_cwd("smoke-dupe") + '" and prompt "Say OK again"',
         timeout=60.0,
     )
     text = discord.bot_response_text(msgs)
@@ -281,7 +282,7 @@ def test_auto_sleep_and_wake(discord: Discord, master_channel: str):
     # Spawn an agent
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-sleep" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-sleep" and prompt "Say exactly: AWAKE"',
+        'Spawn an agent named "smoke-sleep" with cwd "' + agent_cwd("smoke-sleep") + '" and prompt "Say exactly: AWAKE"',
         timeout=180.0,
     )
     time.sleep(3)
@@ -323,7 +324,7 @@ def test_duplicate_name_spawn_killed(discord: Discord, master_channel: str):
     # Spawn an agent
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-reuse" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-reuse" and prompt "Say OK"',
+        'Spawn an agent named "smoke-reuse" with cwd "' + agent_cwd("smoke-reuse") + '" and prompt "Say OK"',
         timeout=180.0,
     )
     time.sleep(3)
@@ -345,7 +346,7 @@ def test_duplicate_name_spawn_killed(discord: Discord, master_channel: str):
     # Respawn with same name — should reuse the killed channel
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-reuse" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-reuse" and prompt "Say REUSED"',
+        'Spawn an agent named "smoke-reuse" with cwd "' + agent_cwd("smoke-reuse") + '" and prompt "Say REUSED"',
         timeout=180.0,
     )
     time.sleep(3)
@@ -367,7 +368,7 @@ def test_agent_resume(discord: Discord, master_channel: str):
     # Spawn agent with a unique marker
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-resume" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-resume" and prompt "Remember the code word PINEAPPLE. Say: I will remember PINEAPPLE."',
+        'Spawn an agent named "smoke-resume" with cwd "' + agent_cwd("smoke-resume") + '" and prompt "Remember the code word PINEAPPLE. Say: I will remember PINEAPPLE."',
         timeout=180.0,
     )
     time.sleep(3)
@@ -395,7 +396,7 @@ def test_agent_resume(discord: Discord, master_channel: str):
         # Resume the agent
         discord.send_and_wait(
             master_channel,
-            f'Spawn an agent named "smoke-resume" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-resume" and prompt "What code word were you told to remember?" and resume="{session_id}"',
+            f'Spawn an agent named "smoke-resume" with cwd "' + agent_cwd("smoke-resume") + f'" and prompt "What code word were you told to remember?" and resume="{session_id}"',
             timeout=180.0,
         )
         time.sleep(5)

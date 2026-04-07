@@ -4,6 +4,7 @@ import time
 
 from .helpers import Discord
 from .llm_judge import llm_assert
+from .conftest import agent_cwd
 
 # -- Tier 3: Message Handling --
 
@@ -122,7 +123,7 @@ def test_inter_agent_message_idle(discord: Discord, master_channel: str):
     # Spawn an agent
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-intercom" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-intercom" and prompt "You are a test agent. Wait for instructions."',
+        'Spawn an agent named "smoke-intercom" with cwd "' + agent_cwd("smoke-intercom") + '" and prompt "You are a test agent. Wait for instructions."',
         timeout=180.0,
     )
     time.sleep(5)
@@ -238,7 +239,7 @@ def test_inter_agent_message_busy(discord: Discord, master_channel: str):
     # Spawn an agent
     discord.send_and_wait(
         master_channel,
-        'Spawn an agent named "smoke-busy" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/smoke-busy" and prompt "Wait for instructions."',
+        'Spawn an agent named "smoke-busy" with cwd "' + agent_cwd("smoke-busy") + '" and prompt "Wait for instructions."',
         timeout=180.0,
     )
     time.sleep(3)
@@ -277,7 +278,7 @@ def test_concurrent_multi_agent(discord: Discord, master_channel: str):
     for name in ["smoke-para", "smoke-parb"]:
         discord.send_and_wait(
             master_channel,
-            f'Spawn an agent named "{name}" with cwd "/home/ubuntu/axi-tests/smoke-test-data/agents/{name}" and prompt "Wait for instructions."',
+            f'Spawn an agent named "{name}" with cwd "' + agent_cwd(name) + f'" and prompt "Wait for instructions."',
             timeout=180.0,
         )
         time.sleep(2)

@@ -1,6 +1,7 @@
 """Pytest fixtures for Axi bot smoke tests."""
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -14,9 +15,16 @@ WORKTREE_DIR = AXI_PY_DIR.parent
 DATA_DIR = WORKTREE_DIR.parent / f"{WORKTREE_DIR.name}-data"
 TEST_CONFIG = Path.home() / ".config/axi/test-config.json"
 INSTANCE_NAME = "smoke-test"
-INSTANCE_DIR = Path("/home/ubuntu/axi-tests/smoke-test")
+REPO_DIR = Path(__file__).resolve().parent.parent
+INSTANCE_DIR = Path(os.environ.get("AXI_TEST_INSTANCE_DIR", str(REPO_DIR.parent / "axi-tests" / "smoke-test")))
 DEFAULT_TIMEOUT = 120.0
 SPAWN_TIMEOUT = 180.0
+
+
+def agent_cwd(name: str) -> str:
+    """Return the CWD path for a test agent."""
+    return str(INSTANCE_DIR / "data" / "agents" / name)
+
 
 # Track whether the last test failed (used for recovery between tests)
 _last_test_failed = False

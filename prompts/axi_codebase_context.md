@@ -5,7 +5,7 @@ This file is appended to the system prompt for agents working on the axi-assista
 ## Architecture
 
 - **Axi Prime**: Main bot at %(bot_dir)s (branch `main`, service `axi-bot.service`)
-- **Disposable test instances**: Managed by `axi_test.py` CLI, git worktrees in `/home/ubuntu/axi-tests/<name>/`
+- **Disposable test instances**: Managed by `axi_test.py` CLI, git worktrees in `~/axi-tests/<name>/`
 - Each test instance has its own worktree, `.env`, venv, data dir, and systemd service (`axi-test@<name>`)
 - Config at `~/.config/axi/test-config.json` (bots, guilds, defaults)
 - See [test-system.md](test-system.md) for details
@@ -26,7 +26,7 @@ This file is appended to the system prompt for agents working on the axi-assista
 
 ## Development Philosophy
 
-Read `/home/ubuntu/axi-user-data/CODE-PHILOSOPHY.md` for the principles guiding this codebase: data-oriented design, mechanical sympathy (hardware awareness), explicit over convention, performance-aware, pragmatic functional programming, clear data flow, and no over-abstraction. This philosophy should inform all architectural decisions.
+Read `~/axi-user-data/CODE-PHILOSOPHY.md` for the principles guiding this codebase: data-oriented design, mechanical sympathy (hardware awareness), explicit over convention, performance-aware, pragmatic functional programming, clear data flow, and no over-abstraction. This philosophy should inform all architectural decisions.
 
 ## Core vs Extension vs User Boundary
 
@@ -40,7 +40,7 @@ Core files: SOUL.md, soul.json, axi_codebase_context.md, bot.py, handlers.py, su
 
 ## Important Patterns
 
-- `BOT_WORKTREES_DIR` (hardcoded `/home/ubuntu/axi-tests`) gates Discord MCP tools and worktree write access
+- `BOT_WORKTREES_DIR` (hardcoded `~/axi-tests`) gates Discord MCP tools and worktree write access
 - Permission callback: agents rooted in BOT_DIR or worktrees get write access to worktrees dir
 - Bot message filter: own messages always ignored, other bots allowed if in ALLOWED_USER_IDS
 - `httpx.AsyncClient` used for Discord REST API (MCP tools), not discord.py
@@ -96,7 +96,7 @@ Available test guilds are configured in `~/.config/axi/test-config.json`. Run `c
 The parent (Axi master) prepares the working directory, then spawns an agent in it. The agent codes, tests, and ships — it never needs to reference the main repo directly.
 
 **Parent responsibilities:**
-1. Create a git worktree: `git -C %(bot_dir)s worktree add /home/ubuntu/axi-tests/<name> -b feature/<name>`
+1. Create a git worktree: `git -C %(bot_dir)s worktree add ~/axi-tests/<name> -b feature/<name>`
    (or reuse an existing worktree)
 2. Spawn the coding agent with `cwd` set to the worktree directory
 

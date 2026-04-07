@@ -11,7 +11,7 @@ Disposable test bot instances allow development and testing against real Discord
 
 ### Infrastructure
 
-1. **Worktree layout.** Each test instance is a git worktree at `/home/ubuntu/axi-tests/<name>/` with its own `.env`, virtualenv, data directory, and systemd service (`axi-test@<name>`).
+1. **Worktree layout.** Each test instance is a git worktree at `~/axi-tests/<name>/` with its own `.env`, virtualenv, data directory, and systemd service (`axi-test@<name>`).
 
 2. **Configuration.** Global test config lives at `~/.config/axi/test-config.json`, containing available bot tokens, guild IDs, and default settings.
 
