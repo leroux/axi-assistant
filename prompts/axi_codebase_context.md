@@ -115,6 +115,10 @@ Exceptions: pure research agents, design-only agents, agents working on external
 8. **Merge to main**: `uv run python axi_test.py merge` — submits to merge queue, waits for turn, squash-merges into main. If it exits with code 1 ("main has moved ahead"), run `git rebase main` and retry the merge.
 9. **Restart**: Tell the parent to restart so it picks up the merged changes (spawned agents do NOT have `axi_restart` — only the master can restart itself)
 
+### Reproduce Before Declaring Root Cause
+
+When debugging axi bugs, reproduce the bug on a test instance before declaring a root cause. Reading code and theorizing is useful for forming hypotheses, but a reproduction on the test server is the strongest evidence -- it proves the bug exists and proves the fix works. This connects to the SOUL.md evidence principle: for axi bugs, the best evidence is a reproduction on the test server.
+
 ### Fast Message Polling
 
 For scripted test interactions, use the `discord_wait_for_message` MCP tool:

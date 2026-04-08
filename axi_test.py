@@ -35,7 +35,7 @@ from discordquery import DiscordClient
 
 
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
-TESTS_DIR = os.environ.get("AXI_TESTS_DIR", os.path.join(os.path.dirname(REPO_DIR), "axi-tests"))
+TESTS_DIR = os.environ.get("AXI_TESTS_DIR", os.path.join(os.path.expanduser("~"), "axi-tests"))
 CONFIG_PATH = os.path.expanduser("~/.config/axi/test-config.json")
 CONFIG_DIR = os.path.expanduser("~/.config/axi")
 SLOTS_FILE = os.path.join(CONFIG_DIR, ".test-slots.json")
@@ -359,17 +359,16 @@ def _write_env(
     data_path: str,
     rs_binary: str | None = None,
 ) -> None:
-    """Generate .env and data dir from reservation data.
-
-    The .env contains non-sensitive config only. The bot token is NOT written
-    here — bot.py resolves it at startup from the slots file + test-config.json.
-    """
+    """Generate .env and data dir from reservation data."""
     guild_info = config["guilds"][guild_name]
     guild_id = guild_info["guild_id"]
     defaults = config.get("defaults", {})
+    bot_name = guild_info.get("bot")
+    bot_token = config["bots"][bot_name]["token"]
 
     os.makedirs(instance_path, exist_ok=True)
     env_content = (
+        f"DISCORD_TOKEN={bot_token}\n"
         f"DISCORD_GUILD_ID={guild_id}\n"
         f"ALLOWED_USER_IDS={defaults.get('allowed_user_ids', '')}\n"
         f"SCHEDULE_TIMEZONE={defaults.get('schedule_timezone', 'UTC')}\n"

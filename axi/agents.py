@@ -1590,6 +1590,11 @@ async def run_initial_prompt(session: AgentSession, prompt: MessageContent, chan
                         return
                     except Exception:
                         log.exception("Failed to wake agent '%s' for initial prompt", session.name)
+                        # Drain stderr so we can see why the CLI crashed
+                        stderr_lines = drain_stderr(session)
+                        if stderr_lines:
+                            stderr_text = "\n".join(stderr_lines[-20:])  # last 20 lines
+                            log.error("Stderr from failed agent '%s':\n%s", session.name, stderr_text)
                         await send_system(channel, f"Failed to wake agent **{session.name}**.")
                         return
 

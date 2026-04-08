@@ -5,9 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
 WorkingDirectory=%h/axi-tests/%i
-ExecStart=%h/.local/bin/uv run python -m axi.supervisor
+ExecStart=/usr/bin/env uv run python -m axi.supervisor
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=15
