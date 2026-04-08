@@ -172,15 +172,31 @@ def _match_channel_name(ch_name: str, normalized: str) -> bool:
 
 
 def _is_axi_cwd(cwd: str | None) -> bool:
-    """Return True if cwd is within the bot directory or a worktree."""
+    """Return True if cwd is BOT_DIR or a worktree whose parent repo is BOT_DIR."""
     if not cwd:
         return False
     real = os.path.realpath(cwd)
     bot_real = os.path.realpath(config.BOT_DIR)
+    # Direct match: cwd is BOT_DIR or inside it
+    if real == bot_real or real.startswith(bot_real + os.sep):
+        return True
+    # Worktree match: cwd is under BOT_WORKTREES_DIR — check parent repo
     worktrees_real = os.path.realpath(config.BOT_WORKTREES_DIR)
-    return real in (bot_real, worktrees_real) or real.startswith(
-        (bot_real + os.sep, worktrees_real + os.sep)
-    )
+    if real == worktrees_real or real.startswith(worktrees_real + os.sep):
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "-C", real, "rev-parse", "--git-common-dir"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                common_dir = os.path.realpath(result.stdout.strip())
+                bot_git_dir = os.path.realpath(os.path.join(bot_real, ".git"))
+                return common_dir == bot_git_dir
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return False
+    return False
 
 
 # ---------------------------------------------------------------------------
