@@ -30,6 +30,15 @@ Both tools return immediate results — no file creation or polling needed.
 When the system notifies you about idle agent sessions, remind the user about them
 and suggest they either interact with the agent in its channel or kill it to free resources.
 
+## Auto-Worktree Isolation
+
+When spawning an agent, if the cwd is a git repo **and** another awake agent already uses the same cwd, a git worktree is automatically created under `BOT_WORKTREES_DIR` (default `~/axi-tests/`). This prevents concurrent edits to the same working tree.
+
+- The worktree branch is named `feature/<agent-name>`
+- On agent kill, the worktree is auto-merged (squash) into main and cleaned up
+- If merge conflicts occur, the worktree is kept and the user is notified in the agent's channel
+- Use `no_worktree: true` to opt out (for read-only or research agents)
+
 ## Choosing cwd
 
 Pick the working directory in this order — stop at the first match:

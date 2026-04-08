@@ -25,7 +25,7 @@ import arrow
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from opentelemetry import trace
 
-from axi import agents, channels, config
+from axi import agents, channels, config, worktrees
 from axi.log_context import set_agent_context, set_trigger
 
 # Discord snowflake epoch (2015-01-01T00:00:00Z in milliseconds)
@@ -110,6 +110,10 @@ _tracer = trace.get_tracer(__name__)
                 "type": "string",
                 "description": "Instructions for what to preserve during context compaction (e.g. 'always preserve the bug description, current fix approach, and test results')",
             },
+            "no_worktree": {
+                "type": "boolean",
+                "description": "Skip auto-worktree creation and use cwd directly (default: false)",
+            },
             "mcp_servers": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -132,6 +136,7 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     fc_command = args.get("command", "")
     fc_command_args = args.get("command_args", "")
     agent_extensions = args.get("extensions")  # None = use defaults, [] = no extensions
+    no_worktree = args.get("no_worktree", False)
     compact_instructions = args.get("compact_instructions")
     mcp_server_names: list[str] = args.get("mcp_servers") or []
 
@@ -169,6 +174,22 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
                 "content": [{"type": "text", "text": "Error: flowcoder integration is disabled."}],
                 "is_error": True,
             }
+
+    # Auto-create worktree when cwd is a git repo and another awake agent
+    # already uses the same cwd (prevents concurrent edits to the same tree).
+    if not no_worktree and agent_name and worktrees.is_git_repo(agent_cwd):
+        cwd_conflict = any(
+            s.cwd == agent_cwd and agents.is_awake(s)
+            for name, s in agents.agents.items()
+            if name != agent_name
+        )
+        if cwd_conflict:
+            worktree_path = worktrees.create_worktree(agent_name)
+            if worktree_path:
+                agent_cwd = worktree_path
+                log.info("Auto-created worktree for '%s' at %s (cwd conflict)", agent_name, worktree_path)
+            else:
+                log.warning("Failed to create worktree for '%s', using original cwd", agent_name)
 
     # Use global ALLOWED_CWDS (which includes ALLOWED_CWDS and ADMIN_ALLOWED_CWDS from .env)
     if not any(agent_cwd == d or agent_cwd.startswith(d + os.sep) for d in config.ALLOWED_CWDS):
@@ -270,6 +291,8 @@ async def axi_kill_agent(args: McpArgs) -> McpResult:
     # Remove from agents dict immediately so the name is freed for respawn
     agents.agents.pop(agent_name, None)
 
+    agent_cwd = session.cwd
+
     async def _do_kill() -> None:
         try:
             agent_ch = await agents.get_agent_channel(agent_name)
@@ -282,7 +305,30 @@ async def axi_kill_agent(args: McpArgs) -> McpResult:
                     )
                 else:
                     await agents.send_system(agent_ch, f"Agent **{agent_name}** moved to Killed.")
+
             await agents.sleep_agent(session, force=True)
+
+            # Auto-merge if agent was in an auto-created worktree
+            if worktrees.is_auto_worktree(agent_cwd):
+                loop = asyncio.get_running_loop()
+                status, detail = await loop.run_in_executor(
+                    None, worktrees.try_merge_and_cleanup, agent_cwd
+                )
+                if agent_ch:
+                    if status == "merged":
+                        await agents.send_system(agent_ch, f"Auto-merged worktree as `{detail}`.")
+                    elif status == "no_commits":
+                        await agents.send_system(agent_ch, "Worktree had no commits — cleaned up.")
+                    elif status in ("conflict", "needs_rebase"):
+                        await agents.send_system(
+                            agent_ch,
+                            f"Could not auto-merge worktree: {detail}\n"
+                            f"Worktree kept at `{agent_cwd}` for manual resolution.",
+                        )
+                    elif status == "error":
+                        await agents.send_system(agent_ch, f"Auto-merge error: {detail}")
+                log.info("Auto-merge for '%s': %s — %s", agent_name, status, detail)
+
             await agents.move_channel_to_killed(agent_name)
         except Exception:
             log.exception("Error in background kill of agent '%s'", agent_name)

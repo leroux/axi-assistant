@@ -30,7 +30,7 @@ from discord.ext import tasks
 from discord.ext.commands import Bot
 from opentelemetry import trace
 
-from axi import agents, channels, config, scheduler, tools
+from axi import agents, channels, config, scheduler, tools, worktrees
 from axi.axi_types import ActivityState, AgentSession, discord_state, tool_display
 from axi.log_context import set_agent_context, set_trigger
 from axi.prompts import (
@@ -2056,39 +2056,7 @@ async def _handle_active_channel_create(channel: TextChannel) -> None:
 
 def _create_worktree(name: str) -> str | None:
     """Create a git worktree for an axi-dev agent. Returns worktree path or None on failure."""
-    worktree_path = os.path.join(config.BOT_WORKTREES_DIR, name)
-
-    if os.path.isdir(worktree_path):
-        # Check if it's already a valid git worktree
-        git_marker = os.path.join(worktree_path, ".git")
-        if os.path.exists(git_marker):
-            log.info("Reusing existing worktree for '%s' at %s", name, worktree_path)
-            return worktree_path
-        # Directory exists but isn't a worktree — conflict
-        log.warning("Directory exists at %s but is not a git worktree", worktree_path)
-        return None
-
-    branch = f"feature/{name}"
-    result = subprocess.run(
-        ["git", "-C", config.BOT_DIR, "worktree", "add", worktree_path, "-b", branch],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        # Branch might already exist, try without -b
-        result = subprocess.run(
-            ["git", "-C", config.BOT_DIR, "worktree", "add", worktree_path, branch],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            log.warning("Failed to create worktree for '%s': %s", name, result.stderr.strip())
-            return None
-        log.info("Created worktree for '%s' at %s (existing branch)", name, worktree_path)
-    else:
-        log.info("Created worktree for '%s' at %s", name, worktree_path)
-
-    return worktree_path
+    return worktrees.create_worktree(name)
 
 
 async def _handle_axi_channel_create(channel: TextChannel) -> None:

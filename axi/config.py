@@ -252,7 +252,7 @@ intents = Intents(
 # ---------------------------------------------------------------------------
 
 BOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BOT_WORKTREES_DIR = os.path.join(os.path.dirname(BOT_DIR), "axi-tests")
+BOT_WORKTREES_DIR = os.environ.get("AXI_WORKTREES_DIR", os.path.join(os.path.dirname(BOT_DIR), "axi-tests"))
 SCHEDULES_PATH = os.path.join(AXI_USER_DATA, "schedules.json")
 SKIPS_PATH = os.path.join(AXI_USER_DATA, "schedule_skips.json")
 HISTORY_PATH = os.path.join(AXI_USER_DATA, "schedule_history.json")

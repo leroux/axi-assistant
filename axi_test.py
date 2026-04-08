@@ -17,21 +17,33 @@ Usage:
 """
 
 import argparse
-import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
 import time
-import tomllib
-from collections.abc import Generator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
 
 from dotenv import dotenv_values
 
+from axi.worktrees import (
+    cleanup_stale as _cleanup_stale,
+    execute_merge as _execute_merge,
+    find_git_deps as _find_git_deps,
+    find_main_repo as _find_main_repo,
+    flock as _flock,
+    get_worktree_branch,
+    git as _git,
+    merge_lock_file as _merge_lock_file,
+    queue_file as _queue_file,
+    queue_lock as _queue_lock,
+    read_queue as _read_queue,
+    remove_from_queue as _remove_from_queue,
+    upgrade_git_deps as _upgrade_git_deps,
+    write_queue as _write_queue,
+)
 from discordquery import DiscordClient
 
 
@@ -162,27 +174,6 @@ def get_instance_env(name: str) -> dict[str, str | None]:
     return dotenv_values(env_path)
 
 
-def get_worktree_branch(worktree_path: str) -> str:
-    """Get the branch name for a worktree."""
-    result = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=worktree_path,
-        capture_output=True,
-        text=True,
-    )
-    branch = result.stdout.strip()
-    if branch:
-        return branch
-    # Detached HEAD — show short hash
-    result = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"],
-        cwd=worktree_path,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip() or "unknown"
-
-
 # --- Slot Management ---
 #
 # All slot reservations are tracked in a single JSON file (~/.config/axi/.test-slots.json)
@@ -196,16 +187,6 @@ def get_worktree_branch(worktree_path: str) -> str:
 # atomically under the same lock acquisition.
 
 
-@contextmanager
-def _flock(path: str) -> Generator[None, None, None]:
-    """Acquire exclusive file lock, release on exit."""
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
 
 
 def _read_slots() -> dict[str, Any]:
@@ -537,225 +518,6 @@ def cleanup_orphan_services() -> int:
         cleaned += 1
 
     return cleaned
-
-
-# --- Merge Queue ---
-
-
-def _find_main_repo() -> str:
-    """Find the main repo path via git's common dir."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print("Error: Not inside a git repository", file=sys.stderr)
-        sys.exit(1)
-    return os.path.dirname(result.stdout.strip())
-
-
-def _queue_file(main_repo: str) -> str:
-    return os.path.join(main_repo, ".merge-queue.json")
-
-
-def _queue_lock(main_repo: str) -> str:
-    return os.path.join(main_repo, ".merge-queue.lock")
-
-
-def _merge_lock_file(main_repo: str) -> str:
-    return os.path.join(main_repo, ".merge-exec.lock")
-
-
-def _read_queue(main_repo: str) -> list[dict[str, Any]]:
-    """Read queue file. Caller must hold queue lock."""
-    path = _queue_file(main_repo)
-    if not os.path.isfile(path):
-        return []
-    with open(path) as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return []
-
-
-def _write_queue(main_repo: str, entries: list[dict[str, Any]]) -> None:
-    """Write queue file. Caller must hold queue lock."""
-    with open(_queue_file(main_repo), "w") as f:
-        json.dump(entries, f, indent=2)
-
-
-def _cleanup_stale(entries: list[dict[str, Any]]) -> None:
-    """Remove entries with dead processes. Modifies list in place."""
-    now = datetime.now(UTC)
-    to_remove: list[int] = []
-    for i, entry in enumerate(entries):
-        pid = entry.get("pid")
-        if not pid:
-            continue
-        try:
-            os.kill(pid, 0)
-            # Process alive — check heartbeat staleness as backup
-            heartbeat_s = entry.get("heartbeat", "")
-            submitted_s = entry.get("submitted_at", "")
-            if heartbeat_s and submitted_s:
-                heartbeat = datetime.fromisoformat(heartbeat_s)
-                submitted = datetime.fromisoformat(submitted_s)
-                if (now - heartbeat).total_seconds() > 60 and (now - submitted).total_seconds() > 600:
-                    to_remove.append(i)
-        except ProcessLookupError:
-            to_remove.append(i)
-        except PermissionError:
-            pass  # Process exists but we can't signal it
-    for i in reversed(to_remove):
-        removed = entries.pop(i)
-        print(f"Removed stale queue entry: {removed.get('branch', '?')} (pid {removed.get('pid', '?')})")
-
-
-def _remove_from_queue(main_repo: str, branch: str) -> None:
-    """Remove a branch from the queue."""
-    with _flock(_queue_lock(main_repo)):
-        entries = _read_queue(main_repo)
-        entries = [e for e in entries if e["branch"] != branch]
-        _write_queue(main_repo, entries)
-
-
-def _git(main_repo: str, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command in the main repo."""
-    return subprocess.run(
-        ["git", "-C", main_repo, *args],
-        capture_output=True,
-        text=True,
-    )
-
-
-def _find_git_deps(main_repo: str) -> list[str]:
-    """Parse pyproject.toml to find git-sourced dependency package names."""
-    pyproject_path = os.path.join(main_repo, "pyproject.toml")
-    try:
-        with open(pyproject_path, "rb") as f:
-            data = tomllib.load(f)
-    except (FileNotFoundError, tomllib.TOMLDecodeError):
-        return []
-    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
-    return [name for name, spec in sources.items() if isinstance(spec, dict) and "git" in spec]
-
-
-def _upgrade_git_deps(main_repo: str) -> None:
-    """Upgrade git-sourced deps and auto-commit uv.lock if changed."""
-    pkgs = _find_git_deps(main_repo)
-    if not pkgs:
-        print("No git-sourced dependencies found — skipping upgrade")
-        return
-
-    lock_args = []
-    for pkg in pkgs:
-        lock_args.extend(["--upgrade-package", pkg])
-
-    print(f"Upgrading git deps: {', '.join(pkgs)}...")
-    lock_result = subprocess.run(
-        ["uv", "lock", *lock_args],
-        cwd=main_repo,
-        capture_output=True,
-        text=True,
-    )
-    if lock_result.returncode != 0:
-        print(f"Note: uv lock failed — {lock_result.stderr.strip()}")
-        return
-
-    sync_result = subprocess.run(
-        ["uv", "sync"],
-        cwd=main_repo,
-        capture_output=True,
-        text=True,
-    )
-    if sync_result.returncode != 0:
-        print(f"Note: uv sync failed — {sync_result.stderr.strip()}")
-
-    # Check if lock file changed
-    diff = _git(main_repo, "diff", "--quiet", "uv.lock")
-    if diff.returncode != 0:
-        _git(main_repo, "add", "uv.lock")
-        pkg_list = ", ".join(pkgs)
-        _git(main_repo, "commit", "-m", f"Update git deps ({pkg_list})")
-        print(f"Updated git deps: uv.lock")
-    else:
-        print("Git deps already up to date")
-
-
-def _execute_merge(main_repo: str, branch: str, message: str | None = None) -> tuple[str, str]:
-    """Execute squash merge. Returns (status, detail).
-
-    status: "merged", "needs_rebase", or "error"
-    detail: commit SHA on success, or error message on failure.
-    """
-    # Verify main repo is on 'main' branch
-    current = _git(main_repo, "branch", "--show-current")
-    if current.stdout.strip() != "main":
-        return ("error", f"main repo is on branch '{current.stdout.strip()}', expected 'main'")
-
-    # Pre-merge cleanup: if index is dirty from interrupted merge, reset
-    if _git(main_repo, "diff", "--cached", "--quiet").returncode != 0:
-        print("Cleaning up dirty index from interrupted merge...")
-        r = _git(main_repo, "reset", "--hard", "HEAD")
-        if r.returncode != 0:
-            return ("error", f"failed to clean dirty index: {r.stderr.strip()}")
-
-    # Fast-forward check: merge-base must equal main HEAD
-    merge_base_r = _git(main_repo, "merge-base", "main", branch)
-    if merge_base_r.returncode != 0:
-        return ("error", f"failed to compute merge-base: {merge_base_r.stderr.strip()}")
-
-    main_head_r = _git(main_repo, "rev-parse", "main")
-    if main_head_r.returncode != 0:
-        return ("error", f"failed to get main HEAD: {main_head_r.stderr.strip()}")
-
-    merge_base = merge_base_r.stdout.strip()
-    main_head = main_head_r.stdout.strip()
-
-    if merge_base != main_head:
-        return ("needs_rebase", f"merge-base {merge_base[:8]} != main HEAD {main_head[:8]}")
-
-    # Check branch has commits beyond main
-    log_r = _git(main_repo, "log", "--oneline", f"main..{branch}")
-    if not log_r.stdout.strip():
-        return ("error", "no commits to merge — branch is identical to main")
-
-    # Collect full commit messages (subject + body) before squashing
-    msg_r = _git(main_repo, "log", "--format=%B---", f"main..{branch}")
-    raw_msgs = msg_r.stdout.strip()
-    # Split by separator, clean up, format as bullet list
-    commits = [m.strip() for m in raw_msgs.split("---") if m.strip()]
-    if len(commits) == 1:
-        commit_log = commits[0]
-    else:
-        commit_log = "\n\n".join(f"- {c}" for c in commits)
-
-    # Squash merge
-    merge_r = _git(main_repo, "merge", "--squash", branch)
-    if merge_r.returncode != 0:
-        _git(main_repo, "reset", "--hard", "HEAD")
-        return ("error", f"squash merge failed: {merge_r.stderr.strip()}")
-
-    # Build commit message: custom message as title, always include full commit log
-    if message:
-        commit_msg = message
-        if commit_log:
-            commit_msg += f"\n\n{commit_log}"
-    else:
-        if commit_log:
-            commit_msg = commit_log
-        else:
-            commit_msg = branch
-
-    # Commit
-    commit_r = _git(main_repo, "commit", "-m", commit_msg)
-    if commit_r.returncode != 0:
-        _git(main_repo, "reset", "--hard", "HEAD")
-        return ("error", f"commit failed: {commit_r.stderr.strip()}")
-
-    sha_r = _git(main_repo, "rev-parse", "--short", "HEAD")
-    return ("merged", sha_r.stdout.strip())
 
 
 # --- Subcommands ---

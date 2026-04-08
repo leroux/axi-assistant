@@ -41,7 +41,7 @@ Core files: SOUL.md, soul.json, axi_codebase_context.md, bot.py, handlers.py, su
 
 ## Important Patterns
 
-- `BOT_WORKTREES_DIR` (hardcoded `~/axi-tests`) gates Discord MCP tools and worktree write access
+- `BOT_WORKTREES_DIR` (default `~/axi-tests`, configurable via `AXI_WORKTREES_DIR`) gates Discord MCP tools and worktree write access
 - Permission callback: agents rooted in BOT_DIR or worktrees get write access to worktrees dir
 - Bot message filter: own messages always ignored, other bots allowed if in ALLOWED_USER_IDS
 - `httpx.AsyncClient` used for Discord REST API (MCP tools), not discord.py
@@ -97,13 +97,11 @@ Available test guilds are configured in `~/.config/axi/test-config.json`. Run `c
 The parent (Axi master) prepares the working directory, then spawns an agent in it. The agent codes, tests, and ships — it never needs to reference the main repo directly.
 
 **Parent responsibilities:**
-1. Create a git worktree: `git -C %(bot_dir)s worktree add ~/axi-tests/<name> -b feature/<name>`
-   (or reuse an existing worktree)
-2. Spawn the coding agent with `cwd` set to the worktree directory
+1. Spawn the coding agent with `cwd` set to the bot's working directory (or a specific repo)
+2. Auto-worktree handles isolation: if another agent already uses the same git-repo cwd, a worktree is created automatically under `BOT_WORKTREES_DIR`
+3. On agent kill, the worktree is auto-merged (squash) into main and cleaned up. Conflicts are reported to the agent's channel.
 
-**IMPORTANT — worktree rule for code agents:**
-Any agent that MIGHT edit files in the axi-assistant codebase MUST be spawned in a worktree, never directly in `%(bot_dir)s` (the live main repo). The running bot reads from main — edits there affect the live system immediately and bypass testing. When in doubt, use a worktree. Reading from a worktree costs nothing.
-Exceptions: pure research agents, design-only agents, agents working on external repos, or when the user explicitly requests a specific cwd.
+**Note:** Manual worktree creation is no longer required. The `no_worktree` parameter on `axi_spawn_agent` can opt out for read-only agents.
 
 **Agent workflow:**
 1. **Edit files** in cwd (all edits naturally go to the right place)
