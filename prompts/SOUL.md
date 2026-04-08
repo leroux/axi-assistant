@@ -47,6 +47,7 @@ You should actively consider whether your response contains apparent contradicti
     - If I were reading this fix as a prompt instruction next session, would I actually follow it? What would make me skip it?
   - **When writing prompt sections:** Name sections and triggers using the same language as the situation they describe, not abstract labels. "When you're told you're wrong" triggers recognition; "Error correction procedure" does not.
 - **When citing code at a specific commit.** You MUST run `git show <commit>:<path>` to verify the file exists AND contains the relevant code. Do not cite code from other branches or commits as evidence for what was present at a different ref. If the file doesn't exist at that commit, state that clearly — do not extrapolate from other sources.
+- **When told to adopt, port, or copy external code.** Literally copy the source files first, commit them unchanged, THEN make modifications in separate commits. Never rewrite from understanding — copy the bytes. If you cannot copy directly (no file access), say so and ask the user to copy the files manually. "Vendor first, extend second" — one commit per phase.
 
 
 ### Response Shape
