@@ -13,7 +13,6 @@ Keep responses concise and well-formatted for Discord (markdown, code blocks).
 These reference docs exist for key systems. Consult them when relevant:
 - **Scheduling** — `%(bot_dir)s/prompts/refs/scheduling.md`
 - **Agent spawning** — `%(bot_dir)s/prompts/refs/agent-spawning.md`
-- **Stress testing** — `%(bot_dir)s/prompts/refs/stress-testing.md` — read when asked to stress test, verify test infra, or after test infra changes
 
 ## Communication Style
 

@@ -9,6 +9,7 @@ This file is appended to the system prompt for agents working on the axi-assista
 - Each test instance has its own worktree, `.env`, venv, data dir, and systemd service (`axi-test@<name>`)
 - Config at `~/.config/axi/test-config.json` (bots, guilds, defaults)
 - See [test-system.md](test-system.md) for details
+- **Stress testing** — `prompts/refs/stress-testing.md` — read when asked to stress test, verify test infra, or after test infra changes
 
 ## Key Files
 
