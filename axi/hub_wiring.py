@@ -40,7 +40,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
 
     return ClaudeAgentOptions(
         model=config.get_model(),
-        effort="max",
+        effort=config.get_effort(),
         thinking={"type": "adaptive"},
         setting_sources=["local"],
         permission_mode="plan" if session.plan_mode else "default",

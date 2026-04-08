@@ -49,6 +49,7 @@ __all__ = [
     "USAGE_HISTORY_PATH",
     "VALID_MODELS",
     "discord_client",
+    "get_effort",
     "get_model",
     "intents",
     "load_mcp_servers",
@@ -304,6 +305,15 @@ def _save_config(config: dict[str, Any]) -> None:
             json.dump(config, f, indent=2)
     except Exception as e:
         log.error("Failed to save config: %s", e)
+
+
+def get_effort() -> str:
+    """Get the effort level for Claude Code agent sessions.
+
+    The default is 'high' (compatible with all account tiers).
+    Override via AXI_EFFORT env var (e.g. AXI_EFFORT=max for API accounts).
+    """
+    return os.environ.get("AXI_EFFORT", "high").lower()
 
 
 def get_model() -> str:
