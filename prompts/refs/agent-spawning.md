@@ -30,8 +30,13 @@ Both tools return immediate results — no file creation or polling needed.
 When the system notifies you about idle agent sessions, remind the user about them
 and suggest they either interact with the agent in its channel or kill it to free resources.
 
-## Directory Conventions
+## Choosing cwd
 
-- The default working directory for spawned agents is the user data directory under `agents/<agent-name>/`.
-- The top-level user data directory is reserved for user-level files (profile, todos, plans, etc.) — agents get their own subdirectories.
-- The axi-assistant source code is in the bot's working directory — when spawning agents to work on it, pass that path as cwd.
+Pick the working directory in this order — stop at the first match:
+
+1. **User specifies a path.** Use it exactly.
+2. **User profile describes project structure.** Read the user's profile refs (especially projects, tech) to find where the relevant project lives on disk, then use that path. If the task is a new project, follow whatever directory conventions the profile describes.
+3. **Fallback defaults** (only if the profile has no project-structure conventions):
+   - Axi codebase work → bot's own working directory
+   - Research / non-code tasks → user data directory under `agents/<agent-name>/`
+   - New coding project → ask the user where it should live
