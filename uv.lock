@@ -508,7 +508,7 @@ wheels = [
 [[package]]
 name = "flowcoder-engine"
 version = "0.1.0"
-source = { git = "https://github.com/px-pride/flowcoder.git?subdirectory=packages%2Fflowcoder-engine#e165fcc9c2cbbf689ed4190d3b7d568a4c387fee" }
+source = { git = "https://github.com/px-pride/flowcoder.git?subdirectory=packages%2Fflowcoder-engine#4f78f4dc3e7b5add8f22012a94b03a3a7431bb4e" }
 dependencies = [
     { name = "flowcoder-flowchart" },
     { name = "opentelemetry-api" },
@@ -517,7 +517,7 @@ dependencies = [
 [[package]]
 name = "flowcoder-flowchart"
 version = "0.1.0"
-source = { git = "https://github.com/px-pride/flowcoder.git?subdirectory=packages%2Fflowcoder-flowchart#e165fcc9c2cbbf689ed4190d3b7d568a4c387fee" }
+source = { git = "https://github.com/px-pride/flowcoder.git?subdirectory=packages%2Fflowcoder-flowchart#4f78f4dc3e7b5add8f22012a94b03a3a7431bb4e" }
 dependencies = [
     { name = "pydantic" },
 ]

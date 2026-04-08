@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -628,6 +629,60 @@ def _git(main_repo: str, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _find_git_deps(main_repo: str) -> list[str]:
+    """Parse pyproject.toml to find git-sourced dependency package names."""
+    pyproject_path = os.path.join(main_repo, "pyproject.toml")
+    try:
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
+        return []
+    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+    return [name for name, spec in sources.items() if isinstance(spec, dict) and "git" in spec]
+
+
+def _upgrade_git_deps(main_repo: str) -> None:
+    """Upgrade git-sourced deps and auto-commit uv.lock if changed."""
+    pkgs = _find_git_deps(main_repo)
+    if not pkgs:
+        print("No git-sourced dependencies found — skipping upgrade")
+        return
+
+    lock_args = []
+    for pkg in pkgs:
+        lock_args.extend(["--upgrade-package", pkg])
+
+    print(f"Upgrading git deps: {', '.join(pkgs)}...")
+    lock_result = subprocess.run(
+        ["uv", "lock", *lock_args],
+        cwd=main_repo,
+        capture_output=True,
+        text=True,
+    )
+    if lock_result.returncode != 0:
+        print(f"Note: uv lock failed — {lock_result.stderr.strip()}")
+        return
+
+    sync_result = subprocess.run(
+        ["uv", "sync"],
+        cwd=main_repo,
+        capture_output=True,
+        text=True,
+    )
+    if sync_result.returncode != 0:
+        print(f"Note: uv sync failed — {sync_result.stderr.strip()}")
+
+    # Check if lock file changed
+    diff = _git(main_repo, "diff", "--quiet", "uv.lock")
+    if diff.returncode != 0:
+        _git(main_repo, "add", "uv.lock")
+        pkg_list = ", ".join(pkgs)
+        _git(main_repo, "commit", "-m", f"Update git deps ({pkg_list})")
+        print(f"Updated git deps: uv.lock")
+    else:
+        print("Git deps already up to date")
+
+
 def _execute_merge(main_repo: str, branch: str, message: str | None = None) -> tuple[str, str]:
     """Execute squash merge. Returns (status, detail).
 
@@ -1099,6 +1154,7 @@ def cmd_merge(args: argparse.Namespace) -> None:
 
         if status == "merged":
             print(f"Squash-merged as {detail}: {branch}")
+            _upgrade_git_deps(main_repo)
         elif status == "needs_rebase":
             print(f"Error: main has moved ahead — rebase '{branch}' onto main and resubmit", file=sys.stderr)
             sys.exit(1)
