@@ -43,6 +43,14 @@ If no deck ID is provided, infer it from context — your agent name, working di
 - When the user mentions "cards" and "decks" without context, they mean MinFlow
 - When referencing MinFlow data, always cite the deck ID and card ID. Example: "card `mnj7p0wn` in deck `mm5jyp`"
 
+## Flowchart Commands
+
+MinFlow provides two auto-execution flowchart commands:
+- **`/mill`** — Auto-execute deck cards, stopping when human approval is needed (e.g. plan review, ambiguous decisions).
+- **`/mil`** — Auto-execute deck cards with minimal human approval — only stops for very complex/ambiguous plans or critical research findings.
+
+Use these when you want to work through multiple cards in a deck without manually advancing each one.
+
 ## MinFlow and Core Files
 
 MinFlow must never be referenced in core files (SOUL.md, soul.json, axi_codebase_context.md, bot.py, handlers.py, supervisor.py, prompts.py). MinFlow-specific instructions belong only in MinFlow extensions and MinFlow-specific flowcharts (mil.json, mill.json).

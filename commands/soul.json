@@ -21,7 +21,7 @@
           "x": 300,
           "y": 450
         },
-        "prompt": "[Automated flowchart step — not a user message.]\n\nYou received this message from the user:\n$5\n\n1. Is this a task requiring you to take action (create, change, investigate, implement something), or conversation/question you can answer directly?\n2. Does the message relate to any of these topics: scheduling, agent spawning?\n   If yes, list the absolute file paths of ALL relevant reference docs (comma-separated). If no, return an empty string for refFiles.\n   - Scheduling: /home/pride/coding-projects/personal-assistant/prompts/refs/scheduling.md\n   - Agent spawning: /home/pride/coding-projects/personal-assistant/prompts/refs/agent-spawning.md",
+        "prompt": "[Automated flowchart step — not a user message.]\n\nYou received this message from the user:\n$5\n\n1. Is this a task requiring you to take action (create, change, investigate, implement something), or conversation/question you can answer directly?\n2. Does the message relate to any of these topics: scheduling, agent spawning, flowchart commands?\n   If yes, list the absolute file paths of ALL relevant reference docs (comma-separated). If no, return an empty string for refFiles.\n   - Scheduling: /home/pride/coding-projects/personal-assistant/prompts/refs/scheduling.md\n   - Agent spawning: /home/pride/coding-projects/personal-assistant/prompts/refs/agent-spawning.md\n   - Flowchart commands: /home/pride/coding-projects/personal-assistant/prompts/refs/flowchart-commands.md",
         "output_schema": {
           "type": "object",
           "properties": {
