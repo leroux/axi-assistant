@@ -364,6 +364,7 @@ async def on_message(message: discord.Message) -> None:
         return await agents.stream_response_to_channel(s, channel)
 
     # Route through /soul or /soul-flow flowcharts
+    raw_content = content
     content = agents.wrap_content_with_soul(content, session)
 
     assert agents.hub is not None
@@ -373,7 +374,8 @@ async def on_message(message: discord.Message) -> None:
         content,
         _discord_stream_handler,
         # Discord-specific queue item format for process_message_queue
-        queue_item=(content, channel, message),
+        # 4th element is raw user text for display (content is /soul-wrapped)
+        queue_item=(content, channel, message, raw_content),
     )
 
     # Discord-specific reactions based on result
@@ -541,7 +543,7 @@ async def _recover_stranded_messages() -> None:
     if scheduler.slot_count() < config.MAX_AWAKE_AGENTS:
         for _agent_name, session in list(agents.agents.items()):
             if session.client is None and session.message_queue and not session.query_lock.locked():
-                content, ch, stranded_msg = session.message_queue.popleft()
+                content, ch, stranded_msg, *_ = session.message_queue.popleft()
                 log.info("Stranded message found for sleeping agent '%s', waking", _agent_name)
                 await agents.remove_reaction(stranded_msg, "📨")
                 agents.fire_and_forget(agents.run_initial_prompt(session, content, ch))
@@ -1332,7 +1334,7 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
 
         cleared = 0
         while session.message_queue:
-            _, ch, dropped_msg = session.message_queue.popleft()
+            _, ch, dropped_msg, *_ = session.message_queue.popleft()
             await agents.remove_reaction(dropped_msg, "📨")
             cleared += 1
 
@@ -1636,7 +1638,7 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
 
             cleared = 0
             while session.message_queue:
-                _, ch_q, dropped_msg = session.message_queue.popleft()
+                _, ch_q, dropped_msg, *_ = session.message_queue.popleft()
                 await agents.remove_reaction(dropped_msg, "📨")
                 cleared += 1
 

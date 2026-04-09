@@ -1655,14 +1655,15 @@ async def process_message_queue(session: AgentSession) -> None:
             log.info("Scheduler yield: '%s' deferring %d queued messages", session.name, len(session.message_queue))
             await sleep_agent(session)
             return
-        content, channel, orig_message = session.message_queue.popleft()
+        content, channel, orig_message, *rest = session.message_queue.popleft()
+        raw_content = rest[0] if rest else content
 
         remaining = len(session.message_queue)
         log.debug("Processing queued message for '%s' (%d remaining)", session.name, remaining)
         if session.agent_log:
-            session.agent_log.info("QUEUED_MSG: %s", content_summary(content))
+            session.agent_log.info("QUEUED_MSG: %s", content_summary(raw_content))
         await remove_reaction(orig_message, "\U0001f4e8")
-        preview = content_summary(content)
+        preview = content_summary(raw_content)
         remaining_str = f" ({remaining} more in queue)" if remaining > 0 else ""
         await send_system(channel, f"Processing queued message{remaining_str}:\n> {preview}")
 
@@ -1678,7 +1679,7 @@ async def process_message_queue(session: AgentSession) -> None:
                         f"Failed to wake agent **{session.name}** \u2014 dropping queued message.",
                     )
                     while session.message_queue:
-                        _, ch, dropped_msg = session.message_queue.popleft()
+                        _, ch, dropped_msg, *_ = session.message_queue.popleft()
                         await remove_reaction(dropped_msg, "\U0001f4e8")
                         await add_reaction(dropped_msg, "\u274c")
                         await send_system(
