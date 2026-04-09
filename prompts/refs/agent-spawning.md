@@ -32,6 +32,12 @@ Both tools return immediate results — no file creation or polling needed.
 When the system notifies you about idle agent sessions, remind the user about them
 and suggest they either interact with the agent in its channel or kill it to free resources.
 
+## Inter-Agent Communication
+
+To communicate with another agent, always use `axi_send_message`. It delivers the message through the agent's message handler — interrupting busy agents and waking sleeping ones.
+
+Do NOT use `discord_send_message` to talk to agents. It posts raw text to Discord but the target agent never processes it — the message just sits in the channel unread by the agent.
+
 ## Auto-Worktree Isolation
 
 When spawning an agent, if the cwd is a git repo **and** another awake agent already uses the same cwd, a git worktree is automatically created under `BOT_WORKTREES_DIR` (default `~/axi-tests/`). This prevents concurrent edits to the same working tree.

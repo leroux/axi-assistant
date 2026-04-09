@@ -10,7 +10,6 @@ __all__ = [
     "axi_master_mcp_server",
     "axi_mcp_server",
     "discord_mcp_server",
-    "sdk_mcp_servers_for_cwd",
     "utils_mcp_server",
 ]
 
@@ -440,7 +439,9 @@ async def axi_send_message(args: McpArgs) -> McpResult:
             "content": [{"type": "text", "text": "Error: content is required."}],
             "is_error": True,
         }
-    if target_name == config.MASTER_AGENT_NAME:
+
+    sender_name = args.get("sender", "").strip() or config.MASTER_AGENT_NAME
+    if target_name == sender_name:
         return {
             "content": [{"type": "text", "text": "Error: cannot send messages to yourself."}],
             "is_error": True,
@@ -452,8 +453,6 @@ async def axi_send_message(args: McpArgs) -> McpResult:
             "content": [{"type": "text", "text": f"Error: agent '{target_name}' not found."}],
             "is_error": True,
         }
-
-    sender_name = args.get("sender", "").strip() or config.MASTER_AGENT_NAME
     log.info("Inter-agent message: '%s' -> '%s': %s", sender_name, target_name, content[:200])
 
     result = await agents.deliver_inter_agent_message(sender_name, target_session, content)
@@ -671,7 +670,8 @@ async def discord_read_messages(args: McpArgs) -> McpResult:
 
 @tool(
     "discord_send_message",
-    "Send a message to a Discord channel OTHER than your own. Your text responses are automatically delivered to your own channel — do NOT use this tool for that. This tool is only for cross-channel messaging.",
+    "Send a message to a Discord channel OTHER than your own. Your text responses are automatically delivered to your own channel — do NOT use this tool for that. This tool is only for cross-channel messaging. "
+    "To communicate with other agents, use axi_send_message instead — it goes through the agent's message handler and can wake sleeping agents. discord_send_message only posts raw text to Discord.",
     {
         "type": "object",
         "properties": {
@@ -688,21 +688,6 @@ async def discord_send_message(args: McpArgs) -> McpResult:
     except ValueError as e:
         return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
     _tracer.start_span("tool.discord_send_message", attributes={"discord.channel_id": channel_id}).end()
-    # Prevent agents from sending to their own channel (responses are streamed automatically)
-    agent_name = agents.channel_to_agent.get(int(channel_id))
-    if agent_name:
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": f"Error: Cannot send to agent channel #{agent_name}. "
-                    f"Your text responses are automatically sent to your own channel. "
-                    f"Just write your response as normal text instead of using this tool. "
-                    f"This tool is only for sending messages to OTHER channels.",
-                }
-            ],
-            "is_error": True,
-        }
     try:
         msg = await config.discord_client.send_message(channel_id, content)
         return {"content": [{"type": "text", "text": f"Message sent (id: {msg['id']})"}]}
@@ -927,7 +912,7 @@ utils_mcp_server = create_sdk_mcp_server(
 axi_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent, axi_restart_agent],
+    tools=[axi_spawn_agent, axi_kill_agent, axi_restart_agent, axi_send_message],
 )
 
 # Master agent gets the full set including bot restart + agent restart + send_message
@@ -952,24 +937,3 @@ discord_mcp_server = create_sdk_mcp_server(
 )
 
 
-def sdk_mcp_servers_for_cwd(cwd: str, agent_name: str | None = None) -> dict[str, Any]:
-    """Return the appropriate SDK MCP servers for a given working directory.
-
-    All agents get the axi MCP server (spawn/kill).  The master agent overrides
-    with the master version (which adds restart).  Admin agents (cwd in BOT_DIR)
-    additionally get Discord MCP tools and see all schedules.
-    """
-    servers: dict[str, Any] = {"utils": utils_mcp_server}
-    if agent_name:
-        servers["schedule"] = make_schedule_mcp_server(
-            agent_name,
-            config.SCHEDULES_PATH,
-            cwd,
-        )
-    servers["playwright"] = {
-        "command": "npx",
-        "args": ["@playwright/mcp@latest", "--headless"],
-    }
-    # All agents get spawn/kill; master overrides with restart version
-    servers["axi"] = axi_mcp_server
-    return servers

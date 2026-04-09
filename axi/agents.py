@@ -111,7 +111,7 @@ from axi.rate_limits import (
     update_rate_limit_quota as _update_rate_limit_quota,
 )
 from axi.schedule_tools import make_schedule_mcp_server
-from axi.tools import discord_mcp_server as _discord_mcp_server
+from axi.tools import axi_mcp_server as _axi_mcp_server, discord_mcp_server as _discord_mcp_server
 from axi.shutdown import ShutdownCoordinator, exit_for_restart, kill_supervisor
 from axi.tracing import shutdown_tracing
 from claudewire import BridgeTransport
@@ -362,6 +362,7 @@ def _build_mcp_servers(
         "command": "npx",
         "args": ["@playwright/mcp@latest", "--headless"],
     }
+    servers["axi"] = _axi_mcp_server
     if os.path.isdir(config.BOT_WORKTREES_DIR):
         servers["discord"] = _discord_mcp_server
     if extra_mcp_servers:
