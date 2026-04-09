@@ -442,11 +442,11 @@ async def _fire_schedules(
                         log.info("Skipping recurring event (one-off skip): %s", name)
                         continue
 
-                    set_agent_context(entry.get("owner") or entry.get("session") or name)
+                    set_agent_context(entry.get("session") or entry.get("owner") or name)
                     set_trigger("schedule", name=name)
                     log.info("Firing recurring event: %s", name)
                     _tracer.start_span("schedule.fire", attributes={"schedule.name": name, "schedule.type": "recurring"}).end()
-                    agent_name = entry.get("owner") or entry.get("session") or name
+                    agent_name = entry.get("session") or entry.get("owner") or name
                     agent_cwd = entry.get("cwd", os.path.join(config.AXI_USER_DATA, "agents", agent_name))
 
                     sched_ch = await agents.get_agent_channel(agent_name) if agent_name in agents.agents else None
@@ -466,11 +466,11 @@ async def _fire_schedules(
                 fire_at = datetime.fromisoformat(entry["at"])
 
                 if fire_at <= now_utc:
-                    set_agent_context(entry.get("owner") or entry.get("session") or name)
+                    set_agent_context(entry.get("session") or entry.get("owner") or name)
                     set_trigger("schedule_one_off", name=name)
                     log.info("Firing one-off event: %s", name)
                     _tracer.start_span("schedule.fire", attributes={"schedule.name": name, "schedule.type": "one_off"}).end()
-                    agent_name = entry.get("owner") or entry.get("session") or name
+                    agent_name = entry.get("session") or entry.get("owner") or name
                     agent_cwd = entry.get("cwd", os.path.join(config.AXI_USER_DATA, "agents", agent_name))
 
                     sched_ch = await agents.get_agent_channel(agent_name) if agent_name in agents.agents else None

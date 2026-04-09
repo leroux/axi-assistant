@@ -230,6 +230,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
         cron_expr = (args.get("cron") or "").strip()
         at_str = (args.get("at") or "").strip()
         cwd = (args.get("cwd") or "").strip()
+        session = (args.get("session") or "").strip()
         reset_context = bool(args.get("reset_context", False))
 
         # --- Validate name ---
@@ -290,12 +291,16 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
             if len(mine) >= MAX_SCHEDULES_PER_AGENT:
                 return _error(f"Schedule limit reached ({MAX_SCHEDULES_PER_AGENT}). Delete an existing schedule first.")
 
-            # Build entry
+            # Build entry — session controls which agent handles the event.
+            # Defaults to owner (calling agent). Use schedule name to spawn
+            # a dedicated agent instead of routing to the caller.
             entry: dict[str, Any] = {
                 "name": name,
                 "prompt": prompt,
                 "owner": agent_name,
             }
+            if session:
+                entry["session"] = session
             if agent_cwd:
                 entry["cwd"] = agent_cwd
             if stype == "recurring":
