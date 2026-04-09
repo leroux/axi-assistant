@@ -276,13 +276,13 @@ async def ensure_guild_infrastructure() -> tuple[discord.Guild, CategoryChannel,
         b = {getattr(k, "id", k): v for k, v in desired.items()}
         return a == b
 
-    for name, cat in [
+    for idx, (name, cat) in enumerate([
         (config.AXI_CATEGORY_NAME, axi_cat),
         (config.ACTIVE_CATEGORY_NAME, active_cat),
         (config.KILLED_CATEGORY_NAME, killed_cat),
-    ]:
+    ]):
         if cat is None:
-            cat = await guild.create_category(name, overwrites=overwrites)
+            cat = await guild.create_category(name, overwrites=overwrites, position=idx + 1)
             log.info("Created '%s' category", name)
         elif not _overwrites_match(cat.overwrites, overwrites):
             await cat.edit(overwrites=overwrites)
@@ -528,6 +528,50 @@ async def ensure_master_channel_position() -> None:
         log.info("Moved #%s to position 0 (top of server, no category)", normalized)
     except Exception as e:
         log.warning("Failed to move #%s to top: %s", normalized, e)
+
+
+_category_positions_cooldown: float = 0.0
+
+async def ensure_category_positions() -> None:
+    """Ensure Axi/Active/Killed categories are ordered: positions 1, 2, 3.
+
+    Position 0 is reserved for #axi-master (uncategorized).
+    Uses the same PATCH /guilds/{guild_id}/channels bulk-update pattern.
+    Cooldown prevents feedback loops from on_guild_channel_update events.
+    """
+    global _category_positions_cooldown
+
+    if target_guild is None:
+        return
+
+    now = time.monotonic()
+    if now - _category_positions_cooldown < 5.0:
+        return
+    _category_positions_cooldown = now
+
+    # Always send all 3 positions in one PATCH — discord.py cache may be stale
+    # when on_guild_channel_update fires, so checking cat.position is unreliable.
+    updates = []
+    for cat, desired_pos in [
+        (axi_category, 1),
+        (active_category, 2),
+        (killed_category, 3),
+    ]:
+        if cat is not None:
+            updates.append({"id": str(cat.id), "position": desired_pos})
+
+    if not updates:
+        return
+
+    try:
+        await config.discord_client.request(
+            "PATCH",
+            f"/guilds/{config.DISCORD_GUILD_ID}/channels",
+            json=updates,
+        )
+        log.info("Enforced category positions")
+    except Exception as e:
+        log.warning("Failed to enforce category positions: %s", e)
 
 
 # ---------------------------------------------------------------------------
