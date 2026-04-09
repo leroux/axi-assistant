@@ -28,8 +28,8 @@ dependencies = [
 # For local dev with ~/coding-projects/flowcoder, override with:
 #   flowcoder-engine = { path = "../flowcoder/packages/flowcoder-engine", editable = true }
 #   flowcoder-flowchart = { path = "../flowcoder/packages/flowcoder-flowchart", editable = true }
-flowcoder-engine = { git = "https://github.com/px-pride/flowcoder.git", rev = "4c78849", subdirectory = "packages/flowcoder-engine" }
-flowcoder-flowchart = { git = "https://github.com/px-pride/flowcoder.git", rev = "4c78849", subdirectory = "packages/flowcoder-flowchart" }
+flowcoder-engine = { git = "https://github.com/px-pride/flowcoder.git", rev = "13d272b", subdirectory = "packages/flowcoder-engine" }
+flowcoder-flowchart = { git = "https://github.com/px-pride/flowcoder.git", rev = "13d272b", subdirectory = "packages/flowcoder-flowchart" }
 flowcoder-tui = { path = "packages/flowcoder_tui", editable = true }
 procmux = { path = "packages/procmux", editable = true }
 claudewire = { path = "packages/claudewire", editable = true }
