@@ -919,7 +919,7 @@ axi_mcp_server = create_sdk_mcp_server(
 axi_master_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent, axi_restart, axi_restart_agent, axi_send_message],
+    tools=[axi_spawn_agent, axi_kill_agent, axi_restart_agent, axi_send_message],  # axi_restart disabled (buggy)
 )
 
 # Discord REST tools for cross-server messaging and queries
