@@ -111,6 +111,10 @@ ambient, drone, downtempo, lo-fi, minimal, IDM, deep house, minimal techno, dub,
 
 Push the plan via `dj_upload_plan(plan_json)` and output a brief summary.
 
+## Safety: Never Pattern-Kill
+
+**NEVER** use `pkill -f 'auto-dj'`, `pgrep -f 'auto-dj'`, or any pattern-based process kill that matches "auto-dj". These match the agent's own flowcoder-engine process and will kill the agent itself. Always use specific PIDs or the `dj_command` MCP tool to control the daemon.
+
 ## Response Style
 
 - Brief confirmation after actions: "Playing brostep." not a paragraph
