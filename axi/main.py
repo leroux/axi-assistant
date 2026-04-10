@@ -1816,6 +1816,95 @@ async def telos_interview_cmd(interaction: discord.Interaction, agent_name: str 
 
 
 # ---------------------------------------------------------------------------
+# Music preferences interview
+# ---------------------------------------------------------------------------
+
+
+async def _run_music_prefs_interview(session: AgentSession, channel: TextChannel) -> None:
+    """Inject music_prefs_interview.md into the agent so Claude conducts the interview."""
+    interview_path = os.path.join(config.BOT_DIR, ".claude", "commands", "music_prefs_interview.md")
+    prefs_path = os.path.join(config.AXI_USER_DATA, "profile", "refs", "music-preferences.md")
+
+    try:
+        with open(interview_path) as f:
+            interview_instructions = f.read()
+    except FileNotFoundError:
+        await channel.send("*System:* Could not find `music_prefs_interview.md`. Cannot start interview.")
+        return
+    except OSError as e:
+        await channel.send(f"*System:* Error reading music_prefs_interview.md: {e}")
+        return
+
+    # Expand %(axi_user_data)s in instructions
+    interview_instructions = interview_instructions.replace("%(axi_user_data)s", config.AXI_USER_DATA)
+
+    query = (
+        "The user has triggered the music preferences interview via Discord. "
+        "Please conduct the interview now, following the instructions below exactly. "
+        f"Write results to `{prefs_path}` as you go.\n\n"
+        "--- MUSIC PREFERENCES INTERVIEW INSTRUCTIONS ---\n\n"
+        f"{interview_instructions}"
+    )
+
+    log.info("Starting music preferences interview for agent '%s'", session.name)
+    assert session.client is not None
+    await session.client.query(agents.as_stream(query))
+    await agents.stream_with_retry(session, channel)
+
+
+@bot.tree.command(
+    name="music-prefs",
+    description="Interactive music preferences interview — builds your listening profile for auto-dj.",
+)
+@app_commands.autocomplete(agent_name=agent_autocomplete)
+async def music_prefs_cmd(interaction: discord.Interaction, agent_name: str | None = None) -> None:
+    log.info("Slash command /music-prefs agent=%s from %s", agent_name, interaction.user)
+
+    resolved = await _resolve_agent(interaction, agent_name)
+    if resolved is None:
+        return
+    agent_name, session = resolved
+
+    if session.query_lock.locked():
+        await interaction.response.send_message(
+            f"Agent **{agent_name}** is busy. Wait for it to finish.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer()
+
+    async with session.query_lock:
+        if session.client is None:
+            try:
+                await agents.wake_agent(session)
+            except Exception:
+                log.exception("Failed to wake agent '%s'", agent_name)
+                await interaction.followup.send(f"Failed to wake agent **{agent_name}**.")
+                return
+
+        session.last_activity = datetime.now(UTC)
+        agents.drain_stderr(session)
+        agents.drain_sdk_buffer(session)
+        session.activity = ActivityState(phase="starting", query_started=datetime.now(UTC))
+
+        try:
+            async with asyncio.timeout(config.QUERY_TIMEOUT):
+                ds = discord_state(session)
+                assert ds.channel_id is not None
+                ch = bot.get_channel(ds.channel_id)
+                assert isinstance(ch, TextChannel)
+                await _run_music_prefs_interview(session, ch)
+            await interaction.followup.send(f"*System:* Music preferences interview complete for **{agent_name}**.")
+        except TimeoutError:
+            await interaction.followup.send(f"*System:* Music preferences interview timed out for **{agent_name}**.")
+        except Exception as e:
+            log.exception("Failed to run music preferences interview for agent '%s'", agent_name)
+            await interaction.followup.send(f"Failed to start music preferences interview for **{agent_name}**: {e}")
+        finally:
+            session.activity = ActivityState(phase="idle")
+
+
+# ---------------------------------------------------------------------------
 # Flowchart commands
 # ---------------------------------------------------------------------------
 
