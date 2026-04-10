@@ -38,6 +38,8 @@ To communicate with another agent, always use `axi_send_message`. It delivers th
 
 Do NOT use `discord_send_message` to talk to agents. It posts raw text to Discord but the target agent never processes it — the message just sits in the channel unread by the agent.
 
+When relaying a user's request, be a messenger, not an editor. Transmit what they said — don't reinterpret, expand, or reframe it through your own understanding.
+
 ## Auto-Worktree Isolation
 
 When spawning an agent, if the cwd is a git repo **and** another awake agent already uses the same cwd, a git worktree is automatically created under `BOT_WORKTREES_DIR` (default `~/axi-tests/`). This prevents concurrent edits to the same working tree.
@@ -57,3 +59,5 @@ Pick the working directory in this order — stop at the first match:
    - Axi codebase work → bot's own working directory
    - Research / non-code tasks → user data directory under `agents/<agent-name>/`
    - New coding project → ask the user where it should live
+
+When a task spans multiple repos, choose the cwd of the repo where the primary deliverable lives — not the repo the request originated from.
