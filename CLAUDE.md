@@ -45,11 +45,11 @@ This file is appended to the system prompt for agents working on the axi-assista
 - `SOUL.md` — Shared personality prompt for all agents (loaded at startup)
 - `axi_codebase_context.md` — Context appended for agents working on the axi codebase
 - `.env` — Instance-specific config (gitignored)
-- `schedules.json` — Scheduled events config
+- `schedules.json` — Scheduled events config (in `AXI_USER_DATA`, not the repo)
 
 ## Development Philosophy
 
-Read `~/axi-user-data/CODE-PHILOSOPHY.md` for the principles guiding this codebase: data-oriented design, mechanical sympathy (hardware awareness), explicit over convention, performance-aware, pragmatic functional programming, clear data flow, and no over-abstraction. This philosophy should inform all architectural decisions.
+Read `~/app-user-data/axi-assistant/CODE-PHILOSOPHY.md` for the principles guiding this codebase: data-oriented design, mechanical sympathy (hardware awareness), explicit over convention, performance-aware, pragmatic functional programming, clear data flow, and no over-abstraction. This philosophy should inform all architectural decisions.
 
 ## Important Patterns
 

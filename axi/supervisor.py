@@ -129,11 +129,13 @@ def _pid_alive(pid: int) -> bool:
 
 
 def ensure_default_files():
-    user_data = Path(os.environ.get("AXI_USER_DATA", Path.home() / "axi-user-data"))
+    user_data = Path(os.environ.get("AXI_USER_DATA", Path.home() / "app-user-data" / "axi-assistant"))
     user_data.mkdir(parents=True, exist_ok=True)
 
-    if not (DIR / "USER_PROFILE.md").exists():
-        (DIR / "USER_PROFILE.md").write_text(
+    profile_dir = user_data / "profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    if not (profile_dir / "USER_PROFILE.md").exists():
+        (profile_dir / "USER_PROFILE.md").write_text(
             "# User Profile\n\nThis is a currently blank user profile. It will be updated over time.\n"
         )
     if not (user_data / "schedules.json").exists():

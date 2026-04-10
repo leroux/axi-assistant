@@ -72,8 +72,8 @@ _PROMPTS_DIR = os.path.join(config.BOT_DIR, "prompts")
 _SOUL = _load_prompt_file(os.path.join(_PROMPTS_DIR, "SOUL.md"), _PROMPT_VARS)
 _DEV_CONTEXT = _load_prompt_file(os.path.join(_PROMPTS_DIR, "axi_codebase_context.md"), _PROMPT_VARS)
 
-# User profile — loaded from profile/ subdirectory of BOT_DIR
-_PROFILE_DIR = os.path.join(config.BOT_DIR, "profile")
+# User profile — loaded from profile/ subdirectory of AXI_USER_DATA
+_PROFILE_DIR = os.path.join(config.AXI_USER_DATA, "profile")
 _USER_PROFILE = ""
 _profile_path = os.path.join(_PROFILE_DIR, "USER_PROFILE.md")
 if os.path.isfile(_profile_path):

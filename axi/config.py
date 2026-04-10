@@ -226,7 +226,7 @@ DISCORD_TOKEN = _resolve_discord_token()
 
 ALLOWED_USER_IDS = {int(uid.strip()) for uid in os.environ["ALLOWED_USER_IDS"].split(",")}
 DEFAULT_CWD = os.environ.get("DEFAULT_CWD", os.getcwd())
-AXI_USER_DATA = os.environ.get("AXI_USER_DATA", os.path.expanduser("~/axi-user-data"))
+AXI_USER_DATA = os.environ.get("AXI_USER_DATA", os.path.expanduser("~/app-user-data/axi-assistant"))
 SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("SCHEDULE_TIMEZONE", "UTC"))
 DISCORD_GUILD_ID = int(os.environ["DISCORD_GUILD_ID"])
 DAY_BOUNDARY_HOUR = int(os.environ.get("DAY_BOUNDARY_HOUR", "0"))
