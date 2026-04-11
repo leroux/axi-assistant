@@ -11,13 +11,44 @@ from __future__ import annotations
 
 import logging
 
+import asyncio
+from typing import Any
+
 from claudewire import BridgeTransport, StdoutEvent
+from claudewire.permissions import Allow, to_control_response
 
 log = logging.getLogger(__name__)
 
 
 class FlowcoderBridgeTransport(BridgeTransport):
     """BridgeTransport that unwraps flowcoder session_message envelopes."""
+
+    async def _handle_can_use_tool(self, msg: dict[str, Any]) -> None:
+        """Override to fix updatedInput Zod validation.
+
+        The CLI requires updatedInput on Allow responses. Upstream
+        BridgeTransport omits it when Allow has no updated_input.
+        Match SDK Query behavior: fall back to original tool_input.
+        """
+        assert self._can_use_tool is not None
+        request = msg.get("request", {})
+        request_id = msg.get("request_id", "")
+        tool_name = request.get("tool_name", "")
+        tool_input = request.get("input", {})
+
+        log.debug("[read][%s] can_use_tool: %s", self._name, tool_name)
+        result = self._can_use_tool(tool_name, tool_input)
+        if asyncio.iscoroutine(result):
+            result = await result
+
+        if isinstance(result, Allow) and result.updated_input is None:
+            result = Allow(updated_input=tool_input)
+
+        response = to_control_response(request_id, result)
+        if self._stdio_logger:
+            import json
+            self._stdio_logger.debug(">>> STDIN  %s (auto)", json.dumps(response))
+        await self._conn.send_stdin(self._name, response)
 
     async def read_messages(self):
         async for msg_data in super().read_messages():

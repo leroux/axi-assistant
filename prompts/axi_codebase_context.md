@@ -13,9 +13,10 @@ This file is appended to the system prompt for agents working on the axi-assista
 
 ## Key Files
 
-- `bot.py` — Main bot code (all instances run same code, behavior differs via env vars)
-- `supervisor.py` — Process supervisor (manages bot.py lifecycle)
-- `handlers.py` — Agent handler (lifecycle, message routing through /soul flowchart)
+- `axi/main.py` — Discord bot setup, slash commands, event loop
+- `axi/supervisor.py` — Process supervisor (manages bot lifecycle)
+- `axi/agents.py` — Agent management (spawn, wake, sleep, permissions)
+- `axi/handlers.py` — Agent handler (lifecycle, message routing through /soul flowchart)
 - `axi_test.py` — CLI for test instances (up/down/restart/list/merge/msg/logs)
 - `axi-test@.service` — Systemd template unit for test instances
 - `prompts/SOUL.md` — Shared personality prompt for all agents (identity, style, constraints)
@@ -36,7 +37,7 @@ Three layers, each with strict boundaries:
 - **Extension files** — feature-specific concepts, tools, CLIs, record IDs. Keep extensions self-contained; don't leak extension concepts into core.
 - **User data** — instance-specific values (guild IDs, server names, tokens, user IDs, machine names, OS types, deployment details) belong in profile ref files or runtime template variables, never hardcoded in core or extension files.
 
-Core files: SOUL.md, soul.json, axi_codebase_context.md, bot.py, handlers.py, supervisor.py, prompts.py
+Core files: SOUL.md, soul.json, axi_codebase_context.md, axi/main.py, axi/handlers.py, axi/supervisor.py, axi/prompts.py
 
 
 ## Important Patterns
@@ -57,7 +58,7 @@ Core files: SOUL.md, soul.json, axi_codebase_context.md, bot.py, handlers.py, su
   1. Run `axi_test.py list` to identify which instances you created this session.
   2. For each instance you created, run `axi_test.py down <name>`.
   3. Run `axi_test.py list` again to verify the instances are gone.
-- **NEVER restart, stop, or signal the production Axi bot process.** You must only restart your own test instances via `axi_test.py restart <name>`. Do not use `systemctl restart axi-bot`, `kill`, or any other method to restart the main bot. Only the master agent (axi-master) can restart itself via `axi_restart`. If your task requires a production restart, ask the user to do it.
+- **NEVER restart, stop, or signal the production Axi bot process.** You must only restart your own test instances via `axi_test.py restart <name>`. Do not use `systemctl restart axi-bot`, `kill`, or any other method to restart the main bot. Only the user can restart the production bot (`systemctl --user restart axi-bot`). If your task requires a production restart, ask the user to do it.
 
 ## Self-Modification Workflow
 
@@ -65,7 +66,7 @@ You have access to a disposable test instance system. Use it to test code change
 
 ### Rule: Never Edit Your Own Running Code
 
-You must NEVER directly modify the code you are currently running (`%(bot_dir)s/bot.py`, etc.). Instead:
+You must NEVER directly modify the code you are currently running (`%(bot_dir)s/axi/main.py`, etc.). Instead:
 1. Create a test instance
 2. Spawn an agent in the test worktree to make changes
 3. Test the changes via Discord MCP tools

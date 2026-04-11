@@ -53,4 +53,4 @@ Use these when you want to work through multiple cards in a deck without manuall
 
 ## MinFlow and Core Files
 
-MinFlow must never be referenced in core files (SOUL.md, soul.json, axi_codebase_context.md, bot.py, handlers.py, supervisor.py, prompts.py). MinFlow-specific instructions belong only in MinFlow extensions and MinFlow-specific flowcharts (mil.json, mill.json).
+MinFlow must never be referenced in core files (SOUL.md, soul.json, axi_codebase_context.md, axi/main.py, axi/handlers.py, axi/supervisor.py, axi/prompts.py). MinFlow-specific instructions belong only in MinFlow extensions and MinFlow-specific flowcharts (mil.json, mill.json).
