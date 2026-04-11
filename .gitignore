@@ -67,3 +67,19 @@ record-handler/
 .merge-exec.lock
 logs/
 config.json
+
+# Sandbox artifacts (devnull device nodes injected by Claude Code sandbox)
+.bash_profile
+.bashrc
+.gitconfig
+.gitmodules
+.mcp.json
+.profile
+.ripgreprc
+.zprofile
+.zshrc
+HEAD
+config
+hooks
+objects
+refs
