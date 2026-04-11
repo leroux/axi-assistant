@@ -36,7 +36,10 @@ server_log.jsonl
 projects/
 personal/
 
-# Instance-specific instructions (gitignored, loaded into system prompt)
+# Instance-specific files (gitignored, loaded into system prompt at runtime)
+CLAUDE.md
+PLAN.md
+USER_PROFILE.md
 nova_instructions.md
 test_instructions.md
 
