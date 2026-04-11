@@ -420,7 +420,7 @@ def try_merge_and_cleanup(worktree_path: str) -> tuple[str, str]:
 
     # Check for commits
     if not has_commits_beyond_default(worktree_path):
-        _remove_worktree(main_repo, worktree_path, branch)
+        remove_worktree(main_repo, worktree_path, branch)
         return ("no_commits", "no new commits — cleaned up worktree")
 
     # Attempt merge with merge lock
@@ -428,7 +428,7 @@ def try_merge_and_cleanup(worktree_path: str) -> tuple[str, str]:
         status, detail = execute_merge(main_repo, branch)
 
     if status == "merged":
-        _remove_worktree(main_repo, worktree_path, branch)
+        remove_worktree(main_repo, worktree_path, branch)
         return ("merged", detail)
 
     if status == "needs_rebase":
@@ -453,14 +453,14 @@ def try_merge_and_cleanup(worktree_path: str) -> tuple[str, str]:
             status2, detail2 = execute_merge(main_repo, branch)
 
         if status2 == "merged":
-            _remove_worktree(main_repo, worktree_path, branch)
+            remove_worktree(main_repo, worktree_path, branch)
             return ("merged", detail2)
         return (status2, detail2)
 
     return (status, detail)
 
 
-def _remove_worktree(main_repo: str, worktree_path: str, branch: str) -> None:
+def remove_worktree(main_repo: str, worktree_path: str, branch: str) -> None:
     """Remove a worktree and delete the branch if it was a feature branch."""
     subprocess.run(
         ["git", "-C", main_repo, "worktree", "remove", worktree_path, "--force"],

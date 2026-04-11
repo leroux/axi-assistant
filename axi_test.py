@@ -42,6 +42,7 @@ from axi.worktrees import (
     queue_lock as _queue_lock,
     read_queue as _read_queue,
     remove_from_queue as _remove_from_queue,
+    remove_worktree as _remove_worktree,
     upgrade_git_deps as _upgrade_git_deps,
     write_queue as _write_queue,
 )
@@ -934,6 +935,8 @@ def cmd_merge(args: argparse.Namespace) -> None:
         if status == "merged":
             print(f"Squash-merged as {detail}: {branch}")
             _upgrade_git_deps(main_repo)
+            _remove_worktree(main_repo, cwd, branch)
+            print(f"Cleaned up worktree and branch: {branch}")
         elif status == "needs_rebase":
             print(f"Error: {default_branch} has moved ahead — rebase '{branch}' onto {default_branch} and resubmit", file=sys.stderr)
             sys.exit(1)
