@@ -31,7 +31,14 @@ class FlowcoderBridgeTransport(BridgeTransport):
                 and msg_data.get("subtype") == "session_message"
                 and "message" in msg_data.get("data", {})
             ):
-                msg_data = msg_data["data"]["message"]
+                envelope = msg_data["data"]
+                inner = envelope["message"]
+                inner["_session_context"] = {
+                    "session": envelope.get("session", ""),
+                    "block_id": envelope.get("block_id", ""),
+                    "block_name": envelope.get("block_name", ""),
+                }
+                msg_data = inner
                 msg_type = msg_data.get("type", "?")
 
             # The engine forwards inner CLI stderr as stdout system
