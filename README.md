@@ -5,7 +5,7 @@ Axi is a Discord-based personal assistant powered by Claude Code. It runs as a p
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
-- [Quick Start](#quick-start)
+- [Setup](#setup)
 - [Multi-Agent System](#multi-agent-system)
 - [Extensions & Flowcharts](#extensions--flowcharts)
 - [Schedule System](#schedule-system)
@@ -76,22 +76,70 @@ axi/supervisor.py (process supervisor — crash detection, rollback, hot restart
 
 ---
 
-## Quick Start
+## Setup
+
+### 1. Prerequisites
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) (Python package manager)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated
+- A Discord account
+
+### 2. Create a Discord Bot
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and click **New Application**.
+2. Go to the **Bot** tab:
+   - Click **Reset Token** and save the token — you'll need it for `.env`.
+   - Under **Privileged Gateway Intents**, enable **Message Content Intent**.
+3. Go to the **OAuth2** tab:
+   - Under **Scopes**, select `bot`.
+   - Under **Bot Permissions**, select: `Manage Channels`, `Send Messages`, `Read Message History`, `Add Reactions`, `Manage Roles`, `View Channels`, `Attach Files`, `Embed Links`, `Use Slash Commands`.
+   - Copy the generated URL and open it in your browser to invite the bot to your server.
+4. Note your **guild (server) ID**: right-click the server name in Discord (with Developer Mode enabled in Settings > Advanced) and click **Copy Server ID**.
+5. Note your **Discord user ID**: right-click your username and click **Copy User ID**.
+
+### 3. Clone and Configure
 
 ```bash
-# 1. Clone the repo
 git clone <repo-url> && cd axi-assistant
 
-# 2. Configure environment
 cp .env.template .env
-# Edit .env with your Discord bot token, user IDs, and guild ID
+```
 
-# 3. Run directly
+Edit `.env` with your values:
+
+```bash
+DISCORD_TOKEN=<your bot token from step 2>
+ALLOWED_USER_IDS=<your Discord user ID>
+DISCORD_GUILD_ID=<your guild ID>
+SCHEDULE_TIMEZONE=US/Pacific          # or your IANA timezone
+DEFAULT_CWD=/path/to/axi-assistant    # absolute path to this repo
+AXI_USER_DATA=/path/to/user-data      # where profile, schedules, etc. live
+```
+
+### 4. Set Up User Profile
+
+Axi loads a user profile from `AXI_USER_DATA/profile/` to personalize its behavior. Create the directory structure:
+
+```bash
+mkdir -p /path/to/user-data/profile/refs
+```
+
+Create `profile/USER_PROFILE.md` with information about yourself — preferences, context, anything you want Axi to know. This is injected into every agent's system prompt.
+
+You can also create reference files in `profile/refs/` for detailed context on specific topics (e.g., `refs/projects.md`, `refs/goals.md`). Reference these from `USER_PROFILE.md` using relative paths — Axi will resolve them automatically.
+
+The profile is optional — Axi works without it, but personalization improves response quality significantly.
+
+### 5. Run
+
+```bash
+# Run directly
 uv run python -m axi.supervisor
 
 # -- OR --
 
-# 3. Install as a systemd user service (recommended)
+# Install as a systemd user service (recommended for production)
 cp axi-bot.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now axi-bot.service
@@ -101,7 +149,16 @@ systemctl --user status axi-bot.service
 journalctl --user -u axi-bot.service -f
 ```
 
-Axi will message the `#axi-master` channel in your Discord guild when it comes online.
+### 6. First Run
+
+On first startup, Axi will:
+
+1. Create `#axi-master` and category channels (**Axi**, **Active**, **Killed**) in your guild.
+2. Sync channel permissions — `@everyone` can't see Killed channels; authorized users and the bot get full access.
+3. Start the master agent session and post a startup message in `#axi-master`.
+4. Create `schedules.json` and `schedule_history.json` in `AXI_USER_DATA` if they don't exist.
+
+You can now message Axi in `#axi-master`.
 
 ---
 
