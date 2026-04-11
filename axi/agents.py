@@ -23,11 +23,6 @@ import anyio
 import discord
 import httpx
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-from claude_agent_sdk.types import (
-    PermissionResultAllow,
-    PermissionResultDeny,
-    ToolPermissionContext,
-)
 from discord import TextChannel
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -692,7 +687,25 @@ async def send_system(channel: TextChannel, text: str) -> None:
 
 
 def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None = None):
-    """Create a can_use_tool callback that restricts file writes to allowed_cwd and AXI_USER_DATA."""
+    """Create a can_use_tool callback that restricts file writes to allowed_cwd and AXI_USER_DATA.
+
+    Uses claudewire's compose() to chain stateless policies:
+    1. Block forbidden tools (Skill, EnterWorktree, Task)
+    2. Auto-allow safe tools (TodoWrite, EnterPlanMode)
+    3. Interactive hooks (plan approval, user questions) if session provided
+    4. CWD restriction (file writes only inside allowed paths)
+    5. Default: allow everything else
+    """
+    from claudewire.permissions import (
+        Deny,
+        ask_user_policy,
+        compose,
+        cwd_policy,
+        plan_approval_policy,
+        tool_allow_policy,
+        tool_block_policy,
+    )
+
     allowed = os.path.realpath(allowed_cwd)
     user_data = os.path.realpath(config.AXI_USER_DATA)
     worktrees = os.path.realpath(config.BOT_WORKTREES_DIR)
@@ -704,50 +717,34 @@ def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None 
         bases.append(worktrees)
         bases.extend(config.ADMIN_ALLOWED_CWDS)
 
-    async def _check_permission(
-        tool_name: str,
-        tool_input: dict[str, Any],
-        ctx: ToolPermissionContext,
-    ) -> PermissionResultAllow | PermissionResultDeny:
-        forbidden_tools = {"Skill", "EnterWorktree", "Task"}
-        if tool_name in forbidden_tools:
-            return PermissionResultDeny(
-                message=f"{tool_name} is not compatible with Discord-based agent mode. Use text messages to communicate instead."
-            )
+    policies = [
+        tool_block_policy(
+            {"Skill", "EnterWorktree", "Task"},
+            message="Not compatible with Discord-based agent mode. Use text messages to communicate instead.",
+        ),
+        tool_allow_policy({"TodoWrite", "EnterPlanMode"}),
+    ]
 
-        if tool_name == "TodoWrite":
-            return PermissionResultAllow()
+    if session is not None:
+        policies.append(plan_approval_policy(lambda ti: _handle_exit_plan_mode(session, ti)))
+        policies.append(ask_user_policy(lambda ti: _handle_ask_user_question(session, ti)))
 
-        if tool_name == "EnterPlanMode":
-            return PermissionResultAllow()
+    # Egress filter: block reads of sensitive files
+    from axi.egress_filter import is_path_blocked
 
-        if tool_name == "ExitPlanMode":
-            return await _handle_exit_plan_mode(session, tool_input)
+    def _read_block(tool_name: str, tool_input: dict[str, Any]) -> Deny | None:
+        if tool_name != "Read":
+            return None
+        path = tool_input.get("file_path") or ""
+        if path and is_path_blocked(path):
+            return Deny(message=f"Access denied: reading {path} is blocked (sensitive file)")
+        return None
 
-        if tool_name == "AskUserQuestion":
-            return await _handle_ask_user_question(session, tool_input)
+    policies.append(_read_block)
 
-        if tool_name == "Read":
-            from axi.egress_filter import is_path_blocked
+    policies.append(cwd_policy(bases))
 
-            path = tool_input.get("file_path") or ""
-            if path and is_path_blocked(path):
-                return PermissionResultDeny(
-                    message=f"Access denied: reading {path} is blocked (sensitive file)"
-                )
-
-        if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-            path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-            resolved = os.path.realpath(path)
-            for base in bases:
-                if resolved == base or resolved.startswith(base + os.sep):
-                    return PermissionResultAllow()
-            return PermissionResultDeny(
-                message=f"Access denied: {path} is outside working directory {allowed} and user data {user_data}"
-            )
-        return PermissionResultAllow()
-
-    return _check_permission
+    return compose(*policies)
 
 
 
@@ -875,13 +872,24 @@ def _reset_session_activity(session: AgentSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def create_transport(session: AgentSession, reconnecting: bool = False):
-    """Create a transport for Claude Code agent (bridge or direct)."""
+async def create_transport(session: AgentSession, reconnecting: bool = False, can_use_tool=None):
+    """Create a transport for Claude Code agent (bridge or direct).
+
+    For flowcoder agents, uses FlowcoderBridgeTransport which unwraps
+    session_message envelopes from the flowcoder engine.
+    """
     if wire_conn and wire_conn.is_alive:
-        transport = BridgeTransport(
+        if session.agent_type == "flowcoder":
+            from axi.flowcoder_transport import FlowcoderBridgeTransport
+
+            cls = FlowcoderBridgeTransport
+        else:
+            cls = BridgeTransport
+        transport = cls(
             session.name,
             wire_conn,
             reconnecting=reconnecting,
+            can_use_tool=can_use_tool,
             stderr_callback=make_stderr_callback(session),
             stdio_logger=get_stdio_logger(session.name, config.LOG_DIR),
         )
@@ -1940,7 +1948,8 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
                 session.reconnecting = False
                 return
 
-            transport = await create_transport(session, reconnecting=True)
+            permission_cb = make_cwd_permission_callback(session.cwd, session)
+            transport = await create_transport(session, reconnecting=True, can_use_tool=permission_cb)
             assert transport is not None
             session.transport = transport
 
@@ -1948,7 +1957,6 @@ async def _reconnect_and_drain(session: AgentSession, bridge_info: dict[str, Any
             # the initialize handshake (intercepted by BridgeTransport) completes
             # cleanly without interference from replayed messages.
             options = ClaudeAgentOptions(
-                can_use_tool=make_cwd_permission_callback(session.cwd, session),
                 mcp_servers=session.mcp_servers or {},
                 permission_mode="plan" if session.plan_mode else "default",
                 cwd=session.cwd,

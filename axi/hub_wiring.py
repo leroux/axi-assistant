@@ -36,8 +36,12 @@ log = logging.getLogger("axi")
 
 
 def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
-    """Build ClaudeAgentOptions from config and session state."""
-    from axi.agents import make_cwd_permission_callback, make_stderr_callback
+    """Build ClaudeAgentOptions from config and session state.
+
+    Note: can_use_tool is NOT set here — it's passed to BridgeTransport
+    instead (which handles control_request.can_use_tool internally).
+    """
+    from axi.agents import make_stderr_callback
 
     return ClaudeAgentOptions(
         model=config.get_model(),
@@ -45,7 +49,6 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
         thinking={"type": "adaptive"},
         setting_sources=["local"],
         permission_mode="plan" if session.plan_mode else "default",
-        can_use_tool=make_cwd_permission_callback(session.cwd, session),
         cwd=session.cwd,
         system_prompt=session.system_prompt,
         include_partial_messages=True,
@@ -80,14 +83,22 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
     )
 
 
+def _make_permission_callback(session: AgentSession):
+    """Build a can_use_tool callback for one session."""
+    from axi.agents import make_cwd_permission_callback
+
+    return make_cwd_permission_callback(session.cwd, session)
+
+
 async def _create_client(session: AgentSession, options: Any) -> Any:
     """Create a ClaudeSDKClient for a session."""
-    from axi.agents import create_transport
+    from axi.agents import create_transport, make_cwd_permission_callback
 
     if session.agent_type == "flowcoder" and config.FLOWCODER_ENABLED:
         from axi.flowcoder import build_engine_cli_args, build_engine_env
 
-        transport = await create_transport(session)
+        permission_cb = make_cwd_permission_callback(session.cwd, session)
+        transport = await create_transport(session, can_use_tool=permission_cb)
         if not transport:
             raise RuntimeError(
                 f"Procmux required for flowcoder agent '{session.name}'"
@@ -154,6 +165,7 @@ def create_hub(
         make_agent_options=_make_agent_options,
         create_client=_create_client,
         disconnect_client=_disconnect_client,
+        make_permission_callback=_make_permission_callback,
         query_timeout=config.QUERY_TIMEOUT,
         max_retries=config.API_ERROR_MAX_RETRIES,
         retry_base_delay=config.API_ERROR_BASE_DELAY,

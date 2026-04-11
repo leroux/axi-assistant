@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-_SDK_VERSION = "0.1.39"
+from claudewire.config import SDK_VERSION as _SDK_VERSION
 
 
 # ------------------------------------------------------------------

@@ -47,11 +47,8 @@ os.environ.pop("CLAUDECODE", None)
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server, tool
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
-from claude_agent_sdk.types import (
-    PermissionResultAllow,
-    ResultMessage,
-    ToolPermissionContext,
-)
+from claude_agent_sdk.types import ResultMessage
+from claudewire.permissions import Allow
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -84,8 +81,8 @@ async def _as_stream(text: str):
     }
 
 
-async def allow_all(tool_name, tool_input, ctx: ToolPermissionContext):
-    return PermissionResultAllow()
+async def allow_all(tool_name, tool_input):
+    return Allow()
 
 
 def make_mcp_server():

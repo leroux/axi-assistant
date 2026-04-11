@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 MakeOptionsFn = Callable[[AgentSession, str | None], Any]  # (session, resume_id) -> options
 CreateClientFn = Callable[[AgentSession, Any], Awaitable[Any]]  # (session, options) -> client
 DisconnectClientFn = Callable[[Any, str], Awaitable[None]]  # (client, name) -> None
+MakePermissionFn = Callable[[AgentSession], Any]  # (session) -> can_use_tool callback or None
 
 
 class AgentHub:
@@ -52,6 +53,7 @@ class AgentHub:
         make_agent_options: MakeOptionsFn,
         create_client: CreateClientFn,
         disconnect_client: DisconnectClientFn,
+        make_permission_callback: MakePermissionFn | None = None,
         # Timeouts and retry
         query_timeout: float = 300.0,
         max_retries: int = 3,
@@ -69,6 +71,7 @@ class AgentHub:
         self.make_agent_options = make_agent_options
         self.create_client = create_client
         self.disconnect_client = disconnect_client
+        self.make_permission_callback = make_permission_callback
 
         # Subsystems
         self.scheduler = Scheduler(

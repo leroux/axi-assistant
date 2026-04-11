@@ -1028,147 +1028,6 @@ class TestBridgeTransportStop:
 
 
 # ---------------------------------------------------------------------------
-# build_cli_spawn_args: permission_prompt_tool_name injection
-# ---------------------------------------------------------------------------
-
-
-class TestBuildCliSpawnArgs:
-    """Verify build_cli_spawn_args replicates the permission_prompt_tool_name
-    injection that ClaudeSDKClient.connect() does in direct mode."""
-
-    def test_injects_permission_prompt_tool_stdio_when_can_use_tool_set(self):
-        """When can_use_tool is set, --permission-prompt-tool stdio must appear."""
-        from claude_agent_sdk import ClaudeAgentOptions
-
-        from claudewire import build_cli_spawn_args
-
-        async def _dummy_can_use_tool(tool_name, tool_input, ctx):
-            pass
-
-        options = ClaudeAgentOptions(
-            can_use_tool=_dummy_can_use_tool,
-            cwd="/tmp",
-        )
-        cmd, env, cwd = build_cli_spawn_args(options)
-
-        assert "--permission-prompt-tool" in cmd, f"--permission-prompt-tool not found in cmd: {cmd}"
-        idx = cmd.index("--permission-prompt-tool")
-        assert cmd[idx + 1] == "stdio", f"Expected 'stdio' after --permission-prompt-tool, got: {cmd[idx + 1]}"
-
-    def test_no_injection_when_can_use_tool_not_set(self):
-        """When can_use_tool is None, --permission-prompt-tool must NOT appear."""
-        from claude_agent_sdk import ClaudeAgentOptions
-
-        from claudewire import build_cli_spawn_args
-
-        options = ClaudeAgentOptions(
-            can_use_tool=None,
-            cwd="/tmp",
-        )
-        cmd, env, cwd = build_cli_spawn_args(options)
-
-        assert "--permission-prompt-tool" not in cmd, f"--permission-prompt-tool should NOT be in cmd: {cmd}"
-
-    def test_no_override_when_permission_prompt_tool_already_set(self):
-        """When permission_prompt_tool_name is already set, don't override it."""
-        from claude_agent_sdk import ClaudeAgentOptions
-
-        from claudewire import build_cli_spawn_args
-
-        async def _dummy_can_use_tool(tool_name, tool_input, ctx):
-            pass
-
-        options = ClaudeAgentOptions(
-            can_use_tool=_dummy_can_use_tool,
-            permission_prompt_tool_name="custom_tool",
-            cwd="/tmp",
-        )
-        cmd, env, cwd = build_cli_spawn_args(options)
-
-        idx = cmd.index("--permission-prompt-tool")
-        assert cmd[idx + 1] == "custom_tool", f"Expected 'custom_tool', got: {cmd[idx + 1]}"
-
-    def test_sdk_mcp_server_serialized_without_instance(self):
-        """SDK-type MCP server is serialized into --mcp-config without the live instance."""
-        from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
-
-        from claudewire import build_cli_spawn_args
-
-        async def _dummy_can_use_tool(tool_name, tool_input, ctx):
-            pass
-
-        @tool("ping", "Return pong", {"type": "object", "properties": {}, "required": []})
-        async def ping(args):
-            return {"content": [{"type": "text", "text": "pong"}]}
-
-        mcp_server = create_sdk_mcp_server(name="test_utils", version="1.0.0", tools=[ping])
-
-        options = ClaudeAgentOptions(
-            can_use_tool=_dummy_can_use_tool,
-            cwd="/tmp",
-            mcp_servers={"test_utils": mcp_server},
-        )
-        cmd, env, cwd = build_cli_spawn_args(options)
-
-        # --mcp-config should be present
-        assert "--mcp-config" in cmd, f"--mcp-config not found in cmd: {cmd}"
-        idx = cmd.index("--mcp-config")
-        config = json.loads(cmd[idx + 1])
-
-        # Server name present, type is "sdk", no "instance" key
-        assert "test_utils" in config["mcpServers"]
-        server_cfg = config["mcpServers"]["test_utils"]
-        assert server_cfg["type"] == "sdk"
-        assert "instance" not in server_cfg
-
-    def test_multiple_sdk_mcp_servers(self):
-        """Multiple SDK MCP servers all appear in --mcp-config."""
-        from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
-
-        from claudewire import build_cli_spawn_args
-
-        async def _dummy_can_use_tool(tool_name, tool_input, ctx):
-            pass
-
-        @tool("ping", "Return pong", {"type": "object", "properties": {}, "required": []})
-        async def ping(args):
-            return {"content": [{"type": "text", "text": "pong"}]}
-
-        @tool("now", "Return time", {"type": "object", "properties": {}, "required": []})
-        async def now(args):
-            return {"content": [{"type": "text", "text": "12:00"}]}
-
-        server_a = create_sdk_mcp_server(name="utils", version="1.0.0", tools=[ping])
-        server_b = create_sdk_mcp_server(name="schedule", version="1.0.0", tools=[now])
-
-        options = ClaudeAgentOptions(
-            can_use_tool=_dummy_can_use_tool,
-            cwd="/tmp",
-            mcp_servers={"utils": server_a, "schedule": server_b},
-        )
-        cmd, env, cwd = build_cli_spawn_args(options)
-
-        idx = cmd.index("--mcp-config")
-        config = json.loads(cmd[idx + 1])
-        assert "utils" in config["mcpServers"]
-        assert "schedule" in config["mcpServers"]
-        for name in ("utils", "schedule"):
-            assert config["mcpServers"][name]["type"] == "sdk"
-            assert "instance" not in config["mcpServers"][name]
-
-    def test_no_mcp_config_when_no_servers(self):
-        """--mcp-config should not appear when mcp_servers is empty."""
-        from claude_agent_sdk import ClaudeAgentOptions
-
-        from claudewire import build_cli_spawn_args
-
-        options = ClaudeAgentOptions(cwd="/tmp", mcp_servers={})
-        cmd, env, cwd = build_cli_spawn_args(options)
-
-        assert "--mcp-config" not in cmd
-
-
-# ---------------------------------------------------------------------------
 # Lifecycle: ensure_bridge (starts a real bridge subprocess)
 # ---------------------------------------------------------------------------
 
@@ -1740,28 +1599,16 @@ class TestCommandTimeout:
 # ---------------------------------------------------------------------------
 
 
-def _mcp_cli_args() -> tuple[list[str], dict]:
-    """Build real CLI spawn args with an SDK MCP server, like bot.py does."""
-    from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
+def _mcp_cli_args() -> tuple[list[str], dict, str]:
+    """Build CLI spawn args with an MCP server config, like bot.py does."""
+    from claudewire import Config, McpServers
 
-    from claudewire import build_cli_spawn_args
-
-    async def _dummy_can_use_tool(tool_name, tool_input, ctx):
-        pass
-
-    @tool("ping", "Return pong", {"type": "object", "properties": {}, "required": []})
-    async def ping(args):
-        return {"content": [{"type": "text", "text": "pong"}]}
-
-    mcp_server = create_sdk_mcp_server(name="test_utils", version="1.0.0", tools=[ping])
-
-    options = ClaudeAgentOptions(
-        can_use_tool=_dummy_can_use_tool,
-        cwd="/tmp",
-        mcp_servers={"test_utils": mcp_server},
+    cfg = Config(
+        mcp_servers=McpServers(
+            sdk={"test_utils": {"type": "sdk", "tools": [{"name": "ping", "description": "Return pong", "inputSchema": {"type": "object", "properties": {}, "required": []}}]}},
+        ),
     )
-    cmd, env, cwd = build_cli_spawn_args(options)
-    return cmd, env, cwd
+    return cfg.to_cli_args(), cfg.to_env(), "/tmp"
 
 
 class TestMcpBridgeSpawn:

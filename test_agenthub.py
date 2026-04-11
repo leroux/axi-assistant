@@ -3,7 +3,7 @@
 Exercises the core async code paths with mock SDK factories and callbacks.
 Validates lifecycle, registry, messaging, scheduler, and queue processing.
 
-Run: PYTHONPATH=packages/claudewire:packages/agenthub:packages/procmux python test_agenthub.py
+Run: PYTHONPATH=packages/agenthub:packages/procmux python test_agenthub.py
 """
 
 from __future__ import annotations

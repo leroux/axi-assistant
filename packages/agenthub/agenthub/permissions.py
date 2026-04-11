@@ -3,6 +3,91 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
+
+from claudewire.permissions import Allow, Deny
+
+from claudewire.permissions import (
+    CanUseTool,
+    PolicyFn,
+    compose,
+    cwd_policy,
+    tool_allow_policy,
+    tool_block_policy,
+)
+
+if TYPE_CHECKING:
+    from agenthub.types import AgentSession
+
+# Interactive hooks: (session, tool_input) -> Allow | Deny
+PlanApprovalHook = Callable[
+    ["AgentSession", dict[str, Any]],
+    Awaitable[Allow | Deny],
+]
+QuestionHook = Callable[
+    ["AgentSession", dict[str, Any]],
+    Awaitable[Allow | Deny],
+]
+
+# Default tool sets
+DEFAULT_BLOCKED_TOOLS = frozenset({"Skill", "EnterWorktree", "Task"})
+DEFAULT_AUTO_ALLOW_TOOLS = frozenset({"TodoWrite", "EnterPlanMode"})
+
+
+def build_permission_callback(
+    session: AgentSession,
+    *,
+    allowed_paths: list[str],
+    blocked_tools: set[str] = DEFAULT_BLOCKED_TOOLS,
+    auto_allow_tools: set[str] = DEFAULT_AUTO_ALLOW_TOOLS,
+    plan_approval_hook: PlanApprovalHook | None = None,
+    question_hook: QuestionHook | None = None,
+) -> CanUseTool:
+    """Build a composed permission callback for one agent session.
+
+    Chains policies in order:
+    1. Block forbidden tools (Skill, EnterWorktree, Task)
+    2. Auto-allow safe tools (TodoWrite, EnterPlanMode)
+    3. Interactive hooks (plan approval, user questions) if provided
+    4. CWD restriction (file writes only inside allowed paths)
+    5. Default: allow everything else
+    """
+    policies: list[PolicyFn] = [
+        tool_block_policy(blocked_tools, message="Not available in agent mode"),
+        tool_allow_policy(auto_allow_tools),
+    ]
+
+    if plan_approval_hook:
+        # Capture hook in closure for this session
+        hook = plan_approval_hook
+
+        async def _plan_policy(
+            tool_name: str,
+            tool_input: dict[str, Any],
+        ) -> Allow | Deny | None:
+            if tool_name == "ExitPlanMode":
+                return await hook(session, tool_input)
+            return None
+
+        policies.append(_plan_policy)
+
+    if question_hook:
+        hook_q = question_hook
+
+        async def _question_policy(
+            tool_name: str,
+            tool_input: dict[str, Any],
+        ) -> Allow | Deny | None:
+            if tool_name == "AskUserQuestion":
+                return await hook_q(session, tool_input)
+            return None
+
+        policies.append(_question_policy)
+
+    policies.append(cwd_policy(allowed_paths))
+
+    return compose(*policies)
 
 
 def compute_allowed_paths(

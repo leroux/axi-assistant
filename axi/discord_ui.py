@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+from claudewire.permissions import Allow, Deny
 
 from axi import config
 from axi.axi_types import AgentSession, discord_state
@@ -131,13 +131,13 @@ def _read_latest_plan_file(cwd: str | None = None) -> str | None:
 async def _handle_exit_plan_mode(
     session: AgentSession | None,
     tool_input: dict[str, Any],
-) -> PermissionResultAllow | PermissionResultDeny:
+) -> Allow | Deny:
     """Handle ExitPlanMode by posting the plan to Discord and waiting for user approval."""
     if session is None:
-        return PermissionResultAllow()
+        return Allow()
     ds = discord_state(session)
     if ds.channel_id is None:
-        return PermissionResultAllow()
+        return Allow()
 
     channel_id = ds.channel_id
 
@@ -184,7 +184,7 @@ async def _handle_exit_plan_mode(
         discord_state(session).plan_approval_message_id = int(approval_msg_id)
     except Exception:
         log.exception("_handle_exit_plan_mode: failed to post plan to Discord \u2014 denying")
-        return PermissionResultDeny(message="Could not post plan to Discord for approval. Try again.")
+        return Deny(message="Could not post plan to Discord for approval. Try again.")
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -217,11 +217,11 @@ async def _handle_exit_plan_mode(
                     log.info("Agent '%s' permission mode reset to default after plan approval", session.name)
                 except Exception:
                     log.exception("Failed to reset permission mode for '%s'", session.name)
-        return PermissionResultAllow()
+        return Allow()
     else:
         message = result.get("message", "User rejected the plan.")
         log.info("Agent '%s' plan rejected: %s", session.name, message)
-        return PermissionResultDeny(message=json.dumps(message) if not isinstance(message, str) else message)
+        return Deny(message=json.dumps(message) if not isinstance(message, str) else message)
 
 
 # ---------------------------------------------------------------------------
@@ -319,18 +319,18 @@ def resolve_reaction_answer(emoji_str: str, question: dict[str, Any]) -> str | N
 async def _handle_ask_user_question(
     session: AgentSession | None,
     tool_input: dict[str, Any],
-) -> PermissionResultAllow | PermissionResultDeny:
+) -> Allow | Deny:
     """Handle AskUserQuestion by posting questions one at a time and waiting for each answer."""
     if session is None:
-        return PermissionResultAllow()
+        return Allow()
     ds = discord_state(session)
     if ds.channel_id is None:
-        return PermissionResultAllow()
+        return Allow()
 
     channel_id = ds.channel_id
     questions = tool_input.get("questions", [])
     if not questions:
-        return PermissionResultAllow()
+        return Allow()
 
     loop = asyncio.get_running_loop()
     answers: dict[str, str] = {}
@@ -340,7 +340,7 @@ async def _handle_ask_user_question(
         await config.discord_client.send_message(channel_id, header)
     except Exception:
         log.exception("_handle_ask_user_question: failed to post header — denying")
-        return PermissionResultDeny(message="Could not post question to Discord.")
+        return Deny(message="Could not post question to Discord.")
 
     for i, q in enumerate(questions):
         # Post the question and get message ID
@@ -350,7 +350,7 @@ async def _handle_ask_user_question(
             msg_id = int(msg["id"])
         except Exception:
             log.exception("_handle_ask_user_question: failed to post question %d — denying", i)
-            return PermissionResultDeny(message="Could not post question to Discord.")
+            return Deny(message="Could not post question to Discord.")
 
         # Pre-add reaction emojis for each option
         options = q.get("options", [])
@@ -386,7 +386,7 @@ async def _handle_ask_user_question(
 
     updated = dict(tool_input)
     updated["answers"] = answers
-    return PermissionResultAllow(updated_input=updated)
+    return Allow(updated_input=updated)
 
 
 # ---------------------------------------------------------------------------

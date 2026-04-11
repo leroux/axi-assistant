@@ -122,10 +122,12 @@ async def reconnect_single(
                 session.reconnecting = False
                 return
 
+            can_use_tool = hub.make_permission_callback(session) if hub.make_permission_callback else None
             transport = BridgeTransport(
                 session.name,
                 hub.process_conn,
                 reconnecting=True,
+                can_use_tool=can_use_tool,
             )
             await transport.connect()
 
