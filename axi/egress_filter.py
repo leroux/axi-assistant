@@ -65,6 +65,12 @@ _GENERIC_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Bare JWT tokens: three base64url segments separated by dots, starting with eyJ
+# (the base64 encoding of '{"' which begins every JWT header)
+_JWT_RE = re.compile(
+    r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"
+)
+
 _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_SSH_KEY_RE, "[REDACTED:private-key]"),
     (_DISCORD_WEBHOOK_RE, "[REDACTED:webhook-url]"),
@@ -75,6 +81,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (_ENV_SECRET_RE, "[REDACTED:secret]"),
     (_CREDENTIAL_URL_RE, "[REDACTED:credential-url]"),
     (_GENERIC_TOKEN_RE, "[REDACTED:secret]"),
+    (_JWT_RE, "[REDACTED:jwt]"),
 ]
 
 # ---------------------------------------------------------------------------

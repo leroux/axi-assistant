@@ -124,6 +124,36 @@ class TestGenericTokenPattern:
 
 
 # ---------------------------------------------------------------------------
+# Bare JWT token pattern
+# ---------------------------------------------------------------------------
+
+
+class TestJWTPattern:
+    """Catches bare JWT tokens (eyJ... three-segment base64url)."""
+
+    def test_full_jwt(self):
+        jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        result = scrub_secrets(jwt)
+        assert "eyJhbGciOiJ" not in result
+        assert "[REDACTED:jwt]" in result
+
+    def test_jwt_in_header(self):
+        text = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        result = scrub_secrets(text)
+        assert "eyJhbGciOiJ" not in result
+
+    def test_jwt_in_env_value(self):
+        text = "AUTH=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjoiYWRtaW4ifQ.kP3LMz1OPz5GpN7XxzK2rVoSzHTf0Y6CJjK"
+        result = scrub_secrets(text)
+        assert "eyJhbGciOiJSUzI1Ni" not in result
+
+    def test_short_base64_not_matched(self):
+        """Short eyJ strings that aren't real JWTs should not match."""
+        text = "eyJhbG.eyJz.abc"
+        assert scrub_secrets(text) == text
+
+
+# ---------------------------------------------------------------------------
 # Existing patterns still work (backward compat)
 # ---------------------------------------------------------------------------
 
