@@ -224,6 +224,8 @@ def is_active_channel(channel: TextChannel) -> bool:
 async def _get_category_with_room(
     categories: list[CategoryChannel],
     base_name: str,
+    *,
+    killed: bool = False,
 ) -> CategoryChannel:
     """Return a category from the group with room, creating overflow if needed.
 
@@ -238,7 +240,7 @@ async def _get_category_with_room(
     next_num = len(categories) + 1
     overflow_name = f"{base_name} {next_num}"
     assert target_guild is not None
-    overwrites = _build_category_overwrites(target_guild)
+    overwrites = _build_category_overwrites(target_guild, killed=killed)
     cat = await target_guild.create_category(overflow_name, overwrites=overwrites)
     categories.append(cat)
     log.info("Created overflow category '%s'", overflow_name)
@@ -256,6 +258,8 @@ async def _get_category_with_room(
 
 def _build_category_overwrites(
     guild: discord.Guild,
+    *,
+    killed: bool = False,
 ) -> dict[discord.Object | discord.Member | discord.Role, discord.PermissionOverwrite]:
     """Build permission overwrites for Axi categories."""
     overwrites: dict[discord.Object | discord.Member | discord.Role, discord.PermissionOverwrite] = {
@@ -265,8 +269,8 @@ def _build_category_overwrites(
             create_public_threads=False,
             create_private_threads=False,
             send_messages_in_threads=False,
-            view_channel=True,
-            read_message_history=True,
+            view_channel=not killed,
+            read_message_history=not killed,
         ),
         guild.me: discord.PermissionOverwrite(
             send_messages=True,
@@ -319,6 +323,7 @@ async def ensure_guild_infrastructure() -> None:
     target_guild = guild
 
     overwrites = _build_category_overwrites(guild)
+    killed_overwrites = _build_category_overwrites(guild, killed=True)
 
     def _overwrites_match(
         existing: dict[discord.Role | discord.Member | discord.Object, discord.PermissionOverwrite],
@@ -349,14 +354,15 @@ async def ensure_guild_infrastructure() -> None:
 
     # Ensure primary exists for each group; sync permissions on all
     for base_name, found_list in group_map:
+        desired = killed_overwrites if base_name == config.KILLED_CATEGORY_NAME else overwrites
         if not found_list:
-            cat = await guild.create_category(base_name, overwrites=overwrites)
+            cat = await guild.create_category(base_name, overwrites=desired)
             found_list.append((1, cat))
             log.info("Created '%s' category", base_name)
         else:
             for _, cat in found_list:
-                if not _overwrites_match(cat.overwrites, overwrites):
-                    await cat.edit(overwrites=overwrites)
+                if not _overwrites_match(cat.overwrites, desired):
+                    await cat.edit(overwrites=desired)
                     log.info("Synced permissions on '%s' category", cat.name)
                 else:
                     log.info("Permissions already current on '%s' category", cat.name)
@@ -472,7 +478,7 @@ async def move_channel_to_killed(agent_name: str) -> None:
         for ch in cat.text_channels:
             if _match_channel_name(ch.name, normalized):
                 try:
-                    dest = await _get_category_with_room(killed_categories, config.KILLED_CATEGORY_NAME)
+                    dest = await _get_category_with_room(killed_categories, config.KILLED_CATEGORY_NAME, killed=True)
                     # Strip status prefix when moving to Killed
                     if config.CHANNEL_STATUS_ENABLED and ch.name != normalized:
                         await ch.edit(name=normalized)
