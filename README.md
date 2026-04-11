@@ -117,21 +117,7 @@ DEFAULT_CWD=/path/to/axi-assistant    # absolute path to this repo
 AXI_USER_DATA=/path/to/user-data      # where profile, schedules, etc. live
 ```
 
-### 4. Set Up User Profile
-
-Axi loads a user profile from `AXI_USER_DATA/profile/` to personalize its behavior. Create the directory structure:
-
-```bash
-mkdir -p /path/to/user-data/profile/refs
-```
-
-Create `profile/USER_PROFILE.md` with information about yourself — preferences, context, anything you want Axi to know. This is injected into every agent's system prompt.
-
-You can also create reference files in `profile/refs/` for detailed context on specific topics (e.g., `refs/projects.md`, `refs/goals.md`). Reference these from `USER_PROFILE.md` using relative paths — Axi will resolve them automatically.
-
-The profile is optional — Axi works without it, but personalization improves response quality significantly.
-
-### 5. Run
+### 4. Run
 
 ```bash
 # Run directly
@@ -149,16 +135,13 @@ systemctl --user status axi-bot.service
 journalctl --user -u axi-bot.service -f
 ```
 
-### 6. First Run
+On first startup, Axi will automatically create `#axi-master` and category channels (**Axi**, **Active**, **Killed**) in your guild, sync permissions, and create schedule data files in `AXI_USER_DATA`. You can now message Axi in `#axi-master`.
 
-On first startup, Axi will:
+### 5. Build Your User Profile
 
-1. Create `#axi-master` and category channels (**Axi**, **Active**, **Killed**) in your guild.
-2. Sync channel permissions — `@everyone` can't see Killed channels; authorized users and the bot get full access.
-3. Start the master agent session and post a startup message in `#axi-master`.
-4. Create `schedules.json` and `schedule_history.json` in `AXI_USER_DATA` if they don't exist.
+Once Axi is running, use the `/build-user-profile` slash command in Discord to start a conversational interview. Axi will ask you about your preferences, context, and working style, then save the results to `AXI_USER_DATA/profile/`. This profile is injected into every agent's system prompt to personalize Axi's behavior.
 
-You can now message Axi in `#axi-master`.
+The profile is optional — Axi works without it, but personalization improves response quality significantly.
 
 ---
 
