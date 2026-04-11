@@ -25,6 +25,7 @@ class TriggerRequest(BaseModel):
     prompt: str
     cwd: str | None = None
     extensions: list[str] | None = None
+    mcp_servers: list[str] | None = None
 
 
 @app.post("/v1/trigger")
@@ -40,7 +41,12 @@ async def trigger(req: TriggerRequest) -> dict[str, str]:
 
         log.info("HTTP trigger: spawning new session '%s'", agent_name)
         await agents.reclaim_agent_name(agent_name)
-        await agents.spawn_agent(agent_name, agent_cwd, req.prompt, extensions=req.extensions)
+        extra_mcp = config.load_mcp_servers(req.mcp_servers) if req.mcp_servers else None
+        await agents.spawn_agent(
+            agent_name, agent_cwd, req.prompt,
+            extensions=req.extensions,
+            extra_mcp_servers=extra_mcp,
+        )
         return {"status": "ok", "action": "spawned"}
     except Exception:
         log.exception("HTTP trigger failed for session '%s'", agent_name)
