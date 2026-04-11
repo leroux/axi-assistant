@@ -1730,46 +1730,47 @@ async def clear_context(interaction: discord.Interaction, agent_name: str | None
 
 
 # ---------------------------------------------------------------------------
-# TELOS interview
+# Build user profile interview
 # ---------------------------------------------------------------------------
 
 
-async def _run_telos_interview(session: AgentSession, channel: TextChannel) -> None:
-    """Inject telos_interview.md into the agent so Claude conducts the TELOS interview."""
-    interview_path = os.path.join(config.BOT_DIR, ".claude", "commands", "telos_interview.md")
-    telos_path = os.path.join(config.BOT_DIR, "TELOS.md")
+async def _run_profile_interview(session: AgentSession, channel: TextChannel) -> None:
+    """Inject build_user_profile.md into the agent so Claude conducts the profile interview."""
+    interview_path = os.path.join(config.BOT_DIR, ".claude", "commands", "build_user_profile.md")
 
     try:
         with open(interview_path) as f:
             interview_instructions = f.read()
     except FileNotFoundError:
-        await channel.send("*System:* Could not find `telos_interview.md`. Cannot start TELOS interview.")
+        await channel.send("*System:* Could not find `build_user_profile.md`. Cannot start profile interview.")
         return
     except OSError as e:
-        await channel.send(f"*System:* Error reading telos_interview.md: {e}")
+        await channel.send(f"*System:* Error reading build_user_profile.md: {e}")
         return
 
+    # Expand %(axi_user_data)s in instructions
+    interview_instructions = interview_instructions.replace("%(axi_user_data)s", config.AXI_USER_DATA)
+
     query = (
-        "The user has triggered the TELOS interview via Discord. "
-        "Please conduct the interview now, following the instructions below exactly. "
-        f"Write completed sections to `{telos_path}` as you go.\n\n"
-        "--- TELOS INTERVIEW INSTRUCTIONS ---\n\n"
+        "The user has triggered the profile interview via Discord. "
+        "Please conduct the interview now, following the instructions below exactly.\n\n"
+        "--- PROFILE INTERVIEW INSTRUCTIONS ---\n\n"
         f"{interview_instructions}"
     )
 
-    log.info("Starting TELOS interview for agent '%s'", session.name)
+    log.info("Starting profile interview for agent '%s'", session.name)
     assert session.client is not None
     await session.client.query(agents.as_stream(query))
     await agents.stream_with_retry(session, channel)
 
 
 @bot.tree.command(
-    name="telos",
-    description="Start a TELOS identity interview to build your user profile. Infers agent from current channel.",
+    name="build-user-profile",
+    description="Conversational interview to build your user profile. Infers agent from current channel.",
 )
 @app_commands.autocomplete(agent_name=agent_autocomplete)
-async def telos_interview_cmd(interaction: discord.Interaction, agent_name: str | None = None) -> None:
-    log.info("Slash command /telos agent=%s from %s", agent_name, interaction.user)
+async def build_user_profile_cmd(interaction: discord.Interaction, agent_name: str | None = None) -> None:
+    log.info("Slash command /build-user-profile agent=%s from %s", agent_name, interaction.user)
 
     resolved = await _resolve_agent(interaction, agent_name)
     if resolved is None:
@@ -1804,13 +1805,13 @@ async def telos_interview_cmd(interaction: discord.Interaction, agent_name: str 
                 assert ds.channel_id is not None
                 ch = bot.get_channel(ds.channel_id)
                 assert isinstance(ch, TextChannel)
-                await _run_telos_interview(session, ch)
-            await interaction.followup.send(f"*System:* TELOS interview complete for **{agent_name}**.")
+                await _run_profile_interview(session, ch)
+            await interaction.followup.send(f"*System:* Profile interview complete for **{agent_name}**.")
         except TimeoutError:
-            await interaction.followup.send(f"*System:* TELOS interview timed out for **{agent_name}**.")
+            await interaction.followup.send(f"*System:* Profile interview timed out for **{agent_name}**.")
         except Exception as e:
-            log.exception("Failed to run TELOS interview for agent '%s'", agent_name)
-            await interaction.followup.send(f"Failed to start TELOS interview for **{agent_name}**: {e}")
+            log.exception("Failed to run profile interview for agent '%s'", agent_name)
+            await interaction.followup.send(f"Failed to start profile interview for **{agent_name}**: {e}")
         finally:
             session.activity = ActivityState(phase="idle")
 

@@ -50,7 +50,7 @@ run.sh (process supervisor — output capture, crash detection, rollback)
 | `discord_query.py` | Standalone CLI tool for querying Discord server message history (~450 lines) |
 | `schedules.json` | User-defined schedule entries (gitignored, auto-created) |
 | `schedule_history.json` | Log of fired one-off events, pruned to 7 days (gitignored) |
-| `profile/` | User-customizable profile files — USER_PROFILE.md, ADMIN_PROFILE.md, RECORD_PROFILE.md, TELOS.md (gitignored, auto-created) |
+| `profile/` | User-customizable profile files — USER_PROFILE.md and refs/ subdirectory (gitignored, auto-created) |
 | `.env` | Environment variables (gitignored) |
 
 **Dependencies:** `discord.py`, `claude-agent-sdk`, `python-dotenv`, `croniter`, `httpx`

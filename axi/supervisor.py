@@ -134,9 +134,17 @@ def ensure_default_files():
 
     profile_dir = user_data / "profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "refs").mkdir(parents=True, exist_ok=True)
     if not (profile_dir / "USER_PROFILE.md").exists():
         (profile_dir / "USER_PROFILE.md").write_text(
-            "# User Profile\n\nThis is a currently blank user profile. It will be updated over time.\n"
+            "# User Profile\n\n"
+            "## Identity & Context\n\n"
+            "No profile sections populated yet. Run /build-user-profile to set up your profile,\n"
+            "or Axi will learn about you over time through conversation.\n\n"
+            "## Preferences\n\n"
+            "- **Timezone:** (not set)\n"
+            "- **Diet:** (not set)\n"
+            "- **OS:** (not set)\n"
         )
     if not (user_data / "schedules.json").exists():
         (user_data / "schedules.json").write_text("[]\n")

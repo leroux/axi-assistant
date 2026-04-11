@@ -154,7 +154,7 @@ context_notes: []
 
 ### Pattern
 
-Follows the `/telos` pattern from `main.py:1766-1816`:
+Follows the `/build-user-profile` pattern from `main.py`:
 - Discord slash command registered on the bot
 - Loads instruction file from `.claude/commands/music_prefs_interview.md`
 - Injects instructions as a query into the agent session
@@ -162,7 +162,7 @@ Follows the `/telos` pattern from `main.py:1766-1816`:
 
 ### Implementation Files
 
-1. **`main.py`** — Add `/music-prefs` slash command (same pattern as `/telos` at lines 1766-1816)
+1. **`main.py`** — Add `/music-prefs` slash command (same pattern as `/build-user-profile`)
 2. **`.claude/commands/music_prefs_interview.md`** — Interview instructions for Claude
 
 ### Slash Command (main.py)
@@ -174,7 +174,7 @@ Follows the `/telos` pattern from `main.py:1766-1816`:
 )
 @app_commands.autocomplete(agent_name=agent_autocomplete)
 async def music_prefs_cmd(interaction, agent_name=None):
-    # Same lifecycle as /telos: resolve agent, acquire lock, wake if needed,
+    # Same lifecycle as /build-user-profile: resolve agent, acquire lock, wake if needed,
     # inject interview instructions, stream response.
     # Output path: ~/app-user-data/axi-assistant/profile/refs/music-preferences.md
 ```
