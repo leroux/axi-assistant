@@ -1,0 +1,48 @@
+#!/bin/bash
+# ts-curl: curl restricted to Tailscale CGNAT range (100.x.x.x)
+# Intended for use as a Claude Code excludedCommand — runs unsandboxed
+# but only allows connections to Tailscale IPs.
+set -euo pipefail
+
+FOUND_URL=false
+
+# Scan arguments for URLs/hosts and validate each one.
+# curl options that consume the next argument (common subset):
+SKIP_NEXT=false
+for arg in "$@"; do
+    if $SKIP_NEXT; then
+        SKIP_NEXT=false
+        continue
+    fi
+    case "$arg" in
+        -o|-O|-d|-H|-X|-u|-e|-A|-b|-c|-D|-F|-K|-T|-w|--url|--output|--data|--header|--request|--user|--referer|--user-agent|--cookie|--cookie-jar|--dump-header|--form|--config|--upload-file|--write-out|--resolve|--connect-to|--max-time|--connect-timeout|-m)
+            SKIP_NEXT=true
+            ;;
+        -*)
+            ;;
+        *)
+            # Non-option argument — treat as URL
+            FOUND_URL=true
+            if [[ "$arg" =~ ^https?://([^/:]+) ]]; then
+                HOST="${BASH_REMATCH[1]}"
+            else
+                HOST="$arg"
+            fi
+
+            IP=$(getent hosts "$HOST" 2>/dev/null | awk '{print $1; exit}' || true)
+            [[ -z "$IP" ]] && IP="$HOST"
+
+            if [[ ! "$IP" =~ ^100\. ]]; then
+                echo "ts-curl: blocked — $HOST ($IP) is not a Tailscale IP (100.x.x.x)" >&2
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+if ! $FOUND_URL; then
+    echo "ts-curl: no URL specified" >&2
+    exit 1
+fi
+
+exec curl "$@"

@@ -55,7 +55,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
             "enabled": True,
             "autoAllowBashIfSandboxed": True,
             "allowUnsandboxedCommands": False,
-            "excludedCommands": ["git", "systemctl", "uv"],
+            "excludedCommands": ["git", "systemctl", "uv", "ts-ssh", "ts-curl"],
             "network": {
                 "allowUnixSockets": [str(config.BRIDGE_SOCKET_PATH)],
             },
@@ -69,7 +69,11 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
         mcp_servers=session.mcp_servers or {},
         disallowed_tools=[],
         extra_args={"debug-to-stderr": None},
-        env={"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "100", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
+        env={
+            "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "100",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            "PATH": os.path.join(config.BOT_DIR, "bin") + ":" + os.environ.get("PATH", ""),
+        },
     )
 
 

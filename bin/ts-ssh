@@ -1,0 +1,47 @@
+#!/bin/bash
+# ts-ssh: SSH restricted to Tailscale CGNAT range (100.x.x.x)
+# Intended for use as a Claude Code excludedCommand — runs unsandboxed
+# but only allows connections to Tailscale IPs.
+set -euo pipefail
+
+HOST=""
+SKIP_NEXT=false
+
+# Parse ssh args to find the destination (first non-option argument).
+# Options that consume the next argument as a value:
+for arg in "$@"; do
+    if $SKIP_NEXT; then
+        SKIP_NEXT=false
+        continue
+    fi
+    case "$arg" in
+        -[bcDEeFIiJLlmOopQRSWw])
+            SKIP_NEXT=true
+            ;;
+        -*)
+            ;;
+        *)
+            HOST="$arg"
+            break
+            ;;
+    esac
+done
+
+if [[ -z "$HOST" ]]; then
+    echo "ts-ssh: no destination specified" >&2
+    exit 1
+fi
+
+# Strip user@ prefix if present
+HOSTNAME="${HOST#*@}"
+
+# Resolve hostname to IP (passthrough if already an IP)
+IP=$(getent hosts "$HOSTNAME" 2>/dev/null | awk '{print $1; exit}' || true)
+[[ -z "$IP" ]] && IP="$HOSTNAME"
+
+if [[ ! "$IP" =~ ^100\. ]]; then
+    echo "ts-ssh: blocked — $HOSTNAME ($IP) is not a Tailscale IP (100.x.x.x)" >&2
+    exit 1
+fi
+
+exec ssh "$@"
