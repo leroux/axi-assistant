@@ -34,7 +34,7 @@ Read `~/app-user-data/axi-assistant/CODE-PHILOSOPHY.md` for the principles guidi
 Three layers, each with strict boundaries:
 - **Core files** — generic, instance-independent logic and structure. No extension-specific concepts, tools, CLIs, or record IDs. No user/instance-specific data.
 - **Extension files** — feature-specific concepts, tools, CLIs, record IDs. Keep extensions self-contained; don't leak extension concepts into core.
-- **User data** — instance-specific values (guild IDs, server names, tokens, user IDs) belong in profile ref files or runtime template variables, never hardcoded in core or extension files.
+- **User data** — instance-specific values (guild IDs, server names, tokens, user IDs, machine names, OS types, deployment details) belong in profile ref files or runtime template variables, never hardcoded in core or extension files.
 
 Core files: SOUL.md, soul.json, axi_codebase_context.md, bot.py, handlers.py, supervisor.py, prompts.py
 

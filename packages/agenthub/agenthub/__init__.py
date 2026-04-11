@@ -33,7 +33,7 @@ from agenthub.messaging import (
     receive_user_message,
     run_initial_prompt,
 )
-from agenthub.permissions import build_permission_callback, compute_allowed_paths
+from agenthub.permissions import compute_allowed_paths
 from agenthub.procmux_wire import ProcmuxProcessConnection
 from agenthub.rate_limits import RateLimitTracker
 from agenthub.reconnect import connect_procmux, reconnect_single
@@ -81,7 +81,6 @@ __all__ = [
     "ShutdownCoordinator",
     "StreamHandlerFn",
     "StreamOutput",
-    "build_permission_callback",
     "compute_allowed_paths",
     "connect_procmux",
     "count_awake",

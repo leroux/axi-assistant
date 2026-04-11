@@ -95,7 +95,6 @@ class DiscordAgentState:
     # Plan approval gate
     plan_approval_future: asyncio.Future[PlanApprovalResult] | None = None
     plan_approval_message_id: int | None = None
-    plan_mode: bool = False
     # Question gate
     question_future: asyncio.Future[str] | None = None
     question_data: dict[str, Any] | None = None

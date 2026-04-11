@@ -9,9 +9,9 @@ All agents are flowcoder agents by default — `axi_spawn_agent` always spawns a
 You can spawn independent agent sessions to work on tasks autonomously.
 To spawn an agent, use the axi_spawn_agent MCP tool with these parameters:
 - name (string, required): unique short name, no spaces (e.g. "feature-auth", "fix-bug-123")
-- cwd (string, required): absolute path to the working directory for the agent
+- cwd (string, optional): absolute path to the working directory for the agent. Defaults to `agents/<name>/` under user data. See "Choosing cwd" below.
 - prompt (string, required): initial task instructions — be specific and detailed since the agent works independently
-- resume (string, optional): session ID from a previously killed agent to resume with full conversation context
+- resume (string, optional): session ID from a previously killed agent to resume with full conversation context. Do not resume sessions whose cwd was in a worktree that has since been cleaned up — spawn fresh instead.
 - extensions (list of strings, optional): extension names to load into the agent's system prompt. Defaults to the standard set. Pass [] to disable extensions. Available extensions are in the extensions/ directory.
 
 To kill an agent, use the axi_kill_agent MCP tool with:
@@ -40,14 +40,22 @@ Do NOT use `discord_send_message` to talk to agents. It posts raw text to Discor
 
 When relaying a user's request, be a messenger, not an editor. Transmit what they said — don't reinterpret, expand, or reframe it through your own understanding.
 
+## Respawning an Existing Agent
+
+When killing and respawning an agent (same name, channel already exists):
+
+- **Do not supply `cwd`** unless the user explicitly specifies a new one. The system should default to the previous agent's working directory.
+- **Pass `no_worktree: true`** — the agent is replacing itself, not competing with another agent for the same cwd.
+- **Do not resume** sessions whose cwd was in a worktree that has been cleaned up — the session state references a directory that no longer exists. Spawn fresh instead.
+
 ## Auto-Worktree Isolation
 
-When spawning an agent, if the cwd is a git repo **and** another awake agent already uses the same cwd, a git worktree is automatically created under `BOT_WORKTREES_DIR` (default `~/axi-tests/`). This prevents concurrent edits to the same working tree.
+When spawning a **new** agent, if the cwd is a git repo **and** another awake agent already uses the same cwd, a git worktree is automatically created under `BOT_WORKTREES_DIR` (default `~/axi-tests/`). This prevents concurrent edits to the same working tree.
 
 - The worktree branch is named `feature/<agent-name>`
 - On agent kill, the worktree is auto-merged (squash) into main and cleaned up
 - If merge conflicts occur, the worktree is kept and the user is notified in the agent's channel
-- Use `no_worktree: true` to opt out (for read-only or research agents)
+- Use `no_worktree: true` to opt out (for read-only or research agents, or when respawning)
 
 ## Choosing cwd
 

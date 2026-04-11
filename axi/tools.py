@@ -733,67 +733,63 @@ async def discord_send_message(args: McpArgs) -> McpResult:
 
 @tool(
     "discord_search_messages",
-    "Search messages across a Discord guild by content substring. Case-insensitive. "
-    "Scans recent history (up to 500 messages per channel), not a full-text index.",
+    "Search messages across a Discord guild using Discord's native full-text search. "
+    "Searches the entire guild history, not just recent messages.",
     {
         "type": "object",
         "properties": {
             "guild_id": {"type": "string", "description": "The Discord guild (server) ID to search. Defaults to the bot's home guild if omitted."},
-            "query": {"type": "string", "description": "Search term (case-insensitive substring match)"},
+            "query": {"type": "string", "description": "Search text (Discord full-text search)"},
             "channel_id": {"type": "string", "description": "Limit search to this channel (ID or guild_id:channel_name, optional)"},
-            "author": {"type": "string", "description": "Filter by author username (case-insensitive substring, optional)"},
+            "author_id": {"type": "string", "description": "Filter by author user ID (optional)"},
             "limit": {"type": "integer", "description": "Max results to return (default 25, max 100)"},
+            "sort_by": {"type": "string", "description": "Sort by 'timestamp' or 'relevance' (default 'timestamp')", "enum": ["timestamp", "relevance"]},
+            "sort_order": {"type": "string", "description": "Sort order 'asc' or 'desc' (default 'desc')", "enum": ["asc", "desc"]},
         },
         "required": ["query"],
     },
 )
 async def discord_search_messages(args: McpArgs) -> McpResult:
     guild_id = args.get("guild_id") or str(config.DISCORD_GUILD_ID)
-    query = args["query"].lower()
+    query = args["query"]
     limit = min(args.get("limit", 25), 100)
-    channel_filter_raw = args.get("channel_id")
-    author_filter = args.get("author", "").lower() if args.get("author") else None
-    max_scan = 500
     _tracer.start_span("tool.discord_search_messages", attributes={"discord.guild_id": guild_id, "query": query}).end()
     try:
+        params: dict[str, Any] = {"content": query}
+        channel_filter_raw = args.get("channel_id")
         if channel_filter_raw:
-            channel_ids = [await _resolve_channel(channel_filter_raw)]
-        else:
-            channels_list = await config.discord_client.list_channels(guild_id)
-            channel_ids = [ch["id"] for ch in channels_list]
-        found = 0
+            params["channel_id"] = await _resolve_channel(channel_filter_raw)
+        if args.get("author_id"):
+            params["author_id"] = args["author_id"]
+        params["sort_by"] = args.get("sort_by", "timestamp")
+        params["sort_order"] = args.get("sort_order", "desc")
+
         results: list[str] = []
-        for ch_id in channel_ids:
-            if found >= limit:
+        offset = 0
+        while len(results) < limit:
+            params["limit"] = min(25, limit - len(results))
+            params["offset"] = offset
+            data = await config.discord_client.get(f"/guilds/{guild_id}/messages/search", params)
+            message_groups = data.get("messages", [])
+            if not message_groups:
                 break
-            scanned = 0
-            params: dict[str, Any] = {}
-            while scanned < max_scan and found < limit:
-                batch_size = min(100, max_scan - scanned)
-                try:
-                    batch = await config.discord_client.get_messages(ch_id, limit=batch_size, **params)
-                except Exception:
-                    break
-                if not batch:
-                    break
-                for msg in batch:
-                    content = msg.get("content", "").lower()
-                    author_name = msg.get("author", {}).get("username", "").lower()
-                    if query in content:
-                        if author_filter and author_filter not in author_name:
-                            continue
+            for group in message_groups:
+                for msg in group:
+                    if msg.get("hit"):
                         ts = msg.get("timestamp", "")
-                        results.append(f"[{ts}] #{ch_id} {msg.get('author', {}).get('username', 'unknown')}: {msg.get('content', '')}")
-                        found += 1
-                        if found >= limit:
-                            break
-                scanned += len(batch)
-                if len(batch) < batch_size:
-                    break
-                params["before"] = batch[-1]["id"]
+                        ch_id = msg.get("channel_id", "")
+                        author = msg.get("author", {}).get("username", "unknown")
+                        content = msg.get("content", "")
+                        results.append(f"[{ts}] #{ch_id} {author}: {content}")
+                        break
+            total = data.get("total_results", 0)
+            offset += 25
+            if offset >= total or offset >= 9975:
+                break
+
         if not results:
             return {"content": [{"type": "text", "text": "No messages found."}]}
-        text = "\n".join(results)
+        text = "\n".join(results[:limit])
         text = _truncate_mcp_text(text, len(results))
         return {"content": [{"type": "text", "text": text}]}
     except Exception as e:
@@ -997,14 +993,14 @@ utils_mcp_server = create_sdk_mcp_server(
 axi_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent, axi_restart_agent, axi_send_message],
+    tools=[axi_spawn_agent, axi_kill_agent, axi_send_message],  # axi_restart_agent removed (buggy)
 )
 
-# Master agent gets the full set including bot restart + agent restart + send_message
+# Master agent gets the full set including bot restart + send_message
 axi_master_mcp_server = create_sdk_mcp_server(
     name="axi",
     version="1.0.0",
-    tools=[axi_spawn_agent, axi_kill_agent, axi_restart_agent, axi_send_message],  # axi_restart disabled (buggy)
+    tools=[axi_spawn_agent, axi_kill_agent, axi_send_message],  # axi_restart_agent removed (buggy)
 )
 
 # Discord REST tools for cross-server messaging and queries
