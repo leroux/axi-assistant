@@ -367,6 +367,14 @@ async def ensure_guild_infrastructure() -> None:
                 else:
                     log.info("Permissions already current on '%s' category", cat.name)
 
+    # Sync channel permissions inside Killed categories — channels moved
+    # before the privacy change still have view_channel=True for @everyone.
+    for _, cat in killed_found:
+        for ch in cat.text_channels:
+            if not ch.permissions_synced:
+                await ch.edit(sync_permissions=True)
+                log.info("Synced permissions on channel #%s in '%s'", ch.name, cat.name)
+
     # Sort by order number and store
     axi_found.sort(key=lambda x: x[0])
     active_found.sort(key=lambda x: x[0])
