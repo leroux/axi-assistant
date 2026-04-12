@@ -61,15 +61,14 @@ class DiscordClient:
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Make a Discord API request with rate-limit and retry handling.
 
+        Rate-limit retries (429) do not count against MAX_RETRIES.
         Raises httpx.HTTPStatusError on non-retriable failures.
         """
-        for attempt in range(MAX_RETRIES + 1):
+        failures = 0
+        while True:
             resp = self._client.request(method, path, **kwargs)
 
-            if resp.status_code == 200:
-                return resp
-
-            if resp.status_code == 204:
+            if resp.status_code in (200, 201, 204):
                 return resp
 
             if resp.status_code == 429:
@@ -78,16 +77,14 @@ class DiscordClient:
                 time.sleep(retry_after)
                 continue
 
-            if resp.status_code >= 500 and attempt < MAX_RETRIES:
-                wait = 2**attempt
+            if resp.status_code >= 500 and failures < MAX_RETRIES:
+                wait = 2**failures
+                failures += 1
                 log.warning("Server error %d, retrying in %ds...", resp.status_code, wait)
                 time.sleep(wait)
                 continue
 
             resp.raise_for_status()
-
-        # Exhausted retries — raise the last response's error
-        raise AssertionError("unreachable: MAX_RETRIES >= 0")
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """GET request, returning parsed JSON."""
@@ -173,9 +170,11 @@ class AsyncDiscordClient:
     async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Make a Discord API request with rate-limit and retry handling.
 
+        Rate-limit retries (429) do not count against MAX_RETRIES.
         Raises httpx.HTTPStatusError on non-retriable failures.
         """
-        for attempt in range(MAX_RETRIES + 1):
+        failures = 0
+        while True:
             resp = await self._client.request(method, path, **kwargs)
 
             if resp.status_code in (200, 201, 204):
@@ -187,15 +186,14 @@ class AsyncDiscordClient:
                 await asyncio.sleep(retry_after)
                 continue
 
-            if resp.status_code >= 500 and attempt < MAX_RETRIES:
-                wait = 2**attempt
+            if resp.status_code >= 500 and failures < MAX_RETRIES:
+                wait = 2**failures
+                failures += 1
                 log.warning("Server error %d on %s %s, retrying in %ds...", resp.status_code, method, path, wait)
                 await asyncio.sleep(wait)
                 continue
 
             resp.raise_for_status()
-
-        raise AssertionError("unreachable: MAX_RETRIES >= 0")
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """GET request, returning parsed JSON."""

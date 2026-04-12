@@ -1215,13 +1215,14 @@ def _update_channel_topic(session: AgentSession, channel: TextChannel | None = N
 
 
 def _save_master_session(session: AgentSession) -> None:
-    """Save master agent session metadata (session_id, prompt_hash) to disk."""
+    """Save master agent session metadata (session_id, prompt_hash, guild_id) to disk."""
     try:
         data: dict[str, Any] = {}
         if session.session_id:
             data["session_id"] = session.session_id
         if session.system_prompt_hash:
             data["prompt_hash"] = session.system_prompt_hash
+        data["guild_id"] = str(config.DISCORD_GUILD_ID)
         with open(config.MASTER_SESSION_PATH, "w") as f:
             json.dump(data, f)
         log.info("Saved master session data to %s", config.MASTER_SESSION_PATH)

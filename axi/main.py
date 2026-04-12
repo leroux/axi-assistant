@@ -2328,7 +2328,11 @@ async def sync_readme_channel() -> None:
 
 
 def _load_master_session_data() -> tuple[str | None, str | None]:
-    """Load master session_id and prompt_hash from disk."""
+    """Load master session_id and prompt_hash from disk.
+
+    Skips resume if the saved guild_id doesn't match the current guild —
+    prevents cross-guild message leaks from stale conversation context.
+    """
     try:
         if os.path.isfile(config.MASTER_SESSION_PATH):
             with open(config.MASTER_SESSION_PATH) as f:
@@ -2338,9 +2342,17 @@ def _load_master_session_data() -> tuple[str | None, str | None]:
                     data = json.loads(raw)
                     resume_id = data.get("session_id")
                     prompt_hash = data.get("prompt_hash")
+                    saved_guild = data.get("guild_id")
                 else:
                     resume_id = raw
                     prompt_hash = None
+                    saved_guild = None
+                if saved_guild and str(config.DISCORD_GUILD_ID) != saved_guild:
+                    log.warning(
+                        "Guild mismatch: saved=%s current=%s — discarding master session to prevent cross-guild leaks",
+                        saved_guild, config.DISCORD_GUILD_ID,
+                    )
+                    return None, None
                 if resume_id:
                     log.info("Loaded master session_id from %s: %s (prompt_hash=%s)", config.MASTER_SESSION_PATH, resume_id[:8], prompt_hash)
                 return resume_id, prompt_hash
