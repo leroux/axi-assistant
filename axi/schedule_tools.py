@@ -1,9 +1,8 @@
 """MCP tools for schedule management.
 
-Each agent gets its own MCP server instance with its identity captured via
-closures (mirrors the make_cwd_permission_callback pattern).  The master agent
-gets ``is_master=True`` which lets it see *all* schedules and delete any entry.
-The module is self-contained — no imports from bot.py.
+All agents share the same schedule pool — every agent can list, create,
+modify, delete, enable, and disable any schedule.  The ``owner`` field is
+still written on creation as metadata but is not used for access control.
 
 Exports:
     make_schedule_mcp_server  — factory returning a per-agent McpSdkServerConfig
@@ -37,7 +36,7 @@ schedules_lock = asyncio.Lock()
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_SCHEDULES_PER_AGENT = 20
+MAX_SCHEDULES = 20
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9\-]*$")
 _MAX_NAME_LEN = 50
 _MAX_PROMPT_LEN = 2000
@@ -187,21 +186,17 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
 
     # -- Closures over agent_name -----------------------------------------
 
-    def _my_schedules(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [e for e in entries if (e.get("owner") or e.get("session")) == agent_name]
-
     # -- Tool handlers ----------------------------------------------------
 
     async def handle_schedule_list(args: dict[str, Any]) -> dict[str, Any]:
         async with schedules_lock:
             entries = _load(schedules_path)
 
-        mine = _my_schedules(entries)
-        if not mine:
-            return _text("You have no scheduled tasks.")
+        if not entries:
+            return _text("No scheduled tasks.")
 
         result: list[dict[str, Any]] = []
-        for e in mine:
+        for e in entries:
             item: dict[str, Any] = {"name": e["name"], "prompt": e["prompt"]}
             if "schedule" in e:
                 item["type"] = "recurring"
@@ -279,17 +274,15 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
         # --- Acquire lock and write ---
         async with schedules_lock:
             entries = _load(schedules_path)
-            mine = _my_schedules(entries)
-
-            # Per-agent uniqueness
-            if any(e["name"] == name for e in mine):
+            # Global uniqueness
+            if any(e["name"] == name for e in entries):
                 return _error(
                     f"A schedule named '{name}' already exists. Use a different name or delete the existing one first."
                 )
 
-            # Per-agent limit
-            if len(mine) >= MAX_SCHEDULES_PER_AGENT:
-                return _error(f"Schedule limit reached ({MAX_SCHEDULES_PER_AGENT}). Delete an existing schedule first.")
+            # Global limit
+            if len(entries) >= MAX_SCHEDULES:
+                return _error(f"Schedule limit reached ({MAX_SCHEDULES}). Delete an existing schedule first.")
 
             # Build entry — session controls which agent handles the event.
             # Defaults to owner (calling agent). Use schedule name to spawn
@@ -332,7 +325,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
 
             idx = None
             for i, e in enumerate(entries):
-                if e.get("name") == name and (e.get("owner") or e.get("session")) == agent_name:
+                if e.get("name") == name:
                     idx = i
                     break
 
@@ -352,7 +345,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
         async with schedules_lock:
             entries = _load(schedules_path)
             for e in entries:
-                if e.get("name") == name and (e.get("owner") or e.get("session")) == agent_name:
+                if e.get("name") == name:
                     if e.get("disabled"):
                         return _text(f"Schedule '{name}' is already disabled.")
                     e["disabled"] = True
@@ -368,7 +361,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
         async with schedules_lock:
             entries = _load(schedules_path)
             for e in entries:
-                if e.get("name") == name and (e.get("owner") or e.get("session")) == agent_name:
+                if e.get("name") == name:
                     if not e.get("disabled"):
                         return _text(f"Schedule '{name}' is already enabled.")
                     del e["disabled"]
@@ -401,7 +394,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
         async with schedules_lock:
             entries = _load(schedules_path)
             for e in entries:
-                if e.get("name") == name and (e.get("owner") or e.get("session")) == agent_name:
+                if e.get("name") == name:
                     for k, v in updates.items():
                         if k == "cron":
                             e["schedule"] = v
@@ -415,7 +408,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
 
     list_tool = SdkMcpTool(
         name="schedule_list",
-        description=("List all of your scheduled tasks (one-off and recurring)."),
+        description=("List all scheduled tasks (one-off and recurring)."),
         input_schema={"type": "object", "properties": {}},
         handler=handle_schedule_list,
     )
@@ -433,7 +426,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
                 "name": {
                     "type": "string",
                     "description": (
-                        "Short identifier (lowercase letters, numbers, hyphens). Must be unique among your schedules."
+                        "Short identifier (lowercase letters, numbers, hyphens). Must be globally unique."
                     ),
                 },
                 "prompt": {
@@ -490,7 +483,7 @@ def make_schedule_mcp_server(agent_name: str, schedules_path: str, agent_cwd: st
 
     delete_tool = SdkMcpTool(
         name="schedule_delete",
-        description="Delete one of your scheduled tasks by name.",
+        description="Delete a scheduled task by name.",
         input_schema={
             "type": "object",
             "properties": {
