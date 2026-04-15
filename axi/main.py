@@ -2087,6 +2087,49 @@ async def restart_including_bridge_cmd(interaction: discord.Interaction, force: 
 
 
 # ---------------------------------------------------------------------------
+# Voice commands
+# ---------------------------------------------------------------------------
+
+
+@bot.tree.command(name="dj-join", description="Join a voice channel and stream Dynamic Radio.")
+@app_commands.describe(channel="Voice channel to join (defaults to your current VC)")
+async def dj_join_command(
+    interaction: discord.Interaction,
+    channel: discord.VoiceChannel | None = None,
+) -> None:
+    from axi import voice
+
+    if channel is None:
+        if interaction.user.voice and interaction.user.voice.channel:
+            channel = interaction.user.voice.channel  # type: ignore[assignment]
+        else:
+            await interaction.response.send_message("Join a voice channel first, or specify one.", ephemeral=True)
+            return
+
+    await interaction.response.defer()
+    try:
+        await voice.join(channel)
+        await interaction.followup.send(f"Streaming Dynamic Radio in **{channel.name}**.")
+    except Exception as e:
+        log.error("Failed to join voice channel: %s", e)
+        await interaction.followup.send(f"Failed to join: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="dj-leave", description="Leave the voice channel and stop streaming.")
+async def dj_leave_command(interaction: discord.Interaction) -> None:
+    from axi import voice
+
+    if interaction.guild is None:
+        await interaction.response.send_message("This command only works in a server.", ephemeral=True)
+        return
+
+    if await voice.leave(interaction.guild):
+        await interaction.response.send_message("Disconnected from voice.")
+    else:
+        await interaction.response.send_message("Not in a voice channel.", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
 # Channel creation / deletion listeners
 # ---------------------------------------------------------------------------
 
@@ -2662,6 +2705,21 @@ async def on_ready() -> None:
 
         await bot.tree.sync()
         log.info("Slash commands synced")
+
+        # Rejoin voice channels from previous session
+        from axi import voice
+        for guild_id, channel_id in voice.get_saved_channels().items():
+            guild = bot.get_guild(guild_id)
+            if not guild:
+                continue
+            channel = guild.get_channel(channel_id)
+            if channel and isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                try:
+                    await voice.join(channel)
+                    log.info("Auto-rejoined VC #%s in %s", channel.name, guild.name)
+                except Exception:
+                    log.warning("Failed to auto-rejoin VC %d", channel_id, exc_info=True)
+                    voice._clear_state(guild_id)
 
         check_schedules.start()
         log.info("Schedule checker started")
