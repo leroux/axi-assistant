@@ -15,6 +15,7 @@ __all__ = [
     "EXTENSIONS_DIR",
     "extension_prompt_text",
     "resolve_extension_hooks",
+    "resolve_extension_sandbox",
     "resolve_prompt_hooks",
     "sync_extension_commands",
 ]
@@ -81,7 +82,8 @@ def _load_extensions() -> dict[str, dict]:
                     audience = meta.get("audience", "all")
                     hooks = meta.get("hooks", {})
                     prompt_hooks = meta.get("prompt_hooks", {})
-            extensions[name] = {"text": text, "audience": audience, "hooks": hooks, "prompt_hooks": prompt_hooks}
+            sandbox: dict = meta.get("sandbox", {}) if has_meta else {}
+            extensions[name] = {"text": text, "audience": audience, "hooks": hooks, "prompt_hooks": prompt_hooks, "sandbox": sandbox}
         except Exception:
             log.exception("Failed to load extension '%s'", name)
     return extensions
@@ -159,6 +161,32 @@ def resolve_prompt_hooks(ext_names: list[str], audience: str = "all") -> dict[st
             except Exception:
                 log.exception("Failed to read prompt hook file: %s", full_path)
     return {k: "\n\n".join(v) for k, v in hook_texts.items()}
+
+
+def resolve_extension_sandbox(ext_names: list[str], audience: str = "all") -> tuple[list[str], list[str]]:
+    """Resolve sandbox customizations from loaded extensions.
+
+    Scans extensions' meta.json for sandbox field, filtered by audience.
+    The sandbox field can contain:
+      - excluded_commands: list of commands to exclude from sandbox
+      - write_dirs: list of directories to add to write allowlist (~ expanded)
+
+    Returns (excluded_commands, write_dirs) merged from all matching extensions.
+    """
+    extensions = _load_extensions()
+    excluded: list[str] = []
+    write_dirs: list[str] = []
+    for name in ext_names:
+        ext = extensions.get(name)
+        if not ext:
+            continue
+        ext_audience = ext["audience"]
+        if ext_audience != "all" and ext_audience != audience:
+            continue
+        sandbox = ext.get("sandbox", {})
+        excluded.extend(sandbox.get("excluded_commands", []))
+        write_dirs.extend(os.path.expanduser(d) for d in sandbox.get("write_dirs", []))
+    return excluded, write_dirs
 
 
 def sync_extension_commands() -> None:

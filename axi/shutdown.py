@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -90,6 +91,13 @@ def kill_supervisor() -> None:
     This is intentionally synchronous and runs as the very last step.
     The supervisor (or systemd) will relaunch us.
     """
+    # Reload systemd unit files so the next start picks up any .service changes
+    try:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], timeout=5)
+        log.info("systemctl --user daemon-reload succeeded")
+    except Exception:
+        log.warning("Failed to run systemctl --user daemon-reload", exc_info=True)
+
     ppid = os.getppid()
     log.info("Sending SIGTERM to supervisor (pid=%d)", ppid)
     try:

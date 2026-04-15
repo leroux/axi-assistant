@@ -146,6 +146,20 @@ _tracer = trace.get_tracer(__name__)
                 "items": {"type": "string"},
                 "description": "Optional list of custom MCP server names (from mcp_servers.json) to attach to this agent (e.g. ['todoist']).",
             },
+            "excluded_commands": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Extra commands to exclude from bash sandbox (merged with base set). E.g. ['ssh', 'docker'].",
+            },
+            "write_dirs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Extra directories to add to sandbox write allowlist (~ expanded). E.g. ['~/.config/dynamic-radio'].",
+            },
+            "model": {
+                "type": "string",
+                "description": "Model override for this agent (e.g. 'codex-mini', 'haiku', 'sonnet'). Defaults to global AXI_MODEL.",
+            },
         },
         "required": ["name", "prompt"],
     },
@@ -164,6 +178,9 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
     no_worktree = args.get("no_worktree", False)
     compact_instructions = args.get("compact_instructions")
     mcp_server_names: list[str] = args.get("mcp_servers") or []
+    excluded_commands: list[str] = args.get("excluded_commands") or []
+    write_dirs: list[str] = [os.path.expanduser(d) for d in (args.get("write_dirs") or [])]
+    agent_model: str | None = args.get("model")
 
     # Respawn detection: if a channel already exists for this agent, it's a
     # respawn (kill + re-create).  Default cwd to the previous session's cwd
@@ -270,6 +287,9 @@ async def axi_spawn_agent(args: McpArgs) -> McpResult:
                 extensions=agent_extensions,
                 compact_instructions=compact_instructions,
                 extra_mcp_servers=extra_mcp_servers,
+                excluded_commands=excluded_commands,
+                write_dirs=write_dirs,
+                model=agent_model,
             )
         except Exception:
             channels.bot_creating_channels.discard(agents.normalize_channel_name(agent_name))

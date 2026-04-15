@@ -61,6 +61,11 @@ class AgentSession:
     frontend_state: Any = None  # Opaque — frontend casts to its own type
     # Custom compact instructions — used for both system prompt injection and manual /compact
     compact_instructions: str | None = None
+    # Per-agent sandbox customization (merged with base config in hub_wiring)
+    extra_excluded_commands: list[str] = field(default_factory=list)
+    extra_write_dirs: list[str] = field(default_factory=list)
+    # Per-agent model override (None = use global AXI_MODEL)
+    model: str | None = None
     # Context window monitoring (updated from stderr autocompact debug lines)
     context_tokens: int = 0
     context_window: int = 0

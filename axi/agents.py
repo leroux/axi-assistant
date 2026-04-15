@@ -581,7 +581,11 @@ def content_summary(content: MessageContent) -> str:
 
 
 async def _get_or_create_exceptions_channel() -> str | None:
-    """Get or create the #exceptions channel via REST API."""
+    """Get or create the #exceptions channel via REST API.
+
+    The channel is created as private (hidden from @everyone) so only the bot
+    and users with admin permissions can see it.
+    """
     global _exceptions_channel_id
 
     if _exceptions_channel_id is not None:
@@ -592,9 +596,21 @@ async def _get_or_create_exceptions_channel() -> str | None:
         if ch:
             _exceptions_channel_id = ch["id"]
             return _exceptions_channel_id
-        created = await config.discord_client.create_channel(guild_id, "exceptions")
+        # Create as private: deny view_channel for @everyone (role id = guild id)
+        overwrites = [
+            {
+                "id": guild_id,
+                "type": 0,  # role
+                "deny": str(1 << 10),  # VIEW_CHANNEL
+                "allow": "0",
+            },
+        ]
+        created = await config.discord_client.post(
+            f"/guilds/{guild_id}/channels",
+            json={"name": "exceptions", "type": 0, "permission_overwrites": overwrites},
+        )
         _exceptions_channel_id = created["id"]
-        log.info("Created #exceptions channel (id=%s)", _exceptions_channel_id)
+        log.info("Created private #exceptions channel (id=%s)", _exceptions_channel_id)
         return _exceptions_channel_id
     except Exception:
         log.warning("Failed to get/create #exceptions channel", exc_info=True)
@@ -1078,6 +1094,8 @@ async def _rebuild_session(name: str, *, cwd: str | None = None, session_id: str
     old_mcp = getattr(session, "mcp_servers", None)
     old_agent_type = session.agent_type if session else "flowcoder"
     old_mcp_names = session.mcp_server_names if session else None
+    old_excluded = session.extra_excluded_commands if session else []
+    old_write_dirs = session.extra_write_dirs if session else []
     resolved_cwd = cwd or old_cwd
     prompt = (
         session.system_prompt if session and session.system_prompt else make_spawned_agent_system_prompt(resolved_cwd, agent_name=name)
@@ -1094,6 +1112,8 @@ async def _rebuild_session(name: str, *, cwd: str | None = None, session_id: str
         session_id=session_id,
         mcp_servers=old_mcp,
         mcp_server_names=old_mcp_names,
+        extra_excluded_commands=old_excluded,
+        extra_write_dirs=old_write_dirs,
     )
     discord_state(new_session).channel_id = old_channel_id
     agents[name] = new_session
@@ -1143,6 +1163,15 @@ async def reconstruct_agents_from_channels() -> int:
             extra_mcp = config.load_mcp_servers(mcp_names) if mcp_names else None
             mcp_servers = _build_mcp_servers(agent_name, cwd, extra_mcp_servers=extra_mcp)
 
+            # Resolve sandbox customizations from extensions
+            from axi.extensions import resolve_extension_sandbox, DEFAULT_EXTENSIONS
+            resolved_ext = list(saved_ext) if saved_ext is not None else list(DEFAULT_EXTENSIONS)
+            ext_excluded, ext_write_dirs = resolve_extension_sandbox(resolved_ext)
+
+            # Pre-create extension write dirs (same as spawn_agent)
+            for d in ext_write_dirs:
+                os.makedirs(d, exist_ok=True)
+
             session = AgentSession(
                 name=agent_name,
                 agent_type=agent_type or "flowcoder",
@@ -1152,6 +1181,8 @@ async def reconstruct_agents_from_channels() -> int:
                 system_prompt_hash=old_prompt_hash,
                 session_id=session_id,
                 mcp_servers=mcp_servers,
+                extra_excluded_commands=ext_excluded,
+                extra_write_dirs=ext_write_dirs,
             )
             ds = discord_state(session)
             ds.channel_id = ch.id
@@ -1478,6 +1509,9 @@ async def spawn_agent(
     extensions: list[str] | None = None,
     compact_instructions: str | None = None,
     extra_mcp_servers: dict[str, Any] | None = None,
+    excluded_commands: list[str] | None = None,
+    write_dirs: list[str] | None = None,
+    model: str | None = None,
 ) -> AgentSession:
     """Spawn a new agent session and run its initial prompt in the background."""
     with _tracer.start_as_current_span(
@@ -1511,6 +1545,18 @@ async def spawn_agent(
         mcp_names = list(extra_mcp_servers.keys()) if extra_mcp_servers else None
         prompt = make_spawned_agent_system_prompt(cwd, extensions=extensions, compact_instructions=compact_instructions, agent_name=name)
 
+        # Merge sandbox customizations: explicit params + extension meta.json
+        from axi.extensions import resolve_extension_sandbox, DEFAULT_EXTENSIONS
+        resolved_ext = extensions if extensions is not None else DEFAULT_EXTENSIONS
+        ext_excluded, ext_write_dirs = resolve_extension_sandbox(resolved_ext)
+        merged_excluded = list(excluded_commands or []) + ext_excluded
+        merged_write_dirs = list(write_dirs or []) + ext_write_dirs
+
+        # Pre-create custom write dirs so the sandbox can actually use them
+        # (mkdir inside the sandbox fails because the parent dir isn't writable)
+        for d in merged_write_dirs:
+            os.makedirs(d, exist_ok=True)
+
         session = AgentSession(
             name=name,
             agent_type=agent_type,
@@ -1521,6 +1567,9 @@ async def spawn_agent(
             session_id=resume,
             mcp_servers=mcp_servers,
             compact_instructions=compact_instructions,
+            extra_excluded_commands=merged_excluded,
+            extra_write_dirs=merged_write_dirs,
+            model=model,
         )
         discord_state(session).channel_id = channel.id
 

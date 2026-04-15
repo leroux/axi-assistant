@@ -247,6 +247,7 @@ intents = Intents(
     guild_reactions=True,
     message_content=True,
     dm_messages=True,
+    voice_states=True,
 )
 
 # ---------------------------------------------------------------------------

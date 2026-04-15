@@ -85,7 +85,7 @@ Check `dj_status()`. If `needs_tracks` is true (< 60 min of queued music), run t
    - Run 2-4 searches with different queries for variety
    - Collect all results into a candidate pool
 
-4. **Select a batch** (~15 tracks) from the candidates:
+4. **Select a batch** (~50 tracks) from the candidates:
    - Match the block's energy level and BPM range
    - Respect anti-preferences (avoid disliked tracks, specific avoids from prefs)
    - Mix familiar (liked, previously played well) with discovery (~2/3 new per prefs)
@@ -98,8 +98,8 @@ Check `dj_status()`. If `needs_tracks` is true (< 60 min of queued music), run t
 
 ### Refill Guidelines
 
-- **Batch size:** ~15 tracks to cover a full hour between cron refills.
-- **Don't over-queue:** If queue has >30 min of music, push fewer tracks. If empty, push the full ~15.
+- **Batch size:** ~50 tracks to cover several hours between refills.
+- **Don't over-queue:** If queue has >30 min of music, push fewer tracks. If empty, push the full ~50.
 - **Skip patterns matter:** If feedback shows tracks from a genre getting skipped early (<30s play duration), reduce that genre.
 - **Liked tracks:** Can be replayed but not within the same 24h window (the daemon filters these).
 - **Discovery balance:** ~2/3 new tracks, ~1/3 familiar (per music-preferences.md). "New" means not in recent play history.

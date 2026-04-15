@@ -9,6 +9,7 @@ These wrappers run outside the sandbox (via `excludedCommands`) but validate tha
 
 ## Rules
 
+- **Run `hostname` to know which machine you are on.** Don't assume — check before trying to SSH to a machine you might already be on.
 - **Always use `ts-ssh`/`ts-curl`** for Tailscale access. Do not use regular `ssh`/`curl` — they are sandboxed and will fail on network access.
 - **Do not use `dangerouslyDisableSandbox`** — it is disabled and has no effect.
 

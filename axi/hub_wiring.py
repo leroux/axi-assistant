@@ -44,7 +44,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
     from axi.agents import make_stderr_callback
 
     return ClaudeAgentOptions(
-        model=config.get_model(),
+        model=session.model or config.get_model(),
         effort=config.get_effort(),
         thinking={"type": "adaptive"},
         setting_sources=["local"],
@@ -59,7 +59,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
             "enabled": True,
             "autoAllowBashIfSandboxed": True,
             "allowUnsandboxedCommands": False,
-            "excludedCommands": ["git", "systemctl", "uv", "ts-ssh", "ts-curl"],
+            "excludedCommands": ["git", "gh", "systemctl", "uv", "ts-ssh", "ts-curl"] + session.extra_excluded_commands,
             "network": {
                 "allowAllUnixSockets": True,
                 "allowUnixSockets": [
@@ -73,7 +73,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
             os.path.expanduser("~/.config/axi"),
             os.path.expanduser("~/.config/minflow"),
             os.path.expanduser("~/.cache/uv"),
-        ],
+        ] + session.extra_write_dirs,
         mcp_servers=session.mcp_servers or {},
         disallowed_tools=[],
         extra_args={"debug-to-stderr": None},

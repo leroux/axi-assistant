@@ -8,6 +8,7 @@ StartLimitIntervalSec=300
 [Service]
 Type=simple
 WorkingDirectory=/home/pride/coding-projects/personal-assistant
+ExecStartPre=/usr/bin/uv sync --quiet
 ExecStart=/usr/bin/uv run python -m axi.supervisor
 Restart=always
 RestartSec=5

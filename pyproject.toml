@@ -3,7 +3,8 @@ name = "axi-assistant"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "discord.py",
+    "discord.py[voice]>=2.7",
+    "PyNaCl",
     "claude-agent-sdk",
     "python-dotenv",
     "croniter",
@@ -11,6 +12,7 @@ dependencies = [
     "tzdata>=2025.3",
     "arrow",
     "flowcoder-engine",
+    "codex-app-server-sdk",
     "flowcoder-flowchart",
     "flowcoder-tui",
     "procmux",

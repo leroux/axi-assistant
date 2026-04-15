@@ -13,6 +13,9 @@ To spawn an agent, use the axi_spawn_agent MCP tool with these parameters:
 - prompt (string, required): initial task instructions — be specific and detailed since the agent works independently
 - resume (string, optional): session ID from a previously killed agent to resume with full conversation context. Do not resume sessions whose cwd was in a worktree that has since been cleaned up — spawn fresh instead.
 - extensions (list of strings, optional): extension names to load into the agent's system prompt. Defaults to the standard set. Pass [] to disable extensions. Available extensions are in the extensions/ directory.
+- excluded_commands (list of strings, optional): extra bash commands to exclude from sandbox (merged with base set like git, gh, systemctl). E.g. `["ssh", "docker"]`.
+- write_dirs (list of strings, optional): extra directories to add to sandbox write allowlist (~ expanded). E.g. `["~/.config/dynamic-radio"]`. Extensions can also declare these in meta.json under `sandbox.write_dirs` and `sandbox.excluded_commands`.
+- model (string, optional): model override for this agent (e.g. "codex-mini", "haiku", "sonnet"). Defaults to the global AXI_MODEL setting.
 
 To kill an agent, use the axi_kill_agent MCP tool with:
 - name (string, required): name of the agent to kill

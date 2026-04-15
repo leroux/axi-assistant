@@ -2432,6 +2432,7 @@ def _register_master_agent(resume_id: str | None, prompt_hash: str | None) -> Ag
             "Recent user requests that haven't been completed yet. "
             "Important context the user has shared (preferences, decisions, constraints)."
         ),
+        extra_write_dirs=[os.path.expanduser("~/.config/systemd/user")],
     )
     ds = discord_state(session)
     ds.todo_items = agents.load_todo_items(config.MASTER_AGENT_NAME)
