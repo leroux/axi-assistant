@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +16,7 @@ from pathlib import Path
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
-USER_AGENT = "codex-chatgpt-openai-shim/0.1"
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 DEFAULT_REASONING_EFFORT = os.environ.get("CODEX_REASONING_EFFORT", "xhigh")
 
 
@@ -315,6 +316,34 @@ def openai_usage(responses_usage):
     }
 
 
+def reasoning_summary_text(item):
+    summary = item.get("summary")
+    if not isinstance(summary, list):
+        return ""
+    pieces = []
+    for part in summary:
+        if isinstance(part, str):
+            pieces.append(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if text:
+            pieces.append(str(text))
+            continue
+        content = part.get("content")
+        if isinstance(content, str) and content:
+            pieces.append(content)
+            continue
+        if isinstance(content, list):
+            for child in content:
+                if isinstance(child, str):
+                    pieces.append(child)
+                elif isinstance(child, dict) and child.get("text"):
+                    pieces.append(str(child["text"]))
+    return "".join(pieces)
+
+
 def response_to_chat_completion(resp, fallback_text="", tool_calls=None):
     status = resp.get("status", "completed")
     text = resp.get("output_text")
@@ -340,6 +369,7 @@ def response_to_chat_completion(resp, fallback_text="", tool_calls=None):
 
 def parse_completed_response(raw):
     accumulated_text = []
+    accumulated_reasoning = []
     completed = None
     tool_order = []
     tool_calls_by_item = {}
@@ -356,9 +386,17 @@ def parse_completed_response(raw):
         event_type = event.get("type")
         if event_type == "response.output_text.delta":
             accumulated_text.append(event.get("delta", ""))
+        elif event_type == "response.reasoning_text.delta":
+            delta = event.get("delta", "")
+            if delta:
+                accumulated_reasoning.append(delta)
         elif event_type == "response.output_item.added":
             item = event.get("item") or {}
-            if item.get("type") == "function_call":
+            if item.get("type") == "reasoning":
+                summary_text = reasoning_summary_text(item)
+                if summary_text:
+                    accumulated_reasoning.append(summary_text)
+            elif item.get("type") == "function_call":
                 item_id = item.get("id") or str(event.get("output_index", len(tool_order)))
                 tool_order.append(item_id)
                 tool_calls_by_item[item_id] = {
@@ -376,7 +414,11 @@ def parse_completed_response(raw):
                 tool_calls_by_item[item_id]["function"]["arguments"] = event.get("arguments", "")
         elif event_type == "response.output_item.done":
             item = event.get("item") or {}
-            if item.get("type") == "function_call":
+            if item.get("type") == "reasoning":
+                summary_text = reasoning_summary_text(item)
+                if summary_text:
+                    accumulated_reasoning.append(summary_text)
+            elif item.get("type") == "function_call":
                 item_id = item.get("id")
                 if item_id in tool_calls_by_item:
                     tool_calls_by_item[item_id]["function"]["arguments"] = item.get("arguments", "")
@@ -384,6 +426,8 @@ def parse_completed_response(raw):
             completed = event.get("response") or {}
     if completed is None:
         raise RuntimeError("Codex backend did not return response.completed")
+    if accumulated_reasoning and not accumulated_text:
+        accumulated_text = accumulated_reasoning
     tool_calls = [tool_calls_by_item[item_id] for item_id in tool_order if item_id in tool_calls_by_item]
     return response_to_chat_completion(completed, "".join(accumulated_text), tool_calls)
 
@@ -428,8 +472,19 @@ class Handler(BaseHTTPRequestHandler):
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://chatgpt.com/",
+            "Origin": "https://chatgpt.com",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "DNT": "1",
+            "OpenAI-Beta": "responses=experimental",
+            "Originator": "codex_cli_rs",
+            "Session_id": str(uuid.uuid4()),
             "User-Agent": USER_AGENT,
-            "Originator": "codex-chatgpt-openai-shim",
             "Content-Length": str(len(content)),
         }
         if account_id:
@@ -510,7 +565,18 @@ class Handler(BaseHTTPRequestHandler):
                     })
             elif event_type == "response.output_item.added":
                 item = event.get("item") or {}
-                if item.get("type") == "function_call":
+                if item.get("type") == "reasoning":
+                    summary_text = reasoning_summary_text(item)
+                    if summary_text:
+                        send_role()
+                        self.stream_chunk({
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {"reasoning": summary_text}, "finish_reason": None}],
+                        })
+                elif item.get("type") == "function_call":
                     send_role()
                     saw_tool_call = True
                     item_id = item.get("id") or str(event.get("output_index", len(tool_indexes)))
