@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+
 import pytest
 from claudewire.permissions import Allow, Deny
 
@@ -29,10 +30,10 @@ class TestMakeCwdPermissionCallback:
         assert isinstance(result, Deny)
 
     @pytest.mark.asyncio
-    async def test_denies_forbidden_tool(self) -> None:
+    async def test_allows_skill(self) -> None:
         cb = make_cwd_permission_callback("/tmp/project")
         result = await cb("Skill", {})
-        assert isinstance(result, Deny)
+        assert isinstance(result, Allow)
 
     @pytest.mark.asyncio
     async def test_allows_enter_plan_mode(self) -> None:
