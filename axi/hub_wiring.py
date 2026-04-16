@@ -57,7 +57,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
         model=resolved_model,
         effort=config.get_effort(),
         thinking={"type": "adaptive"},
-        setting_sources=["local"],
+        setting_sources=["user", "project", "local"],
         permission_mode="plan" if session.plan_mode else "default",
         permission_prompt_tool_name="stdio",
         cwd=session.cwd,
