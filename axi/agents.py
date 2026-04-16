@@ -151,6 +151,15 @@ _active_trace_ids: dict[str, str] = {}
 
 _TS_PREFIX_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\] ")
 
+
+def _procmux_list_processes(result: Any) -> dict[str, Any]:
+    processes = getattr(result, "processes", None)
+    if processes is not None:
+        return processes
+    agents = getattr(result, "agents", None)
+    return agents or {}
+
+
 _COMMANDS_DIR = os.path.join(config.BOT_DIR, "commands")
 
 
@@ -1181,7 +1190,7 @@ async def reconstruct_agents_from_channels() -> int:
             mcp_servers = _build_mcp_servers(agent_name, cwd, extra_mcp_servers=extra_mcp)
 
             # Resolve sandbox customizations from extensions
-            from axi.extensions import resolve_extension_sandbox, DEFAULT_EXTENSIONS
+            from axi.extensions import DEFAULT_EXTENSIONS, resolve_extension_sandbox
             resolved_ext = list(saved_ext) if saved_ext is not None else list(DEFAULT_EXTENSIONS)
             ext_excluded, ext_write_dirs = resolve_extension_sandbox(resolved_ext)
 
@@ -1568,7 +1577,7 @@ async def spawn_agent(
         prompt = make_spawned_agent_system_prompt(cwd, extensions=extensions, compact_instructions=compact_instructions, agent_name=name)
 
         # Merge sandbox customizations: explicit params + extension meta.json
-        from axi.extensions import resolve_extension_sandbox, DEFAULT_EXTENSIONS
+        from axi.extensions import DEFAULT_EXTENSIONS, resolve_extension_sandbox
         resolved_ext = extensions if extensions is not None else DEFAULT_EXTENSIONS
         ext_excluded, ext_write_dirs = resolve_extension_sandbox(resolved_ext)
         merged_excluded = list(excluded_commands or []) + ext_excluded
@@ -1966,7 +1975,7 @@ async def connect_procmux() -> None:
 
         try:
             result = await procmux_conn.send_command("list")
-            bridge_agents = result.agents or {}
+            bridge_agents = _procmux_list_processes(result)
             log.info("Bridge reports %d agent(s): %s", len(bridge_agents), list(bridge_agents.keys()))
             span.set_attribute("procmux.agents_found", len(bridge_agents))
         except Exception:
