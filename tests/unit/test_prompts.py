@@ -1,9 +1,13 @@
 """Unit tests for pure functions in prompts.py."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 from axi import config
 from axi.prompts import _is_axi_dev_cwd, compute_prompt_hash, make_spawned_agent_system_prompt
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestComputePromptHash:
@@ -106,3 +110,9 @@ class TestMakeSpawnedAgentSystemPrompt:
         result_other = make_spawned_agent_system_prompt("/tmp/project", extensions=[])
         # Axi-dev cwd should include extra content (soul + dev context) not present for non-axi cwds
         assert len(result_axi["append"]) > len(result_other["append"])
+
+    def test_repo_git_top_paths_are_rendered_in_admin_prompt(self) -> None:
+        result = make_spawned_agent_system_prompt(config.BOT_DIR, extensions=[])
+        expected = str(REPO_ROOT / "prompts" / "refs" / "agent-spawning.md")
+        assert expected in result["append"]
+        assert "/home/pride/coding-projects/personal-assistant/prompts/refs/agent-spawning.md" not in result["append"]

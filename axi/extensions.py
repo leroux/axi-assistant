@@ -35,7 +35,11 @@ _default_extensions_str = os.environ.get("DEFAULT_EXTENSIONS", "")
 DEFAULT_EXTENSIONS: list[str] = [p.strip() for p in _default_extensions_str.split(",") if p.strip()]
 
 # Prompt variable substitutions shared with prompts.py
-_PROMPT_VARS = {"axi_user_data": config.AXI_USER_DATA, "bot_dir": config.BOT_DIR}
+_PROMPT_VARS = {
+    "axi_user_data": config.AXI_USER_DATA,
+    "bot_dir": config.BOT_DIR,
+    "repo_git_top": config.REPO_GIT_TOP,
+}
 
 
 def _load_prompt_file(path: str, variables: dict[str, str] | None = None) -> str:

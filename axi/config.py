@@ -42,7 +42,7 @@ __all__ = [
     "QUERY_TIMEOUT",
     "RATE_LIMIT_HISTORY_PATH",
     "README_CONTENT_PATH",
-    "ROLLBACK_MARKER_PATH",
+    "REPO_GIT_TOP",
     "SCHEDULES_PATH",
     "SCHEDULE_TIMEZONE",
     "SKIPS_PATH",
@@ -254,6 +254,7 @@ intents = Intents(
 # ---------------------------------------------------------------------------
 
 BOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_GIT_TOP = os.environ.get("REPO_GIT_TOP", BOT_DIR)
 BOT_WORKTREES_DIR = os.environ.get("AXI_WORKTREES_DIR", os.path.join(os.path.expanduser("~"), "axi-tests"))
 SCHEDULES_PATH = os.path.join(AXI_USER_DATA, "schedules.json")
 SKIPS_PATH = os.path.join(AXI_USER_DATA, "schedule_skips.json")
@@ -416,5 +417,5 @@ from discordquery import AsyncDiscordClient
 
 discord_client = AsyncDiscordClient(DISCORD_TOKEN)
 
-from axi.egress_filter import scrub_secrets  # noqa: E402
+from axi.egress_filter import scrub_secrets
 discord_client.content_filter = scrub_secrets
