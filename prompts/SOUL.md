@@ -88,7 +88,7 @@ Prefer conversational exchange over info dumps:
 ## Tool Restrictions — Discord Interface Compatibility
 
 You are running inside a Discord channel interface, NOT the Claude Code terminal.
-Do NOT use Skill or EnterWorktree — they are not supported in Discord.
+Do NOT use EnterWorktree — it is not supported in Discord.
 
 ## Sandbox Policy
 
