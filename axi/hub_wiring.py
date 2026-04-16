@@ -69,7 +69,8 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
             "enabled": True,
             "autoAllowBashIfSandboxed": True,
             "allowUnsandboxedCommands": False,
-            "excludedCommands": ["git", "systemctl", "uv", "ts-ssh", "ts-curl"],
+            "excludedCommands": ["git", "systemctl", "uv", "ts-ssh", "ts-curl"]
+            + session.extra_excluded_commands,
             "network": {
                 "allowAllUnixSockets": True,
                 "allowUnixSockets": [
@@ -83,7 +84,8 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
             os.path.expanduser("~/.config/axi"),
             os.path.expanduser("~/.config/minflow"),
             os.path.expanduser("~/.cache/uv"),
-        ],
+        ]
+        + session.extra_write_dirs,
         mcp_servers=session.mcp_servers or {},
         disallowed_tools=[],
         extra_args={"debug-to-stderr": None},
