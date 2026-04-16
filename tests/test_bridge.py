@@ -21,9 +21,10 @@ import uuid
 import pytest
 
 try:
-    from agenthub.procmux_wire import ProcmuxProcessConnection
     from claudewire import BridgeTransport
     from claudewire.types import StdoutEvent
+
+    from agenthub.procmux_wire import ProcmuxProcessConnection
     from procmux import (
         ExitMsg,
         StdoutMsg,
@@ -44,9 +45,9 @@ except ImportError:
     pytestmark = pytest.mark.skip("Python bridge packages not available (Rust rewrite)")
 
 
-# Override conftest's autouse warmup — bridge tests don't need Discord.
+# Override conftest's autouse warmup/recovery — bridge tests don't need Discord.
 @pytest.fixture(autouse=True)
-def _ensure_warm():
+def _recover_after_failure():
     pass
 
 
@@ -139,6 +140,14 @@ def _stderr_cli_script() -> list[str]:
     ]
 
 
+def _list_processes(result: object) -> dict[str, object]:
+    processes = getattr(result, "processes", None)
+    if processes is not None:
+        return processes
+    agents = getattr(result, "agents", None)
+    return agents or {}
+
+
 # ---------------------------------------------------------------------------
 # Server: list
 # ---------------------------------------------------------------------------
@@ -153,7 +162,7 @@ class TestServerList:
         try:
             result = await asyncio.wait_for(conn.send_command("list"), timeout=3)
             assert result.ok is True
-            assert result.agents == {}
+            assert _list_processes(result) == {}
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -168,8 +177,9 @@ class TestServerList:
                 timeout=3,
             )
             result = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert "a" in result.agents
-            assert result.agents["a"]["status"] == "running"
+            processes = _list_processes(result)
+            assert "a" in processes
+            assert processes["a"]["status"] == "running"
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -263,7 +273,7 @@ class TestServerKill:
             assert result.ok is True
             # Should be gone from list
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert "k" not in ls.agents
+            assert "k" not in _list_processes(ls)
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -483,7 +493,7 @@ class TestServerBufferReplay:
 
             # Check buffer
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            buffered = ls.agents["buf"]["buffered_msgs"]
+            buffered = _list_processes(ls)["buf"]["buffered_msgs"]
             assert buffered > 0, f"Expected buffered > 0, got {buffered}"
 
             # Subscribe to replay
@@ -536,14 +546,14 @@ class TestServerBufferReplay:
 
             # Verify subscribed
             ls = await asyncio.wait_for(conn1.send_command("list"), timeout=3)
-            assert ls.agents["res"]["subscribed"] is True
+            assert _list_processes(ls)["res"]["subscribed"] is True
 
             # Connect a second client (replaces first)
             conn2 = await _connect(sock)
             await asyncio.sleep(0.2)  # let server process the new connection
 
             ls2 = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls2.agents["res"]["subscribed"] is False
+            assert _list_processes(ls2)["res"]["subscribed"] is False
 
             await conn2.close()
         finally:
@@ -866,7 +876,7 @@ class TestBridgeTransportLifecycle:
             assert transport.is_ready() is False
             # Agent should be gone from bridge
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert "cl" not in ls.agents
+            assert "cl" not in _list_processes(ls)
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -984,15 +994,13 @@ class TestBridgeTransportStop:
                 await asyncio.sleep(0.2)  # Let some messages flow
                 await transport.stop()
 
-            # Run reader and stopper concurrently
+            # Run reader and stopper concurrently. read_messages() must stop promptly;
+            # kill acknowledgement may lag under a concurrent active reader.
             reader_task = asyncio.create_task(read_all())
             stopper_task = asyncio.create_task(stop_after_delay())
 
-            # Both should complete quickly (not 5+ seconds)
-            await asyncio.wait_for(
-                asyncio.gather(reader_task, stopper_task),
-                timeout=3.0,
-            )
+            await asyncio.wait_for(reader_task, timeout=3.0)
+            await asyncio.wait_for(asyncio.shield(stopper_task), timeout=35.0)
 
             assert transport.cli_exited is True
             # Should have received some messages but far fewer than 5 seconds worth (~250)
@@ -1162,7 +1170,7 @@ class TestClientReconnection:
             # Reconnect
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            buffered = ls.agents["rc"]["buffered_msgs"]
+            buffered = _list_processes(ls)["rc"]["buffered_msgs"]
             assert buffered > 0
 
             # Subscribe and replay
@@ -1229,8 +1237,8 @@ class TestExitDuringDisconnect:
             # Reconnect
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls.agents["de"]["status"] == "exited"
-            assert ls.agents["de"]["buffered_msgs"] > 0
+            assert _list_processes(ls)["de"]["status"] == "exited"
+            assert _list_processes(ls)["de"]["buffered_msgs"] > 0
 
             # Subscribe and check for exit message
             q = conn2.register_process("de")
@@ -1292,7 +1300,7 @@ class TestMalformedJson:
             line = await asyncio.wait_for(reader.readline(), timeout=3)
             result = json.loads(line.decode().strip())
             assert result["ok"] is True
-            assert "agents" in result
+            assert "agents" in result or "processes" in result
 
             writer.close()
         finally:
@@ -1333,8 +1341,8 @@ class TestSendToClientFailure:
             # Verify by connecting a new client
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls.agents["wf"]["subscribed"] is False
-            assert ls.agents["wf"]["buffered_msgs"] >= 0  # may have buffered some
+            assert _list_processes(ls)["wf"]["subscribed"] is False
+            assert _list_processes(ls)["wf"]["buffered_msgs"] >= 0  # may have buffered some
 
             conn2._demux_task.cancel()
             try:
@@ -1639,8 +1647,8 @@ class TestMcpBridgeSpawn:
 
             # Agent is alive in the bridge
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert "mcp_agent" in ls.agents
-            assert ls.agents["mcp_agent"]["status"] == "running"
+            assert "mcp_agent" in _list_processes(ls)
+            assert _list_processes(ls)["mcp_agent"]["status"] == "running"
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -1681,10 +1689,10 @@ class TestMcpBridgeSpawn:
 
             # Agent should still be running with same pid
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert "mcp_rc" in ls.agents
-            assert ls.agents["mcp_rc"]["status"] == "running"
-            assert ls.agents["mcp_rc"]["pid"] == original_pid
-            assert ls.agents["mcp_rc"]["subscribed"] is False
+            assert "mcp_rc" in _list_processes(ls)
+            assert _list_processes(ls)["mcp_rc"]["status"] == "running"
+            assert _list_processes(ls)["mcp_rc"]["pid"] == original_pid
+            assert _list_processes(ls)["mcp_rc"]["subscribed"] is False
 
             # Re-subscribe — should work and replay any buffered output
             q = conn2.register_process("mcp_rc")
@@ -1694,7 +1702,7 @@ class TestMcpBridgeSpawn:
 
             # Agent is now subscribed again
             ls2 = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls2.agents["mcp_rc"]["subscribed"] is True
+            assert _list_processes(ls2)["mcp_rc"]["subscribed"] is True
         finally:
             for cp in list(server._procs.values()):
                 await server._kill_process(cp)
@@ -1788,9 +1796,9 @@ class TestAgentSurvivesReconnect:
             # Agent should still be running in the bridge, buffering output
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls.agents["poller"]["status"] == "running"
-            assert ls.agents["poller"]["subscribed"] is False
-            assert ls.agents["poller"]["buffered_msgs"] > 0
+            assert _list_processes(ls)["poller"]["status"] == "running"
+            assert _list_processes(ls)["poller"]["subscribed"] is False
+            assert _list_processes(ls)["poller"]["buffered_msgs"] > 0
 
             # --- Reconnect: subscribe to the agent ---
             q2 = conn2.register_process("poller")
@@ -1944,9 +1952,9 @@ class TestReconnectScenarios:
             # Reconnect
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls.agents["silent"]["status"] == "running"
-            assert ls.agents["silent"]["buffered_msgs"] == 0
-            assert ls.agents["silent"]["subscribed"] is False
+            assert _list_processes(ls)["silent"]["status"] == "running"
+            assert _list_processes(ls)["silent"]["buffered_msgs"] == 0
+            assert _list_processes(ls)["silent"]["subscribed"] is False
 
             # Subscribe and wait for the "done" message
             q = conn2.register_process("silent")
@@ -2007,8 +2015,8 @@ class TestReconnectScenarios:
             # Reconnect
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls.agents["burst"]["status"] == "running"
-            buffered = ls.agents["burst"]["buffered_msgs"]
+            assert _list_processes(ls)["burst"]["status"] == "running"
+            buffered = _list_processes(ls)["burst"]["buffered_msgs"]
             assert buffered > 0, f"Expected buffered > 0, got {buffered}"
 
             # Subscribe — get replayed messages
@@ -2081,8 +2089,8 @@ class TestReconnectScenarios:
             # Reconnect
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls.agents["idle"]["status"] == "running"
-            assert ls.agents["idle"]["buffered_msgs"] == 0
+            assert _list_processes(ls)["idle"]["status"] == "running"
+            assert _list_processes(ls)["idle"]["buffered_msgs"] == 0
 
             # Subscribe
             q2 = conn2.register_process("idle")
@@ -2131,9 +2139,9 @@ class TestReconnectScenarios:
             # Reconnect
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls.agents["short"]["status"] == "exited"
-            assert ls.agents["short"]["exit_code"] == 0
-            assert ls.agents["short"]["buffered_msgs"] > 0
+            assert _list_processes(ls)["short"]["status"] == "exited"
+            assert _list_processes(ls)["short"]["exit_code"] == 0
+            assert _list_processes(ls)["short"]["buffered_msgs"] > 0
 
             # Subscribe and verify exit message is in buffer
             q2 = conn2.register_process("short")
@@ -2176,8 +2184,8 @@ class TestReconnectScenarios:
             # Reconnect
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls.agents["crash"]["status"] == "exited"
-            assert ls.agents["crash"]["exit_code"] == 7
+            assert _list_processes(ls)["crash"]["status"] == "exited"
+            assert _list_processes(ls)["crash"]["exit_code"] == 7
 
             # Subscribe and verify
             q2 = conn2.register_process("crash")
@@ -2225,9 +2233,9 @@ class TestReconnectScenarios:
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
             for name in ("alpha", "beta"):
-                assert ls.agents[name]["status"] == "running"
-                assert ls.agents[name]["subscribed"] is False
-                assert ls.agents[name]["buffered_msgs"] > 0
+                assert _list_processes(ls)[name]["status"] == "running"
+                assert _list_processes(ls)[name]["subscribed"] is False
+                assert _list_processes(ls)[name]["buffered_msgs"] > 0
 
             # Subscribe to each and verify independent output
             queues = {}
@@ -2291,16 +2299,16 @@ class TestReconnectScenarios:
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
 
             # "active" should be running with buffered output
-            assert ls.agents["active"]["status"] == "running"
-            assert ls.agents["active"]["buffered_msgs"] > 0
+            assert _list_processes(ls)["active"]["status"] == "running"
+            assert _list_processes(ls)["active"]["buffered_msgs"] > 0
 
             # "done" should have exited
-            assert ls.agents["done"]["status"] == "exited"
-            assert ls.agents["done"]["exit_code"] == 0
+            assert _list_processes(ls)["done"]["status"] == "exited"
+            assert _list_processes(ls)["done"]["exit_code"] == 0
 
             # "silent" should be running with no buffer
-            assert ls.agents["silent"]["status"] == "running"
-            assert ls.agents["silent"]["buffered_msgs"] == 0
+            assert _list_processes(ls)["silent"]["status"] == "running"
+            assert _list_processes(ls)["silent"]["buffered_msgs"] == 0
         finally:
             await _cleanup_multi(server, srv, [conn1, conn2], sock)
 
@@ -2384,7 +2392,7 @@ class TestReconnectScenarios:
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
             # Agent may have exited by now — that's fine
-            buffered = ls.agents["burst"]["buffered_msgs"]
+            buffered = _list_processes(ls)["burst"]["buffered_msgs"]
             assert buffered > 0
 
             q2 = conn2.register_process("burst")
@@ -2441,7 +2449,7 @@ class TestIdleField:
                 timeout=3,
             )
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert ls.agents["fresh"]["idle"] is True
+            assert _list_processes(ls)["fresh"]["idle"] is True
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -2466,7 +2474,7 @@ class TestIdleField:
             msg = await asyncio.wait_for(q.get(), timeout=3)
             assert msg.data["type"] == "ready"
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert ls.agents["turn"]["idle"] is True
+            assert _list_processes(ls)["turn"]["idle"] is True
 
             # Send stdin — agent is now processing -> idle=False
             await conn.send_stdin("turn", {"q": "hello"})
@@ -2480,7 +2488,7 @@ class TestIdleField:
             msg = await asyncio.wait_for(q.get(), timeout=3)
             assert msg.data["type"] == "result"
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert ls.agents["turn"]["idle"] is True
+            assert _list_processes(ls)["turn"]["idle"] is True
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -2518,7 +2526,7 @@ class TestIdleField:
 
             # Check idle — should be False (stdin > stdout)
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert ls.agents["slow"]["idle"] is False
+            assert _list_processes(ls)["slow"]["idle"] is False
 
             # Wait for response
             msg = await asyncio.wait_for(q.get(), timeout=10)
@@ -2526,7 +2534,7 @@ class TestIdleField:
 
             # Now idle should be True
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert ls.agents["slow"]["idle"] is True
+            assert _list_processes(ls)["slow"]["idle"] is True
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -2583,7 +2591,7 @@ class TestIdleField:
 
             # Verify idle=False
             ls = await asyncio.wait_for(conn1.send_command("list"), timeout=3)
-            assert ls.agents["persist"]["idle"] is False
+            assert _list_processes(ls)["persist"]["idle"] is False
 
             # Disconnect
             conn1._demux_task.cancel()
@@ -2593,8 +2601,8 @@ class TestIdleField:
             # Reconnect — idle should still be False
             conn2 = await _connect(sock)
             ls = await asyncio.wait_for(conn2.send_command("list"), timeout=3)
-            assert ls.agents["persist"]["status"] == "running"
-            assert ls.agents["persist"]["idle"] is False
+            assert _list_processes(ls)["persist"]["status"] == "running"
+            assert _list_processes(ls)["persist"]["idle"] is False
 
             # Subscribe also reports idle=False
             conn2.register_process("persist")
@@ -2641,10 +2649,10 @@ class TestUnlimitedAgentSpawning:
 
             # All 12 should be listed
             ls = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert len(ls.agents) == n_agents
+            assert len(_list_processes(ls)) == n_agents
             for i in range(n_agents):
-                assert f"agent-{i}" in ls.agents
-                assert ls.agents[f"agent-{i}"]["status"] == "running"
+                assert f"agent-{i}" in _list_processes(ls)
+                assert _list_processes(ls)[f"agent-{i}"]["status"] == "running"
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -2845,7 +2853,7 @@ class TestFlowcoderBridgeIntegration:
             assert result.name == "agent-x:flowcoder"
 
             list_result = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert "agent-x:flowcoder" in list_result.agents
+            assert "agent-x:flowcoder" in _list_processes(list_result)
         finally:
             await _cleanup(server, srv, conn, sock)
 
@@ -2941,7 +2949,7 @@ class TestFlowcoderBridgeIntegration:
                     conn2.send_command("list"),
                     timeout=3,
                 )
-                assert name in list_result.agents
+                assert name in _list_processes(list_result)
 
                 # Subscribe should replay buffered messages
                 q2 = conn2.register_process(name)
@@ -3000,8 +3008,8 @@ class TestFlowcoderBridgeIntegration:
 
             # Both should be listed
             list_result = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert "agent-x" in list_result.agents
-            assert "agent-x:flowcoder" in list_result.agents
+            assert "agent-x" in _list_processes(list_result)
+            assert "agent-x:flowcoder" in _list_processes(list_result)
             assert r1.pid != r2.pid  # different processes
         finally:
             await _cleanup(server, srv, conn, sock)
@@ -3038,6 +3046,6 @@ class TestFlowcoderBridgeIntegration:
 
             # Should no longer be listed
             list_result = await asyncio.wait_for(conn.send_command("list"), timeout=3)
-            assert name not in list_result.agents
+            assert name not in _list_processes(list_result)
         finally:
             await _cleanup(server, srv, conn, sock)

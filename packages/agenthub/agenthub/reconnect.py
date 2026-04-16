@@ -22,6 +22,14 @@ log = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
 
 
+def _list_processes(result: Any) -> dict[str, Any]:
+    processes = getattr(result, "processes", None)
+    if processes is not None:
+        return processes
+    agents = getattr(result, "agents", None)
+    return agents or {}
+
+
 async def connect_procmux(hub: AgentHub, socket_path: str) -> None:
     """Connect to the procmux bridge and schedule reconnections for running agents.
 
@@ -55,7 +63,7 @@ async def connect_procmux(hub: AgentHub, socket_path: str) -> None:
 
         try:
             result = await conn.send_command("list")
-            bridge_agents = result.agents or {}
+            bridge_agents = _list_processes(result)
             log.info(
                 "Bridge reports %d agent(s): %s",
                 len(bridge_agents),
