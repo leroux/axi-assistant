@@ -95,6 +95,8 @@ ignore = [
 "packages/discordquery/discordquery/wait.py" = ["T20"]   # CLI tool
 "packages/procmux/procmux/server.py" = ["T20"]  # CLI entrypoint
 "packages/flowcoder_tui/flowcoder_tui/repl.py" = ["T20"]  # TUI prints to terminal
+"axi_test.py" = ["T20"]  # CLI prints to stdout/stderr
+"commands/*.json" = ["B018"]  # JSON command definitions parse as dict literals under Ruff
 "lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
 
 [tool.ruff.lint.isort]

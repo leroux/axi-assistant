@@ -30,7 +30,7 @@ from discord.ext.commands import Bot
 from opentelemetry import trace
 
 from axi import agents, channels, config, scheduler, tools, worktrees
-from axi.axi_types import ActivityState, AgentSession, discord_state, tool_display
+from axi.axi_types import ActivityState, AgentSession, ConcurrencyLimitError, discord_state, tool_display
 from axi.log_context import set_agent_context, set_trigger
 from axi.prompts import (
     MASTER_SYSTEM_PROMPT,
@@ -344,9 +344,7 @@ async def on_message(message: discord.Message) -> None:
         if handled:
             return
 
-    # --- Centralized message processing via hub ---
-    from agenthub.messaging import receive_user_message
-
+    # --- Centralized message processing via Axi hub wrapper ---
     msg_id = message.id
     log.info(
         "ON_MSG[%s][%s] processing=%s reconnecting=%s queue_size=%d lock_locked=%s",
@@ -358,38 +356,86 @@ async def on_message(message: discord.Message) -> None:
         session.query_lock.locked(),
     )
 
-    # Stream handler: Discord live-edit rendering to the agent's channel
-    async def _discord_stream_handler(s: AgentSession) -> str | None:
-        return await agents.stream_response_to_channel(s, channel)
-
-    # Route through the configured FlowCoder wrapper, if any
     raw_content = content
     content = agents.wrap_content_with_flowchart(content, session)
 
-    assert agents.hub is not None
-    result = await receive_user_message(
-        agents.hub,
-        session,
-        content,
-        _discord_stream_handler,
-        # Discord-specific queue item format for process_message_queue
-        # 4th element is raw user text for display (content may be flowchart-wrapped)
-        queue_item=(content, channel, message, raw_content),
-    )
+    if agents.hub and agents.hub.shutdown_requested:
+        await agents.send_system(channel, "Bot is restarting — not accepting new messages.")
+        result_status = "shutdown"
+    elif session.reconnecting:
+        session.message_queue.append((content, channel, message, raw_content))
+        position = len(session.message_queue)
+        await agents.send_system(
+            channel,
+            f"Agent **{session.name}** is reconnecting — message queued (position {position}).",
+        )
+        result_status = "queued_reconnecting"
+    elif session.query_lock.locked():
+        session.message_queue.append((content, channel, message, raw_content))
+        position = len(session.message_queue)
+        if session.compacting:
+            await agents.send_system(
+                channel,
+                f"🔄 Agent **{session.name}** is compacting context — message queued (position {position}). Will process after compaction completes.",
+            )
+        else:
+            activity = session.activity
+            tool_suffix = ""
+            if activity.phase == "waiting" and activity.tool_name:
+                tool_suffix = f" (currently {tool_display(activity.tool_name)})"
+            interrupted = await agents.graceful_interrupt(session)
+            if interrupted:
+                await agents.send_system(
+                    channel,
+                    f"Agent **{session.name}** is busy — message queued (position {position}). Interrupting current task.{tool_suffix}",
+                )
+            else:
+                await agents.send_system(
+                    channel,
+                    f"Agent **{session.name}** is busy — message queued (position {position}). Will process after current turn.{tool_suffix}",
+                )
+        result_status = "queued"
+    else:
+        agents.scheduler.mark_interactive(session.name)
+        async with session.query_lock:
+            ready = True
+            if not agents.is_awake(session):
+                try:
+                    await agents.wake_agent(session)
+                except ConcurrencyLimitError:
+                    session.message_queue.append((content, channel, message, raw_content))
+                    awake = agents.count_awake_agents()
+                    await agents.send_system(
+                        channel,
+                        f"⏳ All {awake} agent slots busy. Message queued — will run when a slot opens.",
+                    )
+                    result_status = "queued"
+                    ready = False
+                except Exception:
+                    log.exception("Failed to wake agent '%s' for user message", session.name)
+                    await agents.send_system(channel, f"Failed to wake agent **{session.name}**.")
+                    result_status = "error"
+                    ready = False
+            if ready:
+                try:
+                    await agents.process_message(session, content, channel)
+                    result_status = "processed"
+                except RuntimeError as e:
+                    log.warning("Runtime error for '%s': %s", session.name, e)
+                    await agents.send_system(channel, str(e))
+                    result_status = "error"
 
-    # Discord-specific reactions based on result
     _RESULT_REACTIONS = {
         "processed": "✅",
         "queued": "📨",
         "queued_reconnecting": "📨",
         "timeout": "⏳",
     }
-    reaction = _RESULT_REACTIONS.get(result.status, "❌")
-    if result.status != "shutdown":
+    reaction = _RESULT_REACTIONS.get(result_status, "❌")
+    if result_status != "shutdown":
         await agents.add_reaction(message, reaction)
 
-    # Post-processing: yield check + queue drain (Discord's 3-tuple format)
-    if result.status == "processed":
+    if result_status == "processed":
         if scheduler.should_yield(session.name):
             log.info("Scheduler yield: '%s' sleeping after user message", session.name)
             await agents.sleep_agent(session)
@@ -709,10 +755,10 @@ async def ping_command(interaction: discord.Interaction) -> None:
         bot_str = "initializing"
 
     procmux_str = None
-    raw_conn = agents.hub.raw_procmux_conn if agents.hub else None
-    if raw_conn is not None and raw_conn.is_alive:
+    bridge_conn = agents.procmux_conn
+    if bridge_conn is not None and bridge_conn.is_alive:
         try:
-            result = await raw_conn.send_command("status")
+            result = await bridge_conn.send_command("status")
             if result.ok and result.uptime_seconds is not None:
                 procmux_str = _fmt_uptime(result.uptime_seconds)
         except Exception:
@@ -722,7 +768,7 @@ async def ping_command(interaction: discord.Interaction) -> None:
     parts = [f"Pong! Latency: {latency}ms", f"Bot uptime: {bot_str}"]
     if procmux_str is not None:
         parts.append(f"Bridge uptime: {procmux_str}")
-    elif raw_conn is None or not raw_conn.is_alive:
+    elif bridge_conn is None or not bridge_conn.is_alive:
         parts.append("Bridge: not connected")
     await interaction.response.send_message(" | ".join(parts))
 
@@ -2425,7 +2471,6 @@ def _register_master_agent(resume_id: str | None, prompt_hash: str | None) -> Ag
         system_prompt_hash=prompt_hash,
         client=None,
         mcp_servers=master_mcp,
-        session_id=resume_id,
         compact_instructions=(
             "List of active/spawned agents and their current status. "
             "Any ongoing tasks or investigations in progress. "
@@ -2434,6 +2479,7 @@ def _register_master_agent(resume_id: str | None, prompt_hash: str | None) -> Ag
         ),
         extra_write_dirs=[os.path.expanduser("~/.config/systemd/user")],
     )
+    session.session_id = resume_id
     ds = discord_state(session)
     ds.todo_items = agents.load_todo_items(config.MASTER_AGENT_NAME)
     agents.agents[config.MASTER_AGENT_NAME] = session

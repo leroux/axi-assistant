@@ -1,379 +1,222 @@
-"""Tests for receive_user_message — centralized message ingestion."""
+"""Unit tests for the new session reducer."""
 
 from __future__ import annotations
 
-import asyncio
-from collections import deque
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any
+from hypothesis import given
+from hypothesis import strategies as st
 
-import pytest
-
-from agenthub.messaging import ReceiveResult, receive_user_message
-
-# ---------------------------------------------------------------------------
-# Stubs
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class FakeActivity:
-    phase: str = "idle"
-    query_started: datetime | None = None
-
-
-@dataclass
-class FakeSession:
-    name: str = "test-agent"
-    agent_type: str = "claude_code"
-    client: Any = None
-    query_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    message_queue: deque[Any] = field(default_factory=deque)
-    reconnecting: bool = False
-    compacting: bool = False
-    bridge_busy: bool = False
-    activity: Any = field(default_factory=FakeActivity)
-    last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
-    idle_reminder_count: int = 0
-    agent_log: Any = None
-    plan_mode: bool = False
-    session_id: str | None = None
+from agenthub.session_core import reduce_session
+from agenthub.session_events import (
+    SkipRequested,
+    StopRequested,
+    StreamEventReceived,
+    SubmitTurn,
+    TurnFinished,
+    WakeCompleted,
+    WakeFailed,
+)
+from agenthub.stream_types import QueryResult, RateLimitHit, StreamKilled
+from agenthub.types import (
+    LifecycleState,
+    SessionState,
+    TurnKind,
+    TurnOutcome,
+)
 
 
-class FakeCallbacks:
-    def __init__(self) -> None:
-        self.messages: list[tuple[str, str]] = []
-
-    async def post_system(self, agent_name: str, text: str) -> None:
-        self.messages.append((agent_name, text))
-
-    async def post_message(self, agent_name: str, text: str) -> None:
-        self.messages.append((agent_name, text))
-
-
-class FakeScheduler:
-    def __init__(self) -> None:
-        self._should_yield = False
-
-    def mark_interactive(self, name: str) -> None:
-        pass
-
-    def should_yield(self, name: str) -> bool:
-        return self._should_yield
+def _submit(kind: TurnKind, turn_id: str = "t1") -> SubmitTurn:
+    return SubmitTurn(
+        agent_name="agent",
+        kind=kind,
+        content="hello",
+        metadata={"turn_id": turn_id},
+        source="test",
+    )
 
 
-class FakeHub:
-    def __init__(self) -> None:
-        self.callbacks = FakeCallbacks()
-        self.scheduler = FakeScheduler()
-        self.shutdown_requested = False
-        self.sessions: dict[str, Any] = {}
-        self.query_timeout = 300.0
-        self.max_retries = 3
-        self.retry_base_delay = 15.0
-        self.process_conn = None
-        self.wake_lock = asyncio.Lock()
-        self.tasks = type("T", (), {"fire_and_forget": lambda self, c: None})()
+def test_submit_first_turn_starts_running_path() -> None:
+    state = SessionState(lifecycle=LifecycleState.SLEEPING)
+    new_state = reduce_session(state, _submit(TurnKind.USER))
+    assert new_state.current_turn is not None
+    assert new_state.current_turn.turn_id == "t1"
+    assert new_state.lifecycle is LifecycleState.WAKING
 
 
-# A stream handler that always succeeds
-async def _ok_handler(session: Any) -> str | None:
-    return None
+def test_submit_second_turn_queues() -> None:
+    state = SessionState(
+        lifecycle=LifecycleState.RUNNING,
+        current_turn=reduce_session(SessionState(), _submit(TurnKind.USER)).current_turn,
+    )
+    new_state = reduce_session(state, _submit(TurnKind.USER, turn_id="t2"))
+    assert len(new_state.queued_turns) == 1
+    assert new_state.queued_turns[0].turn_id == "t2"
 
 
-# A stream handler that returns a transient error
-async def _error_handler(session: Any) -> str | None:
-    return "transient API error"
+def test_wake_completed_sets_running_when_turn_present() -> None:
+    state = reduce_session(SessionState(lifecycle=LifecycleState.SLEEPING), _submit(TurnKind.USER))
+    new_state = reduce_session(state, WakeCompleted(agent_name="agent"))
+    assert new_state.lifecycle is LifecycleState.RUNNING
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
+def test_wake_failed_clears_current_turn() -> None:
+    state = reduce_session(SessionState(lifecycle=LifecycleState.SLEEPING), _submit(TurnKind.USER))
+    new_state = reduce_session(state, WakeFailed(agent_name="agent", error="boom"))
+    assert new_state.lifecycle is LifecycleState.SLEEPING
+    assert new_state.current_turn is None
 
 
-class TestReceiveUserMessage:
-    @pytest.mark.asyncio
-    async def test_shutdown_rejected(self) -> None:
-        hub = FakeHub()
-        hub.shutdown_requested = True
-        session = FakeSession(client=object())
+def test_stop_clears_queue() -> None:
+    state = reduce_session(SessionState(lifecycle=LifecycleState.SLEEPING), _submit(TurnKind.USER))
+    state.queued_turns.append(state.current_turn)  # type: ignore[arg-type]
+    new_state = reduce_session(state, StopRequested(agent_name="agent", clear_queue=True))
+    assert new_state.lifecycle is LifecycleState.STOPPING
+    assert len(new_state.queued_turns) == 0
+    assert new_state.current_turn is not None
+    assert new_state.current_turn.interrupt_requested is True
 
-        result = await receive_user_message(hub, session, "hello", _ok_handler)
 
-        assert result.status == "shutdown"
-        assert any("restarting" in text for _, text in hub.callbacks.messages)
-
-    @pytest.mark.asyncio
-    async def test_reconnecting_queued(self) -> None:
-        hub = FakeHub()
-        session = FakeSession(client=object(), reconnecting=True)
-
-        result = await receive_user_message(hub, session, "hello", _ok_handler)
-
-        assert result.status == "queued_reconnecting"
-        assert len(session.message_queue) == 1
-        # Default queue item is (content, None)
-        assert session.message_queue[0] == ("hello", None)
-
-    @pytest.mark.asyncio
-    async def test_reconnecting_custom_queue_item(self) -> None:
-        hub = FakeHub()
-        session = FakeSession(client=object(), reconnecting=True)
-
-        result = await receive_user_message(
-            hub, session, "hello", _ok_handler,
-            queue_item=("hello", "channel", "message"),
+def test_skip_sets_stopping_without_clearing_queue() -> None:
+    state = reduce_session(SessionState(lifecycle=LifecycleState.SLEEPING), _submit(TurnKind.USER))
+    queued = _submit(TurnKind.USER, turn_id="t2")
+    state.queued_turns.append(
+        type(state.current_turn)(
+            turn_id=queued.metadata["turn_id"],
+            kind=queued.kind,
+            content=queued.content,
+            metadata=queued.metadata,
+            source=queued.source,
         )
-
-        assert result.status == "queued_reconnecting"
-        assert session.message_queue[0] == ("hello", "channel", "message")
-
-    @pytest.mark.asyncio
-    async def test_busy_queued(self) -> None:
-        hub = FakeHub()
-        session = FakeSession(client=object())
-
-        # Lock the query_lock to simulate a busy agent
-        await session.query_lock.acquire()
-        try:
-            result = await receive_user_message(hub, session, "hello", _ok_handler)
-        finally:
-            session.query_lock.release()
-
-        assert result.status == "queued"
-        assert len(session.message_queue) == 1
-        assert any("busy" in text.lower() for _, text in hub.callbacks.messages)
-
-    @pytest.mark.asyncio
-    async def test_processed_successfully(self) -> None:
-        """Agent is awake, not busy — message is processed."""
-        hub = FakeHub()
-        session = FakeSession(client=object())
-        processed = []
-
-        async def handler(s: Any) -> str | None:
-            processed.append(s.name)
-            return None
-
-        # Mock the hub-level process_message
-        import agenthub.messaging as messaging_mod
-
-        original_process = messaging_mod.process_message
-
-        async def mock_process(h: Any, s: Any, content: Any, sh: Any) -> None:
-            await sh(s)
-
-        messaging_mod.process_message = mock_process  # type: ignore[assignment]
-        try:
-            result = await receive_user_message(hub, session, "hello", handler)
-        finally:
-            messaging_mod.process_message = original_process
-
-        assert result.status == "processed"
-        assert processed == ["test-agent"]
-        assert session.activity.phase == "idle"
-
-    @pytest.mark.asyncio
-    async def test_timeout_handled(self) -> None:
-        """TimeoutError is caught and results in 'timeout' status."""
-        hub = FakeHub()
-        session = FakeSession(client=object())
-
-        import agenthub.messaging as messaging_mod
-
-        original_process = messaging_mod.process_message
-        original_timeout = messaging_mod.handle_query_timeout
-        timeout_handled = []
-
-        async def mock_process(h: Any, s: Any, content: Any, sh: Any) -> None:
-            raise TimeoutError
-
-        async def mock_handle_timeout(h: Any, s: Any) -> None:
-            timeout_handled.append(s.name)
-
-        messaging_mod.process_message = mock_process  # type: ignore[assignment]
-        messaging_mod.handle_query_timeout = mock_handle_timeout  # type: ignore[assignment]
-        try:
-            result = await receive_user_message(hub, session, "hello", _ok_handler)
-        finally:
-            messaging_mod.process_message = original_process
-            messaging_mod.handle_query_timeout = original_timeout
-
-        assert result.status == "timeout"
-        assert timeout_handled == ["test-agent"]
-
-    @pytest.mark.asyncio
-    async def test_runtime_error_handled(self) -> None:
-        """RuntimeError is caught and results in 'error' status."""
-        hub = FakeHub()
-        session = FakeSession(client=object())
-
-        import agenthub.messaging as messaging_mod
-
-        original_process = messaging_mod.process_message
-
-        async def mock_process(h: Any, s: Any, content: Any, sh: Any) -> None:
-            raise RuntimeError("test error")
-
-        messaging_mod.process_message = mock_process  # type: ignore[assignment]
-        try:
-            result = await receive_user_message(hub, session, "hello", _ok_handler)
-        finally:
-            messaging_mod.process_message = original_process
-
-        assert result.status == "error"
-        assert result.error == "test error"
-        assert any("test error" in text for _, text in hub.callbacks.messages)
-
-    @pytest.mark.asyncio
-    async def test_generic_exception_handled(self) -> None:
-        """Generic Exception is caught and results in 'error' status."""
-        hub = FakeHub()
-        session = FakeSession(client=object())
-
-        import agenthub.messaging as messaging_mod
-
-        original_process = messaging_mod.process_message
-
-        async def mock_process(h: Any, s: Any, content: Any, sh: Any) -> None:
-            raise ValueError("unexpected")
-
-        messaging_mod.process_message = mock_process  # type: ignore[assignment]
-        try:
-            result = await receive_user_message(hub, session, "hello", _ok_handler)
-        finally:
-            messaging_mod.process_message = original_process
-
-        assert result.status == "error"
-        assert "unexpected" in (result.error or "")
-
-    @pytest.mark.asyncio
-    async def test_activity_reset_on_completion(self) -> None:
-        """activity is set to idle after processing, even on error."""
-        hub = FakeHub()
-        session = FakeSession(client=object())
-
-        import agenthub.messaging as messaging_mod
-
-        original_process = messaging_mod.process_message
-
-        async def mock_process(h: Any, s: Any, content: Any, sh: Any) -> None:
-            # Verify activity was set to "starting" during processing
-            assert s.activity.phase == "starting"
-            raise RuntimeError("boom")
-
-        messaging_mod.process_message = mock_process  # type: ignore[assignment]
-        try:
-            await receive_user_message(hub, session, "hello", _ok_handler)
-        finally:
-            messaging_mod.process_message = original_process
-
-        assert session.activity.phase == "idle"
-
-    @pytest.mark.asyncio
-    async def test_wake_agent_called_when_sleeping(self) -> None:
-        """If agent is not awake, wake_agent is called."""
-        hub = FakeHub()
-        session = FakeSession(client=None)  # sleeping: client is None
-        woken = []
-
-        import agenthub.lifecycle as lifecycle_mod
-        import agenthub.messaging as messaging_mod
-
-        original_wake = lifecycle_mod.wake_agent
-        original_process = messaging_mod.process_message
-        original_is_awake = lifecycle_mod.is_awake
-
-        async def mock_wake(h: Any, s: Any) -> None:
-            woken.append(s.name)
-            s.client = object()  # simulate waking
-
-        def mock_is_awake(s: Any) -> bool:
-            return s.client is not None
-
-        async def mock_process(h: Any, s: Any, content: Any, sh: Any) -> None:
-            pass
-
-        lifecycle_mod.wake_agent = mock_wake  # type: ignore[assignment]
-        lifecycle_mod.is_awake = mock_is_awake  # type: ignore[assignment]
-        messaging_mod.process_message = mock_process  # type: ignore[assignment]
-        try:
-            result = await receive_user_message(hub, session, "hello", _ok_handler)
-        finally:
-            lifecycle_mod.wake_agent = original_wake
-            lifecycle_mod.is_awake = original_is_awake
-            messaging_mod.process_message = original_process
-
-        assert result.status == "processed"
-        assert woken == ["test-agent"]
-
-    @pytest.mark.asyncio
-    async def test_concurrency_limit_queues(self) -> None:
-        """ConcurrencyLimitError during wake queues the message."""
-        from agenthub.types import ConcurrencyLimitError
-
-        hub = FakeHub()
-        session = FakeSession(client=None)  # sleeping
-
-        import agenthub.lifecycle as lifecycle_mod
-
-        original_wake = lifecycle_mod.wake_agent
-        original_is_awake = lifecycle_mod.is_awake
-
-        async def mock_wake(h: Any, s: Any) -> None:
-            raise ConcurrencyLimitError("no slots")
-
-        def mock_is_awake(s: Any) -> bool:
-            return s.client is not None
-
-        lifecycle_mod.wake_agent = mock_wake  # type: ignore[assignment]
-        lifecycle_mod.is_awake = mock_is_awake  # type: ignore[assignment]
-        try:
-            result = await receive_user_message(hub, session, "hello", _ok_handler)
-        finally:
-            lifecycle_mod.wake_agent = original_wake
-            lifecycle_mod.is_awake = original_is_awake
-
-        assert result.status == "queued"
-        assert len(session.message_queue) == 1
-
-    @pytest.mark.asyncio
-    async def test_wake_failure_returns_error(self) -> None:
-        """Exception during wake results in 'error' status."""
-        hub = FakeHub()
-        session = FakeSession(client=None)
-
-        import agenthub.lifecycle as lifecycle_mod
-
-        original_wake = lifecycle_mod.wake_agent
-        original_is_awake = lifecycle_mod.is_awake
-
-        async def mock_wake(h: Any, s: Any) -> None:
-            raise RuntimeError("wake failed")
-
-        def mock_is_awake(s: Any) -> bool:
-            return s.client is not None
-
-        lifecycle_mod.wake_agent = mock_wake  # type: ignore[assignment]
-        lifecycle_mod.is_awake = mock_is_awake  # type: ignore[assignment]
-        try:
-            result = await receive_user_message(hub, session, "hello", _ok_handler)
-        finally:
-            lifecycle_mod.wake_agent = original_wake
-            lifecycle_mod.is_awake = original_is_awake
-
-        assert result.status == "error"
-        assert "wake" in (result.error or "").lower()
+    )
+    new_state = reduce_session(state, SkipRequested(agent_name="agent"))
+    assert new_state.lifecycle is LifecycleState.STOPPING
+    assert len(new_state.queued_turns) == 1
+    assert new_state.skip_requested is True
 
 
-class TestReceiveResult:
-    def test_defaults(self) -> None:
-        r = ReceiveResult(status="processed")
-        assert r.status == "processed"
-        assert r.error is None
+def test_stream_killed_moves_to_stopping() -> None:
+    state = reduce_session(SessionState(lifecycle=LifecycleState.SLEEPING), _submit(TurnKind.USER))
+    new_state = reduce_session(
+        state,
+        StreamEventReceived(agent_name="agent", turn_id="t1", event=StreamKilled()),
+    )
+    assert new_state.lifecycle is LifecycleState.STOPPING
 
-    def test_with_error(self) -> None:
-        r = ReceiveResult(status="error", error="something broke")
-        assert r.status == "error"
-        assert r.error == "something broke"
+
+def test_query_result_updates_session_id() -> None:
+    state = reduce_session(SessionState(lifecycle=LifecycleState.SLEEPING), _submit(TurnKind.USER))
+    new_state = reduce_session(
+        state,
+        StreamEventReceived(
+            agent_name="agent",
+            turn_id="t1",
+            event=QueryResult(session_id="sid-1", cost_usd=0.1, num_turns=1, duration_ms=10),
+        ),
+    )
+    assert new_state.session_id == "sid-1"
+
+
+def test_rate_limit_hits_idle() -> None:
+    state = SessionState(lifecycle=LifecycleState.RUNNING)
+    new_state = reduce_session(
+        state,
+        StreamEventReceived(
+            agent_name="agent",
+            turn_id="t1",
+            event=RateLimitHit(error_type="rate_limit", error_text="wait"),
+        ),
+    )
+    assert new_state.lifecycle is LifecycleState.IDLE
+
+
+def test_turn_finished_goes_idle_when_no_queue() -> None:
+    state = reduce_session(SessionState(lifecycle=LifecycleState.SLEEPING), _submit(TurnKind.USER, "t1"))
+    state = reduce_session(state, WakeCompleted(agent_name="agent"))
+    new_state = reduce_session(
+        state,
+        TurnFinished(agent_name="agent", turn_id="t1", outcome=TurnOutcome.COMPLETED),
+    )
+    assert new_state.current_turn is None
+    assert new_state.lifecycle is LifecycleState.IDLE
+
+
+def test_turn_finished_advances_next_queued_turn() -> None:
+    state = reduce_session(SessionState(lifecycle=LifecycleState.SLEEPING), _submit(TurnKind.USER, "t1"))
+    state = reduce_session(state, WakeCompleted(agent_name="agent"))
+    state = reduce_session(state, _submit(TurnKind.USER, "t2"))
+    new_state = reduce_session(
+        state,
+        TurnFinished(agent_name="agent", turn_id="t1", outcome=TurnOutcome.COMPLETED),
+    )
+    assert new_state.current_turn is not None
+    assert new_state.current_turn.turn_id == "t2"
+    assert new_state.lifecycle is LifecycleState.WAKING
+
+
+def test_turn_finished_after_stop_goes_sleeping() -> None:
+    state = reduce_session(SessionState(lifecycle=LifecycleState.SLEEPING), _submit(TurnKind.USER, "t1"))
+    state = reduce_session(state, StopRequested(agent_name="agent", clear_queue=True))
+    new_state = reduce_session(
+        state,
+        TurnFinished(agent_name="agent", turn_id="t1", outcome=TurnOutcome.INTERRUPTED),
+    )
+    assert new_state.lifecycle is LifecycleState.SLEEPING
+    assert new_state.stop_requested is False
+    assert new_state.skip_requested is False
+
+
+@given(st.lists(st.sampled_from(["t1", "t2", "t3"]), min_size=1, max_size=10))
+def test_submit_only_sequences_preserve_fifo_order(turn_ids: list[str]) -> None:
+    state = SessionState(lifecycle=LifecycleState.SLEEPING)
+    for turn_id in turn_ids:
+        state = reduce_session(state, _submit(TurnKind.USER, turn_id))
+
+    if turn_ids:
+        assert state.current_turn is not None
+        assert state.current_turn.turn_id == turn_ids[0]
+        assert [turn.turn_id for turn in state.queued_turns] == turn_ids[1:]
+
+
+@given(st.sampled_from(["t1", "t2", "t3"]))
+def test_query_result_event_is_only_source_of_session_id(turn_id: str) -> None:
+    state = SessionState(lifecycle=LifecycleState.SLEEPING)
+    state = reduce_session(state, _submit(TurnKind.USER, turn_id))
+    assert state.session_id is None
+
+    state = reduce_session(
+        state,
+        StreamEventReceived(
+            agent_name="agent",
+            turn_id=turn_id,
+            event=QueryResult(session_id=f"sid-{turn_id}", cost_usd=0.1, num_turns=1, duration_ms=10),
+        ),
+    )
+    assert state.session_id == f"sid-{turn_id}"
+
+
+@given(st.sampled_from(["t1", "t2", "t3"]))
+def test_stop_clear_with_current_turn_marks_interrupt_and_clears_queue(turn_id: str) -> None:
+    state = SessionState(lifecycle=LifecycleState.SLEEPING)
+    state = reduce_session(state, _submit(TurnKind.USER, turn_id))
+    state = reduce_session(state, _submit(TurnKind.USER, "t2" if turn_id != "t2" else "t3"))
+
+    state = reduce_session(state, StopRequested(agent_name="agent", clear_queue=True))
+
+    assert state.stop_requested is True
+    assert state.current_turn is not None
+    assert state.current_turn.interrupt_requested is True
+    assert len(state.queued_turns) == 0
+
+
+@given(st.sampled_from(["t1", "t2", "t3"]))
+def test_skip_with_current_turn_marks_interrupt_without_clearing_queue(turn_id: str) -> None:
+    queued_id = "t2" if turn_id != "t2" else "t3"
+    state = SessionState(lifecycle=LifecycleState.SLEEPING)
+    state = reduce_session(state, _submit(TurnKind.USER, turn_id))
+    state = reduce_session(state, _submit(TurnKind.USER, queued_id))
+
+    state = reduce_session(state, SkipRequested(agent_name="agent"))
+
+    assert state.skip_requested is True
+    assert state.current_turn is not None
+    assert state.current_turn.interrupt_requested is True
+    assert [turn.turn_id for turn in state.queued_turns] == [queued_id]

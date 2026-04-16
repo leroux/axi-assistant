@@ -17,7 +17,7 @@ import shlex
 import time
 import traceback
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 import anyio
 import discord
@@ -913,7 +913,11 @@ def _reset_session_activity(session: AgentSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def create_transport(session: AgentSession, reconnecting: bool = False, can_use_tool=None):
+async def create_transport(
+    session: AgentSession,
+    reconnecting: bool = False,
+    can_use_tool: Callable[..., Any] | None = None,
+):
     """Create a transport for Claude Code agent (bridge or direct).
 
     For flowcoder agents, uses FlowcoderBridgeTransport which unwraps
@@ -955,20 +959,27 @@ def count_awake_agents() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Sleep / wake — delegate to hub lifecycle
+# Sleep / wake — Axi lifecycle on top of the rewritten runtime
 # ---------------------------------------------------------------------------
 
+_wake_lock = asyncio.Lock()
 
 
 async def sleep_agent(session: AgentSession, *, force: bool = False) -> None:
-    """Shut down an agent. Delegates to hub lifecycle.
+    """Shut down an agent and release its scheduler slot."""
+    if not force and session.query_lock.locked():
+        log.debug("Skipping sleep for '%s' — query_lock is held", session.name)
+        return
 
-    If force=False (default), skips sleeping if the agent's query_lock is held.
-    """
-    from agenthub import lifecycle
+    if session.client is None:
+        return
 
-    assert hub is not None
-    await lifecycle.sleep_agent(hub, session, force=force)
+    session.bridge_busy = False
+    if session.transport is not None:
+        session.transport = None
+    await _disconnect_client(session.client, session.name)
+    session.client = None
+    scheduler.release_slot(session.name)
     schedule_status_update()
 
 
@@ -991,13 +1002,10 @@ async def graceful_interrupt(session: AgentSession) -> bool:
 
 
 async def wake_agent(session: AgentSession) -> None:
-    """Wake a sleeping agent. Delegates core lifecycle to hub, then handles Discord post-wake."""
-    from agenthub import lifecycle
-    # Check cwd exists before attempting wake
+    """Wake a sleeping agent, then run Discord-specific post-wake logic."""
     if session.cwd and not os.path.isdir(session.cwd):
         log.error("Agent '%s' cwd does not exist: %s", session.name, session.cwd)
         raise ValueError(f"Agent '{session.name}' working directory no longer exists: {session.cwd}")
-
 
     assert _bot is not None
     assert hub is not None
@@ -1006,7 +1014,40 @@ async def wake_agent(session: AgentSession) -> None:
         return
 
     resume_id = session.session_id
-    await lifecycle.wake_agent(hub, session)
+
+    async with _wake_lock:
+        if is_awake(session):
+            return
+
+        await scheduler.request_slot(session.name)
+        try:
+            options = hub.make_agent_options(session, resume_id)
+            client = await hub.create_client(session, options)
+            session.client = client
+            session.last_failed_resume_id = None
+        except Exception:
+            if resume_id:
+                log.warning(
+                    "Failed to resume agent '%s' with session_id=%s, retrying fresh",
+                    session.name,
+                    resume_id,
+                )
+                options = hub.make_agent_options(session, None)
+                try:
+                    client = await hub.create_client(session, options)
+                except Exception:
+                    scheduler.release_slot(session.name)
+                    raise
+                session.client = client
+                session.session_id = None
+                session.last_failed_resume_id = resume_id
+                log.warning(
+                    "Agent '%s' woke with fresh session (previous context lost)",
+                    session.name,
+                )
+            else:
+                scheduler.release_slot(session.name)
+                raise
 
     # --- Discord-specific post-wake logic ---
 
@@ -1134,12 +1175,12 @@ async def _rebuild_session(name: str, *, cwd: str | None = None, session_id: str
         system_prompt=prompt,
         system_prompt_hash=prompt_hash,
         client=None,
-        session_id=session_id,
         mcp_servers=old_mcp,
         mcp_server_names=old_mcp_names,
         extra_excluded_commands=old_excluded,
         extra_write_dirs=old_write_dirs,
     )
+    new_session.session_id = session_id
     discord_state(new_session).channel_id = old_channel_id
     agents[name] = new_session
     return new_session
@@ -1210,24 +1251,25 @@ async def reconstruct_agents_from_channels() -> int:
                 cwd=cwd,
                 system_prompt=prompt,
                 system_prompt_hash=old_prompt_hash,
-                session_id=session_id,
                 mcp_servers=mcp_servers,
                 extra_excluded_commands=ext_excluded,
                 extra_write_dirs=ext_write_dirs,
                 model=saved_model,
             )
+            session.session_id = session_id
             ds = discord_state(session)
             ds.channel_id = ch.id
             ds.todo_items = load_todo_items(agent_name)
             # Late-substitute channel info into system prompt
-            if isinstance(session.system_prompt, dict) and "append" in session.system_prompt:
-                session.system_prompt["append"] = (
-                    session.system_prompt["append"]
-                    .replace("{channel_id}", str(ch.id))
-                    .replace("{channel_name}", ch.name)
-                    .replace("{guild_id}", str(ch.guild.id))
-                    .replace("{guild_name}", ch.guild.name)
-                )
+            if isinstance(session.system_prompt, dict):
+                append_text = session.system_prompt.get("append")
+                if isinstance(append_text, str):
+                    session.system_prompt["append"] = (
+                        append_text.replace("{channel_id}", str(ch.id))
+                        .replace("{channel_name}", ch.name)
+                        .replace("{guild_id}", str(ch.guild.id))
+                        .replace("{guild_name}", ch.guild.name)
+                    )
             agents[agent_name] = session
             channel_to_agent[ch.id] = agent_name
             reconstructed += 1
@@ -1606,24 +1648,25 @@ async def spawn_agent(
             system_prompt=prompt,
             system_prompt_hash=compute_prompt_hash(prompt),
             mcp_server_names=mcp_names,
-            session_id=resume,
             mcp_servers=mcp_servers,
             compact_instructions=compact_instructions,
             extra_excluded_commands=merged_excluded,
             extra_write_dirs=merged_write_dirs,
             model=model,
         )
+        session.session_id = resume
         discord_state(session).channel_id = channel.id
 
         # Late-substitute channel info into system prompt (not available at build time)
-        if isinstance(session.system_prompt, dict) and "append" in session.system_prompt:
-            session.system_prompt["append"] = (
-                session.system_prompt["append"]
-                .replace("{channel_id}", str(channel.id))
-                .replace("{channel_name}", channel.name)
-                .replace("{guild_id}", str(channel.guild.id))
-                .replace("{guild_name}", channel.guild.name)
-            )
+        if isinstance(session.system_prompt, dict):
+            append_text = session.system_prompt.get("append")
+            if isinstance(append_text, str):
+                session.system_prompt["append"] = (
+                    append_text.replace("{channel_id}", str(channel.id))
+                    .replace("{channel_name}", channel.name)
+                    .replace("{guild_id}", str(channel.guild.id))
+                    .replace("{guild_name}", channel.guild.name)
+                )
 
         agents[name] = session
 

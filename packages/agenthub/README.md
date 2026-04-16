@@ -2,7 +2,7 @@
 
 Multi-agent session orchestration. Manages N concurrent LLM agent sessions: lifecycle, concurrency, message queuing, rate limits, hot restart, and graceful shutdown.
 
-No UI dependency. The frontend (Discord, CLI, web) plugs in via `FrontendCallbacks` and a `StreamHandlerFn` callback.
+No UI dependency. The host app (Discord, CLI, web) plugs in via a narrow frontend protocol for notifications and human-interaction gates.
 
 ## Purpose
 
@@ -11,16 +11,14 @@ Extracted from the Axi bot's `agents.py` to make agent orchestration reusable ac
 ## Architecture
 
 ```
-Frontend (Discord bot, CLI, web)
+Host app (Discord bot, CLI, web)
       |
-      | FrontendCallbacks + StreamHandlerFn
+      | Frontend protocol + SDK factories
       v
    AgentHub (orchestration)
       |
-      | SDK factories (injected)
+      | Claude Wire stream protocol
       v
-   Claude Wire (stream protocol)
-      |
    Claude Agent SDK
 ```
 
@@ -36,29 +34,13 @@ This keeps AgentHub decoupled from the exact SDK version and option schema.
 ### Creating the hub
 
 ```python
-from agenthub import AgentHub, FrontendCallbacks
+from agenthub import AgentHub, FrontendRouter
 
-callbacks = FrontendCallbacks(
-    post_message=my_post_fn,
-    post_system=my_system_fn,
-    on_wake=my_wake_fn,
-    on_sleep=my_sleep_fn,
-    on_session_id=my_sid_fn,
-    get_channel=my_channel_fn,
-    on_spawn=my_spawn_fn,
-    on_kill=my_kill_fn,
-    broadcast=my_broadcast_fn,
-    schedule_rate_limit_expiry=my_expiry_fn,
-    on_idle_reminder=my_idle_fn,
-    on_reconnect=my_reconnect_fn,
-    close_app=my_close_fn,
-    kill_process=my_kill_process_fn,
-)
+router = FrontendRouter()
+router.add(my_frontend)
 
 hub = AgentHub(
-    max_awake=4,
-    protected={"axi-master"},
-    callbacks=callbacks,
+    frontends=[router],
     make_agent_options=my_options_factory,
     create_client=my_client_factory,
     disconnect_client=my_disconnect_fn,

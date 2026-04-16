@@ -30,24 +30,44 @@ from dotenv import dotenv_values
 
 from axi.worktrees import (
     cleanup_stale as _cleanup_stale,
+)
+from axi.worktrees import (
     execute_merge as _execute_merge,
-    find_git_deps as _find_git_deps,
+)
+from axi.worktrees import (
     find_main_repo as _find_main_repo,
+)
+from axi.worktrees import (
     flock as _flock,
+)
+from axi.worktrees import (
     get_default_branch as _get_default_branch,
+)
+from axi.worktrees import (
     get_worktree_branch,
-    git as _git,
+)
+from axi.worktrees import (
     merge_lock_file as _merge_lock_file,
-    queue_file as _queue_file,
+)
+from axi.worktrees import (
     queue_lock as _queue_lock,
+)
+from axi.worktrees import (
     read_queue as _read_queue,
+)
+from axi.worktrees import (
     remove_from_queue as _remove_from_queue,
+)
+from axi.worktrees import (
     remove_worktree as _remove_worktree,
+)
+from axi.worktrees import (
     upgrade_git_deps as _upgrade_git_deps,
+)
+from axi.worktrees import (
     write_queue as _write_queue,
 )
 from discordquery import DiscordClient
-
 
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 TESTS_DIR = os.environ.get("AXI_TESTS_DIR", os.path.join(os.path.expanduser("~"), "axi-tests"))
@@ -55,7 +75,7 @@ CONFIG_PATH = os.path.expanduser("~/.config/axi/test-config.json")
 CONFIG_DIR = os.path.expanduser("~/.config/axi")
 SLOTS_FILE = os.path.join(CONFIG_DIR, ".test-slots.json")
 SLOTS_LOCK = os.path.join(CONFIG_DIR, ".test-slots.lock")
-SENTINEL = "Bot has finished responding"
+SENTINEL = "Flowchart **completed**"
 BOT_DIR = REPO_DIR
 
 

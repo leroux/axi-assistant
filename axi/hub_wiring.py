@@ -1,8 +1,9 @@
-"""Construct the AgentHub with FrontendRouter and SDK factories.
+"""Construct the rewritten AgentHub for Axi.
 
 Called once from agents.init() to create the hub. The hub shares the same
 sessions dict as agents.py's `agents` — both reference the same objects.
-This allows gradual migration: existing code works alongside hub calls.
+This allows gradual migration while Axi keeps its own Discord-specific
+lifecycle and queue handling on top of the standalone runtime core.
 
 The FrontendRouter multiplexes events to all registered frontends. Currently
 only DiscordFrontend is registered; future frontends (web, Slack) will be
@@ -69,8 +70,7 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
             "enabled": True,
             "autoAllowBashIfSandboxed": True,
             "allowUnsandboxedCommands": False,
-            "excludedCommands": ["git", "systemctl", "uv", "ts-ssh", "ts-curl"]
-            + session.extra_excluded_commands,
+            "excludedCommands": ["git", "systemctl", "uv", "ts-ssh", "ts-curl", *session.extra_excluded_commands],
             "network": {
                 "allowAllUnixSockets": True,
                 "allowUnixSockets": [
@@ -84,20 +84,13 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
             os.path.expanduser("~/.config/axi"),
             os.path.expanduser("~/.config/minflow"),
             os.path.expanduser("~/.cache/uv"),
-        ]
-        + session.extra_write_dirs,
+            *session.extra_write_dirs,
+        ],
         mcp_servers=session.mcp_servers or {},
         disallowed_tools=[],
         extra_args={"debug-to-stderr": None},
         env=base_env,
     )
-
-
-def _make_permission_callback(session: AgentSession):
-    """Build a can_use_tool callback for one session."""
-    from axi.agents import make_cwd_permission_callback
-
-    return make_cwd_permission_callback(session.cwd, session)
 
 
 async def _create_client(session: AgentSession, options: Any) -> Any:
@@ -151,34 +144,24 @@ def create_hub(
     bot: Bot,
     sessions: dict[str, Any],
 ) -> AgentHub:
-    """Create and configure the AgentHub with FrontendRouter.
+    """Create and configure the rewritten AgentHub.
 
-    Creates a FrontendRouter, registers DiscordFrontend, and uses
-    router.as_callbacks() to generate the FrontendCallbacks that AgentHub
-    expects. The router is stored module-level so other code can add
-    frontends later (e.g. web, Slack).
+    Registers DiscordFrontend directly with the runtime's frontend list and
+    then shares the same sessions dict with legacy Axi code during migration.
     """
     global router
 
-    # Create router and register Discord as the first frontend
     router = FrontendRouter()
     discord_fe = DiscordFrontend(bot)
     router.add(discord_fe)
 
-    # Generate backward-compatible callbacks from the router
-    callbacks = router.as_callbacks()
-
     hub = AgentHub(
+        frontends=[router],
         max_awake=config.MAX_AWAKE_AGENTS,
-        protected={config.MASTER_AGENT_NAME},
-        callbacks=callbacks,
         make_agent_options=_make_agent_options,
         create_client=_create_client,
         disconnect_client=_disconnect_client,
-        make_permission_callback=_make_permission_callback,
         query_timeout=config.QUERY_TIMEOUT,
-        max_retries=config.API_ERROR_MAX_RETRIES,
-        retry_base_delay=config.API_ERROR_BASE_DELAY,
         usage_history_path=config.USAGE_HISTORY_PATH,
         rate_limit_history_path=config.RATE_LIMIT_HISTORY_PATH,
     )
