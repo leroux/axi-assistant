@@ -456,8 +456,9 @@ class ProcmuxServer:
         """Terminate a managed process and its entire process group.
 
         Sends SIGTERM to the process group first (graceful), then escalates
-        to SIGKILL after 5 seconds.  Uses os.killpg() so child processes
-        (e.g. inner Claude CLI spawned by the flowcoder engine) are killed too.
+        to SIGKILL after a short grace period. Uses os.killpg() so child
+        processes (e.g. inner Claude CLI spawned by the flowcoder engine) are
+        killed too.
         """
         if mp.status != "running":
             return
@@ -465,7 +466,7 @@ class ProcmuxServer:
             pgid = os.getpgid(mp.proc.pid)
             os.killpg(pgid, signal.SIGTERM)
             try:
-                await asyncio.wait_for(mp.proc.wait(), timeout=5.0)
+                await asyncio.wait_for(mp.proc.wait(), timeout=0.25)
             except TimeoutError:
                 try:
                     os.killpg(pgid, signal.SIGKILL)

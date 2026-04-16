@@ -21,33 +21,28 @@ import uuid
 import pytest
 
 try:
-    from agenthub.procmux_wire import ProcmuxProcessConnection
     from claudewire import BridgeTransport
     from claudewire.types import StdoutEvent
-    from procmux import (
-        ExitMsg,
-        StdoutMsg,
-    )
-    from procmux import (
-        ProcmuxConnection as BridgeConnection,
-    )
-    from procmux import (
-        ProcmuxServer as BridgeServer,
-    )
-    from procmux import (
-        connect as connect_to_bridge,
-    )
-    from procmux import (
-        ensure_running as ensure_bridge,
-    )
+
+    from agenthub.procmux_wire import ProcmuxProcessConnection
+    from procmux import ExitMsg, StdoutMsg
+    from procmux import ProcmuxConnection as BridgeConnection
+    from procmux import ProcmuxServer as BridgeServer
+    from procmux import connect as connect_to_bridge
+    from procmux import ensure_running as ensure_bridge
 except ImportError:
     pytestmark = pytest.mark.skip("Python bridge packages not available (Rust rewrite)")
 
 
-# Override conftest's autouse warmup — bridge tests don't need Discord.
+# Override conftest's autouse Discord fixtures — bridge tests don't need Discord.
+@pytest.fixture(scope="session")
+def warmup():
+    return None
+
+
 @pytest.fixture(autouse=True)
-def _ensure_warm():
-    pass
+def _recover_after_failure():
+    return None
 
 
 # ---------------------------------------------------------------------------

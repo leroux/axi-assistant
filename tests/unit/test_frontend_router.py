@@ -1,4 +1,4 @@
-"""Unit tests for FrontendRouter — multiplexes events to multiple frontends."""
+"""Tests for the rewritten FrontendRouter."""
 
 from __future__ import annotations
 
@@ -15,8 +15,6 @@ from agenthub.stream_types import TextDelta
 
 
 class FakeFrontend:
-    """Minimal Frontend implementation for testing."""
-
     def __init__(self, frontend_name: str) -> None:
         self._name = frontend_name
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
@@ -134,21 +132,6 @@ class TestFrontendRouter:
         assert ("post_message", ("master", "hello")) in fe2.calls
 
     @pytest.mark.asyncio
-    async def test_lifecycle_events_broadcast(self) -> None:
-        router = FrontendRouter()
-        fe = FakeFrontend("discord")
-        router.add(fe)
-
-        await router.on_wake("agent-1")
-        await router.on_sleep("agent-1")
-        await router.on_kill("agent-1", "sess-1")
-
-        methods = [c[0] for c in fe.calls]
-        assert "on_wake" in methods
-        assert "on_sleep" in methods
-        assert "on_kill" in methods
-
-    @pytest.mark.asyncio
     async def test_stream_event_broadcast(self) -> None:
         router = FrontendRouter()
         fe1 = FakeFrontend("discord")
@@ -190,22 +173,32 @@ class TestFrontendRouter:
         assert ch == "channel-master"
 
     @pytest.mark.asyncio
-    async def test_get_channel_no_frontends(self) -> None:
+    async def test_ensure_channel_returns_value(self) -> None:
         router = FrontendRouter()
-        ch = await router.get_channel("master")
-        assert ch is None
+        fe = FakeFrontend("discord")
+        router.add(fe)
+        ch = await router.ensure_channel("master")
+        assert ch == "channel-master"
 
     @pytest.mark.asyncio
-    async def test_error_in_one_frontend_doesnt_break_others(self) -> None:
+    async def test_no_frontends_no_error(self) -> None:
+        router = FrontendRouter()
+        await router.post_message("agent", "text")
+        await router.on_wake("agent")
+        await router.broadcast("msg")
+        result = await router.request_plan_approval("agent", "plan", None)
+        assert result.approved is True
+
+    @pytest.mark.asyncio
+    async def test_broadcast_survives_frontend_failure(self) -> None:
         router = FrontendRouter()
         bad = FakeFrontend("bad")
         good = FakeFrontend("good")
 
-        # Make bad frontend raise on post_message
-        async def _boom(*args: Any) -> None:
+        async def boom(*args: Any) -> None:
             raise RuntimeError("boom")
-        bad.post_message = _boom  # type: ignore[assignment]
 
+        bad.post_message = boom  # type: ignore[assignment]
         router.add(bad)
         router.add(good)
 
@@ -213,42 +206,89 @@ class TestFrontendRouter:
         assert ("post_message", ("master", "hello")) in good.calls
 
     @pytest.mark.asyncio
-    async def test_as_callbacks(self) -> None:
+    async def test_first_response_skips_failing_frontend(self) -> None:
+        router = FrontendRouter()
+        bad = FakeFrontend("bad")
+        good = FakeFrontend("good")
+
+        async def boom(*args: Any) -> PlanApprovalResult:
+            raise RuntimeError("boom")
+
+        bad.request_plan_approval = boom  # type: ignore[assignment]
+        router.add(bad)
+        router.add(good)
+
+        result = await router.request_plan_approval("agent", "plan", None)
+        assert result.approved is True
+
+    @pytest.mark.asyncio
+    async def test_get_channel_falls_through_when_first_frontend_returns_none(self) -> None:
+        router = FrontendRouter()
+        fe1 = FakeFrontend("one")
+        fe2 = FakeFrontend("two")
+
+        async def none_channel(agent_name: str) -> Any:
+            return None
+
+        fe1.get_channel = none_channel  # type: ignore[assignment]
+        router.add(fe1)
+        router.add(fe2)
+
+        ch = await router.get_channel("master")
+        assert ch == "channel-master"
+
+    @pytest.mark.asyncio
+    async def test_ensure_channel_falls_through_when_first_frontend_raises(self) -> None:
+        router = FrontendRouter()
+        fe1 = FakeFrontend("one")
+        fe2 = FakeFrontend("two")
+
+        async def boom(agent_name: str, cwd: str | None = None) -> Any:
+            raise RuntimeError("boom")
+
+        fe1.ensure_channel = boom  # type: ignore[assignment]
+        router.add(fe1)
+        router.add(fe2)
+
+        ch = await router.ensure_channel("master")
+        assert ch == "channel-master"
+
+    @pytest.mark.asyncio
+    async def test_kill_process_stops_after_first_success(self) -> None:
+        router = FrontendRouter()
+        fe1 = FakeFrontend("one")
+        fe2 = FakeFrontend("two")
+        called: list[str] = []
+
+        async def kill_one() -> None:
+            called.append("one")
+
+        async def kill_two() -> None:
+            called.append("two")
+
+        fe1.kill_process = kill_one  # type: ignore[assignment]
+        fe2.kill_process = kill_two  # type: ignore[assignment]
+        router.add(fe1)
+        router.add(fe2)
+
+        await router.kill_process()
+        assert called == ["one"]
+
+    @pytest.mark.asyncio
+    async def test_misc_broadcast_methods_are_relayed(self) -> None:
         router = FrontendRouter()
         fe = FakeFrontend("discord")
         router.add(fe)
 
-        cb = router.as_callbacks()
-        await cb.post_message("master", "hello")
-        await cb.post_system("master", "system msg")
-        await cb.on_wake("agent-1")
+        await router.on_idle_reminder("agent", 5.0)
+        await router.on_reconnect("agent", True)
+        await router.move_to_killed("agent")
+        await router.send_goodbye()
+        await router.close_app()
 
-        methods = [c[0] for c in fe.calls]
-        assert "post_message" in methods
-        assert "post_system" in methods
-        assert "on_wake" in methods
-
-    @pytest.mark.asyncio
-    async def test_start_stop_all(self) -> None:
-        router = FrontendRouter()
-        fe1 = FakeFrontend("discord")
-        fe2 = FakeFrontend("web")
-        router.add(fe1)
-        router.add(fe2)
-
-        await router.start_all()
-        assert any(c[0] == "start" for c in fe1.calls)
-        assert any(c[0] == "start" for c in fe2.calls)
-
-        await router.stop_all()
-        assert any(c[0] == "stop" for c in fe1.calls)
-
-    @pytest.mark.asyncio
-    async def test_no_frontends_no_error(self) -> None:
-        """All methods should be no-ops when no frontends are registered."""
-        router = FrontendRouter()
-        await router.post_message("agent", "text")
-        await router.on_wake("agent")
-        await router.broadcast("msg")
-        result = await router.request_plan_approval("agent", "plan", None)
-        assert result.approved is True  # auto-approve when no frontends
+        methods = [call[0] for call in fe.calls]
+        assert "on_idle_reminder" in methods
+        assert "on_reconnect" in methods
+        assert "move_to_killed" in methods
+        assert "send_goodbye" in methods
+        assert "close_app" in methods

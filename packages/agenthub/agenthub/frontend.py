@@ -2,12 +2,10 @@
 
 Each frontend (Discord, Web, Slack) implements this protocol to receive
 notifications from AgentHub and render them to users. The FrontendRouter
-multiplexes callbacks to all registered frontends.
+multiplexes protocol calls to all registered frontends.
 
-This replaces the flat FrontendCallbacks dataclass with a richer protocol
-that includes stream rendering, interactive gates, and channel management.
-FrontendCallbacks still exists for backward compat — FrontendRouter can
-generate one from registered frontends.
+The rewritten runtime uses the Frontend protocol directly for stream events,
+interactive gates, and channel management.
 """
 
 from __future__ import annotations

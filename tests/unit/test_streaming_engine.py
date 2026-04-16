@@ -18,6 +18,9 @@ from claude_agent_sdk.types import (
     SystemMessage,
     TextBlock,
 )
+from claudewire.events import ActivityState
+from hypothesis import given
+from hypothesis import strategies as st
 
 from agenthub.stream_types import (
     BlockStart,
@@ -39,7 +42,6 @@ from agenthub.stream_types import (
     TransientError,
 )
 from agenthub.streaming import _extract_tool_preview, stream_response
-from claudewire.events import ActivityState
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -287,3 +289,47 @@ class TestMidTurnSplit:
         assert len(flushes) >= 1
         total_text = "".join(f.text for f in flushes)
         assert len(total_text) == 2000
+
+
+_TEXT_CHUNKS = st.text(alphabet=st.characters(blacklist_categories=("Cs",)), min_size=1, max_size=20)
+
+
+class TestStreamProperties:
+    @pytest.mark.asyncio
+    @given(st.lists(_TEXT_CHUNKS, min_size=1, max_size=8), st.booleans())
+    async def test_stream_shape_and_flush_count_invariants(self, chunks: list[str], include_result: bool) -> None:
+        messages: list[Any] = [
+            _se({"type": "content_block_delta", "delta": {"type": "text_delta", "text": chunk}})
+            for chunk in chunks
+        ]
+        if include_result:
+            messages.append(_result())
+
+        events = await _collect(FakeSession(), messages)
+
+        assert isinstance(events[0], StreamStart)
+        assert isinstance(events[-1], StreamEnd)
+        flushes = [e for e in events if isinstance(e, TextFlush)]
+        assert events[-1].flush_count == len(flushes)
+        has_killed = any(isinstance(e, StreamKilled) for e in events)
+        if include_result:
+            assert has_killed is False
+        else:
+            assert has_killed is True
+
+    @pytest.mark.asyncio
+    @given(st.lists(_TEXT_CHUNKS, min_size=1, max_size=4))
+    async def test_flowchart_result_does_not_emit_normal_session_id(self, chunks: list[str]) -> None:
+        messages: list[Any] = [
+            _se({"type": "content_block_delta", "delta": {"type": "text_delta", "text": chunk}}, sid="flowchart")
+            for chunk in chunks
+        ]
+        messages.append(_result("flowchart"))
+
+        session = FakeSession(session_id="orig-session")
+        events = await _collect(session, messages)
+
+        assert session.session_id == "orig-session"
+        results = [e for e in events if isinstance(e, QueryResult)]
+        assert len(results) == 1
+        assert results[0].is_flowchart is True
