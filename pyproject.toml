@@ -32,7 +32,6 @@ dependencies = [
 #   flowcoder-flowchart = { path = "../flowcoder/packages/flowcoder-flowchart", editable = true }
 flowcoder-engine = { git = "https://github.com/px-pride/flowcoder.git", rev = "6b42aafc0fb675ada139ec4e36929a0abf530084", subdirectory = "packages/flowcoder-engine" }
 flowcoder-flowchart = { git = "https://github.com/px-pride/flowcoder.git", rev = "6b42aafc0fb675ada139ec4e36929a0abf530084", subdirectory = "packages/flowcoder-flowchart" }
-flowcoder-tui = { path = "packages/flowcoder_tui", editable = true }
 procmux = { git = "https://github.com/leroux/procmux.git", rev = "88cc1eb91bf91b2653905e8a836abb15999e017d", subdirectory = "py" }
 claudewire = { git = "https://github.com/leroux/claudewire.git", rev = "1f940d89e1a1db8217f997f9dc77063a3738fd36", subdirectory = "py" }
 discordquery = { path = "packages/discordquery", editable = true }
@@ -98,7 +97,6 @@ ignore = [
 "packages/discordquery/discordquery/query.py" = ["T20"]  # CLI tool
 "packages/discordquery/discordquery/wait.py" = ["T20"]   # CLI tool
 "packages/procmux/procmux/server.py" = ["T20"]  # CLI entrypoint
-"packages/flowcoder_tui/flowcoder_tui/repl.py" = ["T20"]  # TUI prints to terminal
 "axi_test.py" = ["T20"]  # CLI prints to stdout/stderr
 "commands/*.json" = ["B018"]  # JSON command definitions parse as dict literals under Ruff
 "lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
