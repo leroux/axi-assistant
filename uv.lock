@@ -294,7 +294,7 @@ requires-dist = [
     { name = "opentelemetry-api", specifier = ">=1.20" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.20" },
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
-    { name = "procmux", editable = "packages/procmux" },
+    { name = "procmux", git = "https://github.com/leroux/procmux.git?subdirectory=py&rev=88cc1eb91bf91b2653905e8a836abb15999e017d" },
     { name = "pynacl" },
     { name = "python-dotenv" },
     { name = "tzdata", specifier = ">=2025.3" },
@@ -1313,13 +1313,10 @@ wheels = [
 [[package]]
 name = "procmux"
 version = "0.1.0"
-source = { editable = "packages/procmux" }
+source = { git = "https://github.com/leroux/procmux.git?subdirectory=py&rev=88cc1eb91bf91b2653905e8a836abb15999e017d#88cc1eb91bf91b2653905e8a836abb15999e017d" }
 dependencies = [
     { name = "pydantic" },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.0" }]
 
 [[package]]
 name = "propcache"

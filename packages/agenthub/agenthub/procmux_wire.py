@@ -10,12 +10,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from claudewire.types import CommandResult, ExitEvent, ProcessEvent, StderrEvent, StdoutEvent
-from procmux.protocol import ExitMsg, StderrMsg, StdoutMsg
+
+from procmux.protocol import ExitMsg, ResultMsg, StderrMsg, StdoutMsg
 
 if TYPE_CHECKING:
     import asyncio
 
     from procmux import ProcmuxConnection
+
+
+def _result_processes(result: ResultMsg) -> dict[str, Any]:
+    processes = getattr(result, "processes", None)
+    if processes is not None:
+        return processes
+    agents = getattr(result, "agents", None)
+    return agents or {}
 
 
 class _TranslatingQueue:
@@ -96,7 +105,14 @@ class ProcmuxProcessConnection:
         env: dict[str, str],
         cwd: str,
     ) -> CommandResult:
-        result = await self._conn.send_command("spawn", name=name, cli_args=cli_args, env=env, cwd=cwd)
+        result = await self._conn.send_command(
+            "spawn",
+            name=name,
+            cli_args=cli_args,
+            env=env,
+            cwd=cwd,
+            env_inherit=False,
+        )
         return CommandResult(
             ok=result.ok,
             error=result.error,
@@ -127,7 +143,7 @@ class ProcmuxProcessConnection:
     async def list_agents(self) -> CommandResult:
         """List all processes managed by procmux."""
         result = await self._conn.send_command("list")
-        return CommandResult(ok=result.ok, agents=result.agents or [])
+        return CommandResult(ok=result.ok, agents=list(_result_processes(result)))
 
     async def send_raw_command(self, cmd: str, **kwargs: Any) -> CommandResult:
         """Send an arbitrary command to procmux (for commands not in the protocol)."""
@@ -139,5 +155,5 @@ class ProcmuxProcessConnection:
             replayed=result.replayed,
             status=result.status,
             idle=result.idle,
-            agents=result.agents or [],
+            agents=list(_result_processes(result)),
         )
