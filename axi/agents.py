@@ -722,7 +722,7 @@ def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None 
     """Create a can_use_tool callback that restricts file writes to allowed_cwd and AXI_USER_DATA.
 
     Uses claudewire's compose() to chain stateless policies:
-    1. Block forbidden tools (Skill, EnterWorktree, Task)
+    1. Block forbidden tools (EnterWorktree, Task)
     2. Auto-allow safe tools (TodoWrite, EnterPlanMode)
     3. Interactive hooks (plan approval, user questions) if session provided
     4. CWD restriction (file writes only inside allowed paths)
@@ -751,7 +751,7 @@ def make_cwd_permission_callback(allowed_cwd: str, session: AgentSession | None 
 
     policies = [
         tool_block_policy(
-            {"Skill", "EnterWorktree", "Task"},
+            {"EnterWorktree", "Task"},
             message="Not compatible with Discord-based agent mode. Use text messages to communicate instead.",
         ),
         tool_allow_policy({"TodoWrite", "EnterPlanMode"}),
