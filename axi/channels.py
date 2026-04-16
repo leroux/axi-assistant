@@ -585,44 +585,60 @@ async def get_master_channel() -> TextChannel | None:
     return await get_agent_channel(config.MASTER_AGENT_NAME)
 
 
+_master_position_cooldown: float = 0.0
+_master_position_lock = asyncio.Lock()
+
+
 async def ensure_master_channel_position() -> None:
     """Ensure #axi-master is at position 0 inside the Axi category.
 
     Uses the Discord REST API (PATCH /guilds/{guild_id}/channels) to move
     the master channel to the top of the Axi category.
+    Cooldown and lock prevent feedback loops from on_guild_channel_update events.
     """
+    global _master_position_cooldown
+
     if target_guild is None:
+        return
+
+    now = time.monotonic()
+    if now - _master_position_cooldown < 15.0:
+        return
+    _master_position_cooldown = now
+
+    if _master_position_lock.locked():
         return
 
     if not axi_categories:
         log.warning("No Axi category found — cannot position master channel")
         return
 
-    axi_cat = axi_categories[0]
-    normalized = normalize_channel_name(config.MASTER_AGENT_NAME)
-    master_ch: TextChannel | None = None
-    for ch in target_guild.text_channels:
-        if _match_channel_name(ch.name, normalized):
-            master_ch = ch
-            break
+    async with _master_position_lock:
+        axi_cat = axi_categories[0]
+        normalized = normalize_channel_name(config.MASTER_AGENT_NAME)
+        master_ch: TextChannel | None = None
+        for ch in target_guild.text_channels:
+            if _match_channel_name(ch.name, normalized):
+                master_ch = ch
+                break
 
-    if master_ch is None:
-        return
+        if master_ch is None:
+            return
 
-    # Already at position 0 in Axi category — nothing to do
-    if master_ch.position == 0 and master_ch.category_id == axi_cat.id:
-        log.debug("#%s already at position 0 in Axi category", normalized)
-        return
+        # Already at position 0 in Axi category — nothing to do
+        if master_ch.position == 0 and master_ch.category_id == axi_cat.id:
+            log.debug("#%s already at position 0 in Axi category", normalized)
+            return
 
-    try:
-        await config.discord_client.request(
-            "PATCH",
-            f"/guilds/{config.DISCORD_GUILD_ID}/channels",
-            json=[{"id": str(master_ch.id), "position": 0, "parent_id": str(axi_cat.id)}],
-        )
-        log.info("Moved #%s to position 0 in Axi category", normalized)
-    except Exception as e:
-        log.warning("Failed to move #%s to Axi category: %s", normalized, e)
+        try:
+            await config.discord_client.request(
+                "PATCH",
+                f"/guilds/{config.DISCORD_GUILD_ID}/channels",
+                json=[{"id": str(master_ch.id), "position": 0, "parent_id": str(axi_cat.id)}],
+            )
+            log.info("Moved #%s to position 0 in Axi category", normalized)
+        except Exception as e:
+            log.warning("Failed to move #%s to Axi category: %s", normalized, e)
 
 
 _category_positions_cooldown: float = 0.0

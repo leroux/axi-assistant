@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 
 API_BASE = "https://discord.com/api/v10"
 MAX_RETRIES = 3
+MAX_RATELIMIT_RETRIES = 10
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +66,7 @@ class DiscordClient:
         Raises httpx.HTTPStatusError on non-retriable failures.
         """
         failures = 0
+        ratelimit_retries = 0
         while True:
             resp = self._client.request(method, path, **kwargs)
 
@@ -72,8 +74,12 @@ class DiscordClient:
                 return resp
 
             if resp.status_code == 429:
+                ratelimit_retries += 1
+                if ratelimit_retries > MAX_RATELIMIT_RETRIES:
+                    log.error("Rate limit retries exhausted (%d) on %s %s", MAX_RATELIMIT_RETRIES, method, path)
+                    resp.raise_for_status()
                 retry_after = float(resp.json().get("retry_after", 1.0))
-                log.warning("Rate limited, waiting %.1fs...", retry_after)
+                log.warning("Rate limited, waiting %.1fs (attempt %d/%d)...", retry_after, ratelimit_retries, MAX_RATELIMIT_RETRIES)
                 time.sleep(retry_after)
                 continue
 
@@ -174,6 +180,7 @@ class AsyncDiscordClient:
         Raises httpx.HTTPStatusError on non-retriable failures.
         """
         failures = 0
+        ratelimit_retries = 0
         while True:
             resp = await self._client.request(method, path, **kwargs)
 
@@ -181,8 +188,12 @@ class AsyncDiscordClient:
                 return resp
 
             if resp.status_code == 429:
+                ratelimit_retries += 1
+                if ratelimit_retries > MAX_RATELIMIT_RETRIES:
+                    log.error("Rate limit retries exhausted (%d) on %s %s", MAX_RATELIMIT_RETRIES, method, path)
+                    resp.raise_for_status()
                 retry_after = float(resp.json().get("retry_after", 1.0))
-                log.warning("Rate limited on %s %s, waiting %.1fs...", method, path, retry_after)
+                log.warning("Rate limited on %s %s, waiting %.1fs (attempt %d/%d)...", method, path, retry_after, ratelimit_retries, MAX_RATELIMIT_RETRIES)
                 await asyncio.sleep(retry_after)
                 continue
 
