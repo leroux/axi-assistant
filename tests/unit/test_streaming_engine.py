@@ -18,6 +18,9 @@ from claude_agent_sdk.types import (
     SystemMessage,
     TextBlock,
 )
+from claudewire.events import ActivityState
+from hypothesis import given
+from hypothesis import strategies as st
 
 from agenthub.stream_types import (
     BlockStart,
@@ -34,12 +37,12 @@ from agenthub.stream_types import (
     ThinkingEnd,
     ThinkingStart,
     TodoUpdate,
+    ToolInputDelta,
     ToolUseEnd,
     ToolUseStart,
     TransientError,
 )
 from agenthub.streaming import _extract_tool_preview, stream_response
-from claudewire.events import ActivityState
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -287,3 +290,149 @@ class TestMidTurnSplit:
         assert len(flushes) >= 1
         total_text = "".join(f.text for f in flushes)
         assert len(total_text) == 2000
+
+
+_TEXT_CHUNKS = st.text(alphabet=st.characters(blacklist_categories=("Cs",)), min_size=1, max_size=20)
+
+
+class TestStreamProperties:
+    @pytest.mark.asyncio
+    @given(st.lists(_TEXT_CHUNKS, min_size=1, max_size=8), st.booleans())
+    async def test_stream_shape_and_flush_count_invariants(self, chunks: list[str], include_result: bool) -> None:
+        messages: list[Any] = [
+            _se({"type": "content_block_delta", "delta": {"type": "text_delta", "text": chunk}})
+            for chunk in chunks
+        ]
+        if include_result:
+            messages.append(_result())
+
+        events = await _collect(FakeSession(), messages)
+
+        assert isinstance(events[0], StreamStart)
+        assert isinstance(events[-1], StreamEnd)
+        flushes = [e for e in events if isinstance(e, TextFlush)]
+        assert events[-1].flush_count == len(flushes)
+        has_killed = any(isinstance(e, StreamKilled) for e in events)
+        if include_result:
+            assert has_killed is False
+        else:
+            assert has_killed is True
+
+    @pytest.mark.asyncio
+    @given(st.lists(_TEXT_CHUNKS, min_size=1, max_size=4))
+    async def test_flowchart_result_does_not_emit_normal_session_id(self, chunks: list[str]) -> None:
+        messages: list[Any] = [
+            _se({"type": "content_block_delta", "delta": {"type": "text_delta", "text": chunk}}, sid="flowchart")
+            for chunk in chunks
+        ]
+        messages.append(_result("flowchart"))
+
+        session = FakeSession(session_id="orig-session")
+        events = await _collect(session, messages)
+
+        assert session.session_id == "orig-session"
+        results = [e for e in events if isinstance(e, QueryResult)]
+        assert len(results) == 1
+        assert results[0].is_flowchart is True
+
+    @pytest.mark.asyncio
+    @given(
+        tool_name=st.sampled_from(["Bash", "Read", "TodoWrite"]),
+        partials=st.lists(st.text(alphabet=st.characters(blacklist_categories=("Cs",)), min_size=0, max_size=12), min_size=0, max_size=4),
+        include_stop=st.booleans(),
+        include_result=st.booleans(),
+    )
+    async def test_tool_use_grammar_preserves_start_end_and_terminal_shape(
+        self,
+        tool_name: str,
+        partials: list[str],
+        include_stop: bool,
+        include_result: bool,
+    ) -> None:
+        session = FakeSession()
+        session.activity = ActivityState(phase="waiting", tool_name=tool_name)
+        messages: list[Any] = [
+            _se({"type": "content_block_start", "content_block": {"type": "tool_use", "name": tool_name}, "index": 0}),
+        ]
+        messages.extend(
+            _se({"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": partial}})
+            for partial in partials
+        )
+        if include_stop:
+            messages.append(_se({"type": "content_block_stop"}))
+        if include_result:
+            messages.append(_result())
+
+        events = await _collect(session, messages)
+
+        assert isinstance(events[0], StreamStart)
+        assert isinstance(events[-1], StreamEnd)
+        starts = [e for e in events if isinstance(e, ToolUseStart)]
+        inputs = [e for e in events if isinstance(e, ToolInputDelta)]
+        ends = [e for e in events if isinstance(e, ToolUseEnd)]
+        kills = [e for e in events if isinstance(e, StreamKilled)]
+        results = [e for e in events if isinstance(e, QueryResult)]
+
+        assert len(starts) == 1
+        assert starts[0].tool_name == tool_name
+        assert [e.partial_json for e in inputs] == partials
+        assert len(ends) == (1 if include_stop else 0)
+        assert len(results) == (1 if include_result else 0)
+        assert len(kills) == (0 if include_result else 1)
+        if ends:
+            assert ends[0].tool_name == tool_name
+
+    @pytest.mark.asyncio
+    @given(
+        chunks=st.lists(_TEXT_CHUNKS, min_size=1, max_size=5),
+        terminal=st.sampled_from(["result", "rate_limit", "transient", "killed"]),
+    )
+    async def test_terminal_event_grammar_preserves_exclusive_outcome(
+        self,
+        chunks: list[str],
+        terminal: str,
+    ) -> None:
+        messages: list[Any] = [
+            _se({"type": "content_block_delta", "delta": {"type": "text_delta", "text": chunk}})
+            for chunk in chunks
+        ]
+        if terminal == "result":
+            messages.append(_result())
+        elif terminal == "rate_limit":
+            messages.append(_assistant(error="rate_limit", text="retry after 7 seconds"))
+        elif terminal == "transient":
+            messages.append(_assistant(error="overloaded", text="server busy"))
+
+        events = await _collect(FakeSession(), messages)
+
+        assert isinstance(events[0], StreamStart)
+        assert isinstance(events[-1], StreamEnd)
+        kills = [e for e in events if isinstance(e, StreamKilled)]
+        results = [e for e in events if isinstance(e, QueryResult)]
+        rate_limits = [e for e in events if isinstance(e, RateLimitHit)]
+        transient_errors = [e for e in events if isinstance(e, TransientError)]
+        flushes = [e for e in events if isinstance(e, TextFlush)]
+
+        if terminal == "result":
+            assert len(results) == 1
+            assert not kills
+            assert not rate_limits
+            assert not transient_errors
+        elif terminal == "rate_limit":
+            assert len(rate_limits) == 1
+            assert not kills
+            assert not results
+            assert not transient_errors
+            assert any(f.reason == "rate_limit" for f in flushes)
+        elif terminal == "transient":
+            assert len(transient_errors) == 1
+            assert not kills
+            assert not results
+            assert not rate_limits
+            assert any(f.reason in {"assistant_error", "transient_error"} for f in flushes)
+        else:
+            assert len(kills) == 1
+            assert not results
+            assert not rate_limits
+            assert not transient_errors
+            assert any(f.reason == "post_kill" for f in flushes)

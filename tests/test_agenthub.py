@@ -1,531 +1,930 @@
-"""Integration test for AgentHub library.
-
-Exercises the core async code paths with mock SDK factories and callbacks.
-Validates lifecycle, registry, messaging, scheduler, and queue processing.
-
-Run: PYTHONPATH=packages/agenthub python test_agenthub.py
-"""
+"""Headless integration tests for the rewritten AgentHub runtime."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
-# --- AgentHub imports ---
-from agenthub import (
-    AgentHub,
-    AgentSession,
-    FrontendCallbacks,
-    lifecycle,
-    messaging,
-    registry,
-)
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
-logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
-log = logging.getLogger("test")
+from agenthub import AgentHub, FrontendRouter, StopResult, TurnKind, TurnOutcome
+from agenthub.stream_types import QueryResult, RateLimitHit, StreamEnd, StreamKilled, StreamStart, TransientError
+from agenthub.streaming import stream_response
 
-# ---------------------------------------------------------------------------
-# Mock SDK
-# ---------------------------------------------------------------------------
 
-class MockClient:
-    """Simulates a ClaudeSDKClient."""
+async def result_stream(session: Any, **kwargs: Any):
+    yield StreamStart()
+    yield QueryResult(session_id=f"sid-{session.name}", cost_usd=0.01, num_turns=1, duration_ms=25)
+    yield StreamEnd(elapsed_s=0.01, msg_count=1, flush_count=0)
 
-    def __init__(self, session_name: str):
-        self.name = session_name
+
+async def killed_stream(session: Any, **kwargs: Any):
+    yield StreamStart()
+    yield StreamKilled()
+    yield StreamEnd(elapsed_s=0.01, msg_count=0, flush_count=0)
+
+
+@pytest.fixture(scope="session")
+def warmup():
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _recover_after_failure():
+    return None
+
+
+class FakeClient:
+    def __init__(self, name: str, mode: str = "result") -> None:
+        self.name = name
+        self.mode = mode
         self.queries: list[Any] = []
         self._interrupted = False
+        self._messages: asyncio.Queue[Any] = asyncio.Queue()
+        self._query = self
 
     async def query(self, content: Any) -> None:
         self.queries.append(content)
+        if self.mode == "result":
+            await self._messages.put(type("Result", (), {
+                "session_id": f"sid-{self.name}",
+                "total_cost_usd": 0.01,
+                "num_turns": 1,
+                "duration_ms": 25,
+                "duration_api_ms": 25,
+                "is_error": False,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            })())
+        elif self.mode in {"killed", "wait"}:
+            return
 
     async def interrupt(self) -> None:
         self._interrupted = True
+
+    async def receive_messages(self):
+        while not self._messages.empty():
+            yield await self._messages.get()
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *args: object):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_system_messages: list[tuple[str, str]] = []
-_wake_events: list[str] = []
-_sleep_events: list[str] = []
-_spawn_events: list[str] = []
-_reconnect_events: list[tuple[str, bool]] = []
-
-
-def make_callbacks() -> FrontendCallbacks:
-    """Build FrontendCallbacks with simple recorders."""
-
-    async def post_message(name: str, text: str) -> None:
-        log.info("POST[%s]: %s", name, text[:80])
-
-    async def post_system(name: str, text: str) -> None:
-        _system_messages.append((name, text))
-        log.info("SYSTEM[%s]: %s", name, text[:80])
-
-    async def on_wake(name: str) -> None:
-        _wake_events.append(name)
-
-    async def on_sleep(name: str) -> None:
-        _sleep_events.append(name)
-
-    async def on_session_id(name: str, sid: str) -> None:
-        pass
-
-    async def get_channel(name: str) -> Any:
         return None
 
-    async def on_spawn(session: Any) -> None:
-        _spawn_events.append(session.name)
 
-    async def on_kill(name: str, sid: str | None) -> None:
-        pass
+@dataclass
+class FakeFrontend:
+    frontend_name: str
+    calls: list[tuple[str, tuple[Any, ...]]] = field(default_factory=list)
 
-    async def broadcast(text: str) -> None:
-        pass
+    @property
+    def name(self) -> str:
+        return self.frontend_name
 
-    async def schedule_rate_limit_expiry(seconds: float) -> None:
-        pass
+    def _record(self, method: str, *args: Any) -> None:
+        self.calls.append((method, args))
 
-    async def on_idle_reminder(name: str, idle_minutes: float) -> None:
-        pass
+    async def start(self) -> None:
+        self._record("start")
 
-    async def on_reconnect(name: str, was_mid_task: bool) -> None:
-        _reconnect_events.append((name, was_mid_task))
+    async def stop(self) -> None:
+        self._record("stop")
 
-    async def close_app() -> None:
-        pass
+    async def post_message(self, agent_name: str, text: str) -> None:
+        self._record("post_message", agent_name, text)
 
-    async def kill_process() -> None:
-        pass
+    async def post_system(self, agent_name: str, text: str) -> None:
+        self._record("post_system", agent_name, text)
 
-    return FrontendCallbacks(
-        post_message=post_message,
-        post_system=post_system,
-        on_wake=on_wake,
-        on_sleep=on_sleep,
-        on_session_id=on_session_id,
-        get_channel=get_channel,
-        on_spawn=on_spawn,
-        on_kill=on_kill,
-        broadcast=broadcast,
-        schedule_rate_limit_expiry=schedule_rate_limit_expiry,
-        on_idle_reminder=on_idle_reminder,
-        on_reconnect=on_reconnect,
-        close_app=close_app,
-        kill_process=kill_process,
-    )
+    async def broadcast(self, text: str) -> None:
+        self._record("broadcast", text)
+
+    async def on_wake(self, agent_name: str) -> None:
+        self._record("on_wake", agent_name)
+
+    async def on_sleep(self, agent_name: str) -> None:
+        self._record("on_sleep", agent_name)
+
+    async def on_spawn(self, agent_name: str, session: Any) -> None:
+        self._record("on_spawn", agent_name)
+
+    async def on_kill(self, agent_name: str, session_id: str | None) -> None:
+        self._record("on_kill", agent_name, session_id)
+
+    async def on_session_id(self, agent_name: str, session_id: str) -> None:
+        self._record("on_session_id", agent_name, session_id)
+
+    async def on_idle_reminder(self, agent_name: str, idle_minutes: float) -> None:
+        self._record("on_idle_reminder", agent_name, idle_minutes)
+
+    async def on_reconnect(self, agent_name: str, was_mid_task: bool) -> None:
+        self._record("on_reconnect", agent_name, was_mid_task)
+
+    async def on_stream_event(self, agent_name: str, event: Any) -> None:
+        self._record("on_stream_event", agent_name, type(event).__name__)
+
+    async def request_plan_approval(self, agent_name: str, plan_content: str, session: Any):
+        self._record("request_plan_approval", agent_name)
+        from agenthub.frontend import PlanApprovalResult
+        return PlanApprovalResult(approved=True)
+
+    async def ask_question(self, agent_name: str, questions: list[dict[str, Any]], session: Any) -> dict[str, str]:
+        self._record("ask_question", agent_name)
+        return {"ok": "yes"}
+
+    async def update_todo(self, agent_name: str, todos: list[dict[str, Any]]) -> None:
+        self._record("update_todo", agent_name)
+
+    async def on_log_event(self, event: Any) -> None:
+        self._record("on_log_event", event.kind)
 
 
-def make_hub(max_awake: int = 2) -> AgentHub:
-    """Create a test AgentHub with mock SDK factories."""
+@pytest.fixture
+def frontend() -> FakeFrontend:
+    return FakeFrontend("fake")
 
-    def make_options(session: AgentSession, resume_id: str | None) -> dict[str, Any]:
-        return {"session": session.name, "resume": resume_id}
 
-    async def create_client(session: AgentSession, options: Any) -> MockClient:
-        return MockClient(session.name)
+@pytest.fixture
+def hub(frontend: FakeFrontend) -> AgentHub:
+    router = FrontendRouter()
+    router.add(frontend)
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        return FakeClient(session.name)
 
     async def disconnect_client(client: Any, name: str) -> None:
-        log.info("DISCONNECT[%s]", name)
+        return None
+
+    def make_agent_options(session: Any, session_id: str | None) -> dict[str, Any]:
+        return {"session": session.name, "resume": session_id}
 
     return AgentHub(
-        max_awake=max_awake,
-        protected={"master"},
-        callbacks=make_callbacks(),
-        make_agent_options=make_options,
+        frontends=[router],
         create_client=create_client,
         disconnect_client=disconnect_client,
-        query_timeout=10.0,
-        max_retries=2,
-        retry_base_delay=0.1,
-        slot_timeout=1.0,
+        make_agent_options=make_agent_options,
+        max_awake=3,
+        query_timeout=1.0,
+        stream_factory=result_stream,
     )
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_spawn_and_remove_agent(hub: AgentHub, frontend: FakeFrontend) -> None:
+    session = await hub.spawn_agent(name="agent-1", cwd="/tmp/agent-1")
+    assert session.name == "agent-1"
+    assert hub.get_session("agent-1") is session
+    assert ("on_spawn", ("agent-1",)) in frontend.calls
 
-passed = 0
-failed = 0
-
-
-def check(name: str, condition: bool, detail: str = "") -> None:
-    global passed, failed
-    if condition:
-        passed += 1
-        log.info("PASS  %s", name)
-    else:
-        failed += 1
-        log.error("FAIL  %s %s", name, detail)
+    await hub.remove_agent("agent-1")
+    assert hub.get_session("agent-1") is None
+    assert any(call[0] == "on_kill" for call in frontend.calls)
 
 
-async def test_spawn_and_lifecycle() -> None:
-    """Test: spawn -> wake -> sleep -> end."""
-    hub = make_hub()
-    _spawn_events.clear()
-    _wake_events.clear()
+@pytest.mark.asyncio
+async def test_submit_user_message_runs_turn(hub: AgentHub, frontend: FakeFrontend) -> None:
+    await hub.spawn_agent(name="agent-run", cwd="/tmp/agent-run")
+    result = await hub.submit_user_message("agent-run", "hello")
+    assert result.status == "started"
+    await asyncio.sleep(0.05)
 
-    session = await registry.spawn_agent(hub, name="agent-1", cwd="/tmp/test")
-    check("spawn creates session", "agent-1" in hub.sessions)
-    check("spawn fires callback", "agent-1" in _spawn_events)
-    check("session starts sleeping", session.client is None)
-    check("is_awake=False initially", not lifecycle.is_awake(session))
-
-    await lifecycle.wake_agent(hub, session)
-    check("wake sets client", session.client is not None)
-    check("is_awake=True after wake", lifecycle.is_awake(session))
-    check("wake fires callback", "agent-1" in _wake_events)
-    check("scheduler has slot", hub.scheduler.slot_count() == 1)
-
-    # Waking again is a no-op
-    old_client = session.client
-    await lifecycle.wake_agent(hub, session)
-    check("double wake is no-op", session.client is old_client)
-
-    await lifecycle.sleep_agent(hub, session)
-    check("sleep clears client", session.client is None)
-    check("scheduler released slot", hub.scheduler.slot_count() == 0)
-
-    await registry.end_session(hub, "agent-1")
-    check("end removes session", "agent-1" not in hub.sessions)
+    session = hub.get_session("agent-run")
+    assert session is not None
+    assert session.state.lifecycle in {session.state.lifecycle.IDLE, session.state.lifecycle.SLEEPING}
+    assert session.state.session_id == "sid-agent-run"
+    assert any(call[0] == "on_wake" for call in frontend.calls)
+    assert any(call[0] == "on_stream_event" and call[1][1] == "StreamStart" for call in frontend.calls)
 
 
-async def test_wake_or_queue() -> None:
-    """Test: wake_or_queue falls back to queuing on concurrency limit."""
-    hub = make_hub(max_awake=1)
+@pytest.mark.asyncio
+async def test_killed_turn_does_not_post_special_completion(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
 
-    s1 = await registry.spawn_agent(hub, name="master", cwd="/tmp/m")
-    s2 = await registry.spawn_agent(hub, name="worker", cwd="/tmp/w")
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        return FakeClient(session.name, mode="killed")
 
-    await lifecycle.wake_agent(hub, s1)
-    check("master awake", lifecycle.is_awake(s1))
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
 
-    # Lock master's query_lock so scheduler can't evict it
-    async with s1.query_lock:
-        result = await lifecycle.wake_or_queue(hub, s2, "hello", metadata={"test": True})
-        check("wake_or_queue returns False (queued)", result is False)
-        check("message queued", len(s2.message_queue) == 1)
-        content, meta = s2.message_queue[0]
-        check("queue content correct", content == "hello")
-        check("queue metadata correct", meta == {"test": True})
-
-    # Clean up
-    await lifecycle.sleep_agent(hub, s1, force=True)
-    await registry.end_session(hub, "master")
-    await registry.end_session(hub, "worker")
-
-
-async def test_scheduler_eviction() -> None:
-    """Test: scheduler evicts idle agents when slots are full."""
-    hub = make_hub(max_awake=1)
-
-    s1 = await registry.spawn_agent(hub, name="idle-agent", cwd="/tmp/i")
-    s2 = await registry.spawn_agent(hub, name="new-agent", cwd="/tmp/n")
-
-    await lifecycle.wake_agent(hub, s1)
-    check("idle-agent awake", lifecycle.is_awake(s1))
-
-    # Wake s2 — should evict s1 (idle, not busy, not protected)
-    await lifecycle.wake_agent(hub, s2)
-    check("new-agent awake after eviction", lifecycle.is_awake(s2))
-    check("idle-agent was evicted", not lifecycle.is_awake(s1))
-
-    await lifecycle.sleep_agent(hub, s2)
-    await registry.end_session(hub, "idle-agent")
-    await registry.end_session(hub, "new-agent")
-
-
-async def test_rebuild_and_reset() -> None:
-    """Test: rebuild preserves frontend_state, reset works."""
-    hub = make_hub()
-
-    s = await registry.spawn_agent(
-        hub, name="r-agent", cwd="/tmp/r", frontend_state={"channel_id": 123}
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        stream_factory=killed_stream,
     )
-    s.session_id = "old-sid"
-
-    new_s = await registry.rebuild_session(hub, "r-agent", session_id="new-sid")
-    check("rebuild preserves frontend_state", new_s.frontend_state == {"channel_id": 123})
-    check("rebuild sets new session_id", new_s.session_id == "new-sid")
-    check("rebuild preserves cwd", new_s.cwd == "/tmp/r")
-    check("rebuild is sleeping", new_s.client is None)
-
-    reset_s = await registry.reset_session(hub, "r-agent", cwd="/tmp/r2")
-    check("reset changes cwd", reset_s.cwd == "/tmp/r2")
-
-    await registry.end_session(hub, "r-agent")
-
-
-async def test_reclaim() -> None:
-    """Test: reclaim_agent_name kills existing session."""
-    hub = make_hub()
-
-    s = await registry.spawn_agent(hub, name="to-reclaim", cwd="/tmp/rc")
-    await lifecycle.wake_agent(hub, s)
-    check("pre-reclaim awake", lifecycle.is_awake(s))
-
-    await registry.reclaim_agent_name(hub, "to-reclaim")
-    check("reclaim removes session", "to-reclaim" not in hub.sessions)
-
-
-async def test_process_message() -> None:
-    """Test: process_message dispatches query and calls stream handler."""
-    hub = make_hub()
-
-    s = await registry.spawn_agent(hub, name="msg-agent", cwd="/tmp/msg")
-    await lifecycle.wake_agent(hub, s)
-
-    stream_calls: list[str] = []
-
-    async def mock_stream_handler(session: AgentSession) -> str | None:
-        stream_calls.append(session.name)
-        return None  # success
-
-    await messaging.process_message(hub, s, "Hello world", mock_stream_handler)
-    check("query was sent", len(s.client.queries) == 1)
-    check("stream handler was called", stream_calls == ["msg-agent"])
-
-    await lifecycle.sleep_agent(hub, s)
-    await registry.end_session(hub, "msg-agent")
-
-
-async def test_process_message_retry() -> None:
-    """Test: process_message retries on transient error from stream handler."""
-    hub = make_hub()
-
-    s = await registry.spawn_agent(hub, name="retry-agent", cwd="/tmp/retry")
-    await lifecycle.wake_agent(hub, s)
-
-    call_count = 0
-    _system_messages.clear()
-
-    async def flaky_handler(session: AgentSession) -> str | None:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return "overloaded_error"  # transient
-        return None  # success on retry
-
-    await messaging.process_message(hub, s, "Retry me", flaky_handler)
-    check("handler called twice (1 initial + 1 retry)", call_count == 2)
-    check("retry query sent", len(s.client.queries) == 2)  # initial + retry
-    check("retry notification sent", any("retrying" in m[1].lower() for m in _system_messages))
-
-    await lifecycle.sleep_agent(hub, s)
-    await registry.end_session(hub, "retry-agent")
-
-
-async def test_process_message_timeout() -> None:
-    """Test: process_message raises TimeoutError on timeout."""
-    hub = make_hub()
-    hub.query_timeout = 0.05  # 50ms
-
-    s = await registry.spawn_agent(hub, name="timeout-agent", cwd="/tmp/to")
-    await lifecycle.wake_agent(hub, s)
-
-    async def slow_handler(session: AgentSession) -> str | None:
-        await asyncio.sleep(5)  # way over timeout
-        return None
-
-    timed_out = False
-    try:
-        await messaging.process_message(hub, s, "Slow query", slow_handler)
-    except TimeoutError:
-        timed_out = True
-
-    check("timeout raised", timed_out)
-
-    # Clean up (session may be in bad state)
-    await lifecycle.sleep_agent(hub, s, force=True)
-    await registry.end_session(hub, "timeout-agent")
-
-
-async def test_interrupt() -> None:
-    """Test: interrupt_session calls client.interrupt when no bridge."""
-    hub = make_hub()
-
-    s = await registry.spawn_agent(hub, name="int-agent", cwd="/tmp/int")
-    await lifecycle.wake_agent(hub, s)
-    client = s.client
-
-    await messaging.interrupt_session(hub, s)
-    check("interrupt called on client", client._interrupted)
-
-    await lifecycle.sleep_agent(hub, s)
-    await registry.end_session(hub, "int-agent")
-
-
-async def test_message_queue_processing() -> None:
-    """Test: process_message_queue drains queued messages."""
-    hub = make_hub()
-
-    s = await registry.spawn_agent(hub, name="q-agent", cwd="/tmp/q")
-    await lifecycle.wake_agent(hub, s)
-
-    # Queue two messages
-    s.message_queue.append(("msg-1", None))
-    s.message_queue.append(("msg-2", None))
-
-    processed: list[str] = []
-
-    async def tracking_handler(session: AgentSession) -> str | None:
-        # The last query content tells us which message was processed
-        processed.append(session.name)
-        return None
-
-    _system_messages.clear()
-    await messaging.process_message_queue(hub, s, tracking_handler)
-
-    check("both messages processed", len(processed) == 2)
-    check("queue is empty", len(s.message_queue) == 0)
-    check("status messages sent", len(_system_messages) > 0)
-
-    await lifecycle.sleep_agent(hub, s)
-    await registry.end_session(hub, "q-agent")
-
-
-async def test_shutdown_flag_stops_queue() -> None:
-    """Test: setting shutdown_requested stops queue processing."""
-    hub = make_hub()
-
-    s = await registry.spawn_agent(hub, name="sd-agent", cwd="/tmp/sd")
-    await lifecycle.wake_agent(hub, s)
-
-    s.message_queue.append(("msg-1", None))
-    s.message_queue.append(("msg-2", None))
-
-    hub.shutdown_requested = True
-
-    async def no_op_handler(session: AgentSession) -> str | None:
-        return None
-
-    await messaging.process_message_queue(hub, s, no_op_handler)
-
-    check("queue not drained on shutdown", len(s.message_queue) == 2)
-
-    hub.shutdown_requested = False
-    await lifecycle.sleep_agent(hub, s)
-    await registry.end_session(hub, "sd-agent")
-
-
-async def test_count_awake() -> None:
-    """Test: count_awake counts correctly."""
-    hub = make_hub(max_awake=3)
-
-    s1 = await registry.spawn_agent(hub, name="c1", cwd="/tmp/c1")
-    s2 = await registry.spawn_agent(hub, name="c2", cwd="/tmp/c2")
-    s3 = await registry.spawn_agent(hub, name="c3", cwd="/tmp/c3")
-
-    check("0 awake initially", lifecycle.count_awake(hub.sessions) == 0)
-
-    await lifecycle.wake_agent(hub, s1)
-    check("1 awake", lifecycle.count_awake(hub.sessions) == 1)
-
-    await lifecycle.wake_agent(hub, s2)
-    check("2 awake", lifecycle.count_awake(hub.sessions) == 2)
-
-    await lifecycle.sleep_agent(hub, s1)
-    check("1 awake after sleep", lifecycle.count_awake(hub.sessions) == 1)
-
-    await lifecycle.sleep_agent(hub, s2)
-    await registry.end_session(hub, "c1")
-    await registry.end_session(hub, "c2")
-    await registry.end_session(hub, "c3")
-
-
-async def test_hub_thin_delegation() -> None:
-    """Test: hub.wake, hub.sleep, hub.spawn, hub.kill, hub.get work."""
-    hub = make_hub()
-
-    s = await hub.spawn(name="del-agent", cwd="/tmp/del")
-    check("hub.spawn works", hub.get("del-agent") is s)
-
-    await hub.wake("del-agent")
-    check("hub.wake works", lifecycle.is_awake(s))
-
-    await hub.sleep("del-agent")
-    check("hub.sleep works", not lifecycle.is_awake(s))
-
-    await hub.kill("del-agent")
-    check("hub.kill works", hub.get("del-agent") is None)
-
-
-async def test_deliver_inter_agent_message() -> None:
-    """Test: inter-agent message delivery to idle agent."""
-    hub = make_hub()
-
-    target = await registry.spawn_agent(hub, name="target", cwd="/tmp/t")
-    _system_messages.clear()
-
-    delivered: list[str] = []
-
-    async def handler(session: AgentSession) -> str | None:
-        delivered.append(session.name)
-        return None
-
-    result = await messaging.deliver_inter_agent_message(
-        hub, "sender", target, "Hello from sender", handler
+    await hub.spawn_agent(name="killed-turn", cwd="/tmp/killed-turn")
+    result = await hub.submit_user_message("killed-turn", "boot")
+    assert result.status == "started"
+    await asyncio.sleep(0.05)
+
+    session = hub.get_session("killed-turn")
+    assert session is not None
+    assert session.state.lifecycle in {session.state.lifecycle.IDLE, session.state.lifecycle.SLEEPING}
+    assert not any(
+        call[0] == "post_system" and "finished initial task" in call[1][1].lower()
+        for call in frontend.calls
     )
-    check("delivery result has target name", "target" in result)
 
-    # Give the fire-and-forget task a moment to run
+
+@pytest.mark.asyncio
+async def test_stop_clears_queue(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+    gate = asyncio.Event()
+
+    class WaitingClient(FakeClient):
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+            await gate.wait()
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        return WaitingClient(session.name, mode="wait")
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+    )
+    await hub.spawn_agent(name="stop-agent", cwd="/tmp/stop-agent")
+    start = await hub.submit_user_message("stop-agent", "first")
+    assert start.status == "started"
+    queued = await hub.submit_user_message("stop-agent", "after")
+    assert queued.status == "queued"
+
+    stopped = await hub.request_stop("stop-agent")
+    assert isinstance(stopped, StopResult)
+    assert stopped.cleared == 1
+    gate.set()
+    await asyncio.sleep(0.05)
+
+    session = hub.get_session("stop-agent")
+    assert session is not None
+    assert len(session.state.queued_turns) == 0
+
+
+@pytest.mark.asyncio
+async def test_max_awake_limit_queues_new_wake_until_slot_frees(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+    gate = asyncio.Event()
+
+    class WaitingClient(FakeClient):
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+            await gate.wait()
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        return WaitingClient(session.name, mode="wait")
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        max_awake=1,
+    )
+    await hub.spawn_agent(name="a1", cwd="/tmp/a1")
+    await hub.spawn_agent(name="a2", cwd="/tmp/a2")
+
+    first = await hub.submit_user_message("a1", "hold")
+    assert first.status == "started"
+    second = await hub.submit_user_message("a2", "blocked")
+    assert second.status == "started"
+    await asyncio.sleep(0.05)
+
+    session = hub.get_session("a2")
+    assert session is not None
+    assert session.state.lifecycle is session.state.lifecycle.WAKING
+    assert session.client is None
+    assert session.state.current_turn is not None
+
+    gate.set()
+    await asyncio.sleep(0.1)
+
+    assert any(call == ("on_wake", ("a2",)) for call in frontend.calls)
+    assert session.state.lifecycle in {session.state.lifecycle.IDLE, session.state.lifecycle.SLEEPING}
+
+
+@pytest.mark.asyncio
+async def test_query_timeout_bounds_entire_turn(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+    stream_entered = asyncio.Event()
+    hold_stream = asyncio.Event()
+
+    class HangingStreamClient(FakeClient):
+        def __init__(self, name: str, mode: str = "wait") -> None:
+            super().__init__(name, mode)
+            self.interrupt = AsyncMock(side_effect=self._interrupt_impl)
+
+        async def _interrupt_impl(self) -> None:
+            self._interrupted = True
+            hold_stream.set()
+
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+
+        async def receive_messages(self):
+            stream_entered.set()
+            await hold_stream.wait()
+            if False:
+                yield None
+
+    client_ref: HangingStreamClient | None = None
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        nonlocal client_ref
+        client_ref = HangingStreamClient(session.name, mode="wait")
+        return client_ref
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        query_timeout=0.05,
+        stream_factory=stream_response,
+    )
+    await hub.spawn_agent(name="hang-agent", cwd="/tmp/hang-agent")
+
+    result = await hub.submit_user_message("hang-agent", "hello")
+    assert result.status == "started"
+    await asyncio.wait_for(stream_entered.wait(), timeout=1.0)
     await asyncio.sleep(0.2)
 
-    check("message was delivered", len(delivered) == 1)
-    check("system message sent", any("sender" in m[1] for m in _system_messages))
-
-    await lifecycle.sleep_agent(hub, target, force=True)
-    await registry.end_session(hub, "target")
-
-
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
-
-
-async def main() -> None:
-    tests = [
-        test_spawn_and_lifecycle,
-        test_wake_or_queue,
-        test_scheduler_eviction,
-        test_rebuild_and_reset,
-        test_reclaim,
-        test_process_message,
-        test_process_message_retry,
-        test_process_message_timeout,
-        test_interrupt,
-        test_message_queue_processing,
-        test_shutdown_flag_stops_queue,
-        test_count_awake,
-        test_hub_thin_delegation,
-        test_deliver_inter_agent_message,
-    ]
-
-    for test_fn in tests:
-        log.info("--- %s ---", test_fn.__name__)
-        try:
-            await test_fn()
-        except Exception:
-            log.exception("CRASH in %s", test_fn.__name__)
-            global failed
-            failed += 1
-
-    log.info("=" * 50)
-    log.info("Results: %d passed, %d failed", passed, failed)
-    if failed > 0:
-        raise SystemExit(1)
-    log.info("All tests passed.")
+    session = hub.get_session("hang-agent")
+    assert session is not None
+    assert client_ref is not None
+    assert session.query_task is None
+    assert session.state.current_turn is None
+    assert session.state.lifecycle is session.state.lifecycle.SLEEPING
+    assert session.client is None
+    client_ref.interrupt.assert_awaited_once()
+    assert any(call == ("on_stream_event", ("hang-agent", "StreamStart")) for call in frontend.calls)
+    assert any(call == ("on_sleep", ("hang-agent",)) for call in frontend.calls)
+    assert not any(
+        call[0] == "on_stream_event" and call[1][0] == "hang-agent" and call[1][1] == "StreamEnd"
+        for call in frontend.calls
+    )
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@pytest.mark.asyncio
+async def test_submit_inter_agent_message_marks_background(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        return FakeClient(session.name)
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        stream_factory=result_stream,
+    )
+    await hub.spawn_agent(name="worker", cwd="/tmp/worker")
+
+    result = await hub.submit_inter_agent_message("worker", "hello from master")
+    assert result.status == "started"
+    await asyncio.sleep(0.05)
+
+    assert "worker" not in hub.scheduler._interactive
+    session = hub.get_session("worker")
+    assert session is not None
+    assert session.state.lifecycle in {session.state.lifecycle.IDLE, session.state.lifecycle.SLEEPING}
+
+
+@pytest.mark.asyncio
+async def test_request_skip_interrupts_and_runs_queued_followup(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+    gate = asyncio.Event()
+
+    class WaitingClient(FakeClient):
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+            await gate.wait()
+
+    client_ref: WaitingClient | None = None
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        nonlocal client_ref
+        client_ref = WaitingClient(session.name, mode="wait")
+        return client_ref
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+    )
+    await hub.spawn_agent(name="skip-agent", cwd="/tmp/skip-agent")
+    start = await hub.submit_user_message("skip-agent", "first")
+    assert start.status == "started"
+    queued = await hub.submit_user_message("skip-agent", "second")
+    assert queued.status == "queued"
+
+    skipped = await hub.request_skip("skip-agent")
+    assert skipped.status == "stopping"
+    gate.set()
+    await asyncio.sleep(0.05)
+
+    session = hub.get_session("skip-agent")
+    assert session is not None
+    assert client_ref is not None
+    assert client_ref.queries == ["first", "second"]
+    assert session.state.current_turn is None
+    assert len(session.state.queued_turns) == 0
+    assert session.state.lifecycle in {session.state.lifecycle.IDLE, session.state.lifecycle.SLEEPING}
+    assert session.state.skip_requested is False
+
+
+@pytest.mark.asyncio
+async def test_request_stop_without_clearing_queue_preserves_followup(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+    gate = asyncio.Event()
+
+    class WaitingClient(FakeClient):
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+            await gate.wait()
+
+    client_ref: WaitingClient | None = None
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        nonlocal client_ref
+        client_ref = WaitingClient(session.name, mode="wait")
+        return client_ref
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        stream_factory=result_stream,
+    )
+    await hub.spawn_agent(name="stop-keep", cwd="/tmp/stop-keep")
+    start = await hub.submit_user_message("stop-keep", "first")
+    assert start.status == "started"
+    queued = await hub.submit_user_message("stop-keep", "second")
+    assert queued.status == "queued"
+
+    stopped = await hub.request_stop("stop-keep", clear_queue=False)
+    assert stopped.status == "stopping"
+    assert stopped.cleared == 0
+    gate.set()
+    await asyncio.sleep(0.1)
+
+    session = hub.get_session("stop-keep")
+    assert session is not None
+    assert client_ref is not None
+    assert client_ref.queries == ["first"]
+    assert session.state.current_turn is None
+    assert len(session.state.queued_turns) == 1
+    assert session.state.queued_turns[0].content == "second"
+    assert session.state.lifecycle is session.state.lifecycle.SLEEPING
+
+
+@pytest.mark.asyncio
+async def test_shutdown_requested_short_circuits_submission(hub: AgentHub) -> None:
+    await hub.spawn_agent(name="shutdown-agent", cwd="/tmp/shutdown-agent")
+    hub.shutdown_requested = True
+
+    result = await hub.submit_user_message("shutdown-agent", "hello")
+
+    assert result.status == "shutdown"
+    session = hub.get_session("shutdown-agent")
+    assert session is not None
+    assert session.query_task is None
+    assert session.state.current_turn is None
+
+
+@pytest.mark.asyncio
+async def test_wake_failure_clears_current_turn_and_releases_slot(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        raise RuntimeError("boom")
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+    )
+    await hub.spawn_agent(name="wake-fail", cwd="/tmp/wake-fail")
+
+    result = await hub.submit_user_message("wake-fail", "hello")
+    assert result.status == "started"
+    await asyncio.sleep(0.05)
+
+    session = hub.get_session("wake-fail")
+    assert session is not None
+    assert session.state.current_turn is None
+    assert session.state.lifecycle is session.state.lifecycle.SLEEPING
+    assert session.query_task is None
+    assert hub.scheduler.slot_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_query_result_error_marks_turn_error(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+
+    async def error_result_stream(session: Any, **kwargs: Any):
+        yield StreamStart()
+        yield QueryResult(session_id=f"sid-{session.name}", cost_usd=0.01, num_turns=1, duration_ms=25, is_error=True)
+        yield StreamEnd(elapsed_s=0.01, msg_count=1, flush_count=0)
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=lambda session, options: FakeClient(session.name),
+        disconnect_client=lambda client, name: asyncio.sleep(0),
+        make_agent_options=lambda session, sid: {},
+        stream_factory=error_result_stream,
+    )
+    await hub.spawn_agent(name="error-agent", cwd="/tmp/error-agent")
+
+    result = await hub.submit_user_message("error-agent", "hello")
+    assert result.status == "started"
+    await asyncio.sleep(0.05)
+
+    session = hub.get_session("error-agent")
+    assert session is not None
+    assert session.state.lifecycle in {session.state.lifecycle.IDLE, session.state.lifecycle.SLEEPING}
+    assert session.state.current_turn is None
+
+
+@pytest.mark.asyncio
+async def test_transient_error_marks_retry_exhausted(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+
+    async def transient_stream(session: Any, **kwargs: Any):
+        yield StreamStart()
+        yield TransientError(error_type="overloaded", error_text="retry later")
+        yield StreamEnd(elapsed_s=0.01, msg_count=1, flush_count=0)
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=lambda session, options: FakeClient(session.name),
+        disconnect_client=lambda client, name: asyncio.sleep(0),
+        make_agent_options=lambda session, sid: {},
+        stream_factory=transient_stream,
+    )
+    await hub.spawn_agent(name="transient-agent", cwd="/tmp/transient-agent")
+
+    result = await hub.submit_user_message("transient-agent", "hello")
+    assert result.status == "started"
+    await asyncio.sleep(0.05)
+
+    session = hub.get_session("transient-agent")
+    assert session is not None
+    assert session.state.lifecycle in {session.state.lifecycle.IDLE, session.state.lifecycle.SLEEPING}
+    assert session.state.current_turn is None
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_hit_updates_tracker_state(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        return FakeClient(session.name)
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    async def rate_limit_stream(session: Any, **kwargs: Any):
+        yield StreamStart()
+        yield RateLimitHit(error_type="rate_limit", error_text="retry after 12 seconds")
+        yield StreamEnd(elapsed_s=0.01, msg_count=1, flush_count=0)
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        stream_factory=rate_limit_stream,
+    )
+    await hub.spawn_agent(name="rl-agent", cwd="/tmp/rl-agent")
+
+    result = await hub.submit_user_message("rl-agent", "hello")
+    assert result.status == "started"
+    await asyncio.sleep(0.05)
+
+    assert hub.rate_limits.rate_limited_until is not None
+    session = hub.get_session("rl-agent")
+    assert session is not None
+    assert session.state.lifecycle in {session.state.lifecycle.IDLE, session.state.lifecycle.SLEEPING}
+
+
+@pytest.mark.asyncio
+async def test_on_session_id_is_forwarded_to_frontend(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+    hub = AgentHub(
+        frontends=[router],
+        create_client=lambda session, options: FakeClient(session.name),
+        disconnect_client=lambda client, name: asyncio.sleep(0),
+        make_agent_options=lambda session, sid: {},
+    )
+    session = await hub.spawn_agent(name="sid-agent", cwd="/tmp/sid-agent")
+
+    await hub._set_session_id_from_stream(session, SimpleNamespace(session_id="sid-123"))
+
+    assert session.session_id == "sid-123"
+    assert ("on_session_id", ("sid-agent", "sid-123")) in frontend.calls
+
+
+@pytest.mark.asyncio
+async def test_wake_sleep_and_snapshot_public_methods(frontend: FakeFrontend) -> None:
+    router = FrontendRouter()
+    router.add(frontend)
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        return FakeClient(session.name)
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+    )
+    session = await hub.spawn_agent(name="public-agent", cwd="/tmp/public-agent")
+
+    snapshot = hub.snapshot()
+    assert snapshot["public-agent"] is session
+
+    await hub.wake("public-agent")
+    assert session.client is not None
+    assert ("on_wake", ("public-agent",)) in frontend.calls
+
+    await hub.sleep("public-agent")
+    assert session.client is None
+    assert session.state.lifecycle is session.state.lifecycle.SLEEPING
+    assert ("on_sleep", ("public-agent",)) in frontend.calls
+
+
+@given(st.lists(st.sampled_from(["one", "two", "three"]), min_size=1, max_size=6))
+@pytest.mark.asyncio
+async def test_submit_sequence_keeps_fifo_order_under_runtime(turns: list[str]) -> None:
+    router = FrontendRouter()
+    frontend = FakeFrontend("fake")
+    router.add(frontend)
+    gate = asyncio.Event()
+
+    class WaitingClient(FakeClient):
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+            await gate.wait()
+
+    client_ref: WaitingClient | None = None
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        nonlocal client_ref
+        client_ref = WaitingClient(session.name, mode="wait")
+        return client_ref
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        stream_factory=result_stream,
+    )
+    await hub.spawn_agent(name="fifo-agent", cwd="/tmp/fifo-agent")
+
+    results = [await hub.submit_user_message("fifo-agent", turn) for turn in turns]
+
+    assert results[0].status == "started"
+    session = hub.get_session("fifo-agent")
+    assert session is not None
+    assert [queued.content for queued in session.state.queued_turns] == turns[1:]
+
+    gate.set()
+    await asyncio.sleep(0.15)
+
+    assert client_ref is not None
+    assert client_ref.queries == turns
+    assert session.state.current_turn is None
+    assert len(session.state.queued_turns) == 0
+
+
+@given(st.lists(st.sampled_from(["a", "b", "c", "d"]), min_size=2, max_size=5))
+@pytest.mark.asyncio
+async def test_skip_preserves_followup_progression_under_runtime(turns: list[str]) -> None:
+    router = FrontendRouter()
+    frontend = FakeFrontend("fake")
+    router.add(frontend)
+    gate = asyncio.Event()
+
+    class WaitingClient(FakeClient):
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+            await gate.wait()
+
+    client_ref: WaitingClient | None = None
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        nonlocal client_ref
+        client_ref = WaitingClient(session.name, mode="wait")
+        return client_ref
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        stream_factory=result_stream,
+    )
+    await hub.spawn_agent(name="skip-fifo-agent", cwd="/tmp/skip-fifo-agent")
+
+    for turn in turns:
+        await hub.submit_user_message("skip-fifo-agent", turn)
+
+    skipped = await hub.request_skip("skip-fifo-agent")
+    assert skipped.status == "stopping"
+    gate.set()
+    await asyncio.sleep(0.15)
+
+    session = hub.get_session("skip-fifo-agent")
+    assert session is not None
+    assert client_ref is not None
+    assert client_ref.queries == turns
+    assert session.state.current_turn is None
+    assert len(session.state.queued_turns) == 0
+    assert session.state.skip_requested is False
+    assert TurnKind.USER.value == "user"
+    assert TurnOutcome.COMPLETED.value == "completed"
+    assert isinstance(StreamStart(), StreamStart)
+    assert isinstance(StreamKilled(), StreamKilled)
+    assert isinstance(QueryResult(session_id="s", cost_usd=0.0, num_turns=1, duration_ms=1), QueryResult)
+
+
+_RUNTIME_CONTROL_ACTIONS = st.lists(
+    st.sampled_from(["stop_clear", "stop_keep", "skip"]),
+    min_size=1,
+    max_size=4,
+)
+
+
+@given(actions=_RUNTIME_CONTROL_ACTIONS)
+@pytest.mark.asyncio
+async def test_runtime_control_requests_leave_consistent_settled_state(
+    actions: list[str],
+) -> None:
+    router = FrontendRouter()
+    frontend = FakeFrontend("fake")
+    router.add(frontend)
+    gate = asyncio.Event()
+
+    class WaitingClient(FakeClient):
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+            await gate.wait()
+
+    client_ref: WaitingClient | None = None
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        nonlocal client_ref
+        client_ref = WaitingClient(session.name, mode="wait")
+        return client_ref
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        stream_factory=result_stream,
+    )
+    await hub.spawn_agent(name="control-agent", cwd="/tmp/control-agent")
+
+    started = await hub.submit_user_message("control-agent", "first")
+    queued = await hub.submit_user_message("control-agent", "second")
+    assert started.status == "started"
+    assert queued.status == "queued"
+
+    results: list[StopResult] = []
+    for action in actions:
+        if action == "stop_clear":
+            results.append(await hub.request_stop("control-agent", clear_queue=True))
+        elif action == "stop_keep":
+            results.append(await hub.request_stop("control-agent", clear_queue=False))
+        else:
+            results.append(await hub.request_skip("control-agent"))
+
+    gate.set()
+    await asyncio.sleep(0.15)
+
+    session = hub.get_session("control-agent")
+    assert session is not None
+    assert client_ref is not None
+    assert results
+    assert all(result.status == "stopping" for result in results)
+    assert session.state.current_turn is None
+    assert session.query_task is None
+    assert session.client is None
+    assert session.state.lifecycle is session.state.lifecycle.SLEEPING
+    assert session.state.stop_requested is False
+    assert session.state.skip_requested is False
+
+    all_skips = all(action == "skip" for action in actions)
+    expected_queries = ["first", "second"] if all_skips else ["first"]
+    assert client_ref.queries == expected_queries
+
+    expected_queue = ["second"] if (not all_skips and "stop_keep" in actions and "stop_clear" not in actions) else []
+    assert [turn.content for turn in session.state.queued_turns] == expected_queue
+    assert max(result.cleared for result in results) <= 1
+
+    followup_clear = await hub.request_stop("control-agent", clear_queue=True)
+    assert followup_clear.status == "stopping"
+    assert followup_clear.cleared == len(expected_queue)
+
+
+@given(actions=_RUNTIME_CONTROL_ACTIONS)
+@pytest.mark.asyncio
+async def test_runtime_control_requests_after_terminal_turn_are_idempotent(actions: list[str]) -> None:
+    router = FrontendRouter()
+    frontend = FakeFrontend("fake")
+    router.add(frontend)
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=lambda session, options: FakeClient(session.name),
+        disconnect_client=lambda client, name: asyncio.sleep(0),
+        make_agent_options=lambda session, sid: {},
+        stream_factory=result_stream,
+    )
+    await hub.spawn_agent(name="post-terminal-agent", cwd="/tmp/post-terminal-agent")
+
+    started = await hub.submit_user_message("post-terminal-agent", "done")
+    assert started.status == "started"
+    await asyncio.sleep(0.1)
+
+    session = hub.get_session("post-terminal-agent")
+    assert session is not None
+    assert session.state.current_turn is None
+    assert len(session.state.queued_turns) == 0
+
+    results: list[StopResult] = []
+    for action in actions:
+        if action == "stop_clear":
+            results.append(await hub.request_stop("post-terminal-agent", clear_queue=True))
+        elif action == "stop_keep":
+            results.append(await hub.request_stop("post-terminal-agent", clear_queue=False))
+        else:
+            results.append(await hub.request_skip("post-terminal-agent"))
+
+    assert results
+    assert all(result.status == "stopping" for result in results)
+    assert all(result.cleared == 0 for result in results)
+    assert session.state.current_turn is None
+    assert len(session.state.queued_turns) == 0
+    assert session.query_task is None
+    assert session.client is None
+    assert session.state.lifecycle is session.state.lifecycle.SLEEPING

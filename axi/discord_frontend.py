@@ -123,58 +123,7 @@ class DiscordFrontend:
     async def update_todo(self, agent_name: str, todos: list[dict[str, Any]]) -> None:
         pass
 
-    # --- Channel management ---
-
-    async def ensure_channel(self, agent_name: str, cwd: str | None = None) -> Any:
-        from axi.channels import ensure_agent_channel
-
-        return await ensure_agent_channel(agent_name, cwd=cwd)
-
-    async def move_to_killed(self, agent_name: str) -> None:
-        from axi.channels import move_channel_to_killed
-
-        await move_channel_to_killed(agent_name)
-
-    async def get_channel(self, agent_name: str) -> Any:
-        from axi.channels import get_agent_channel
-
-        return await get_agent_channel(agent_name)
-
-    # --- Session persistence ---
-
-    async def save_session_metadata(self, agent_name: str, session: Any) -> None:
-        from axi.agents import _set_session_id  # pyright: ignore[reportPrivateUsage]
-
-        if session.session_id:
-            await _set_session_id(session, session.session_id)
-
-    async def reconstruct_sessions(self) -> list[dict[str, Any]]:
-        from axi.agents import reconstruct_agents_from_channels
-
-        await reconstruct_agents_from_channels()
-        return []  # Reconstruction populates agents dict directly
-
     # --- Event log integration ---
 
     async def on_log_event(self, event: LogEvent) -> None:
         pass  # Discord doesn't use the event log (yet)
-
-    # --- Shutdown ---
-
-    async def send_goodbye(self) -> None:
-        from axi.channels import get_master_channel
-
-        master_ch = await get_master_channel()
-        if master_ch:
-            await master_ch.send("*System:* Shutting down — see you soon!")
-
-    async def close_app(self) -> None:
-        from axi.tracing import shutdown_tracing
-
-        shutdown_tracing()
-        await self._bot.close()
-
-    async def kill_process(self) -> None:
-        from agenthub.shutdown import kill_supervisor
-
-        kill_supervisor()

@@ -1,10 +1,19 @@
-"""Tests for agenthub.types and agenthub package exports."""
+"""Tests for agenthub types and top-level exports."""
 
 from __future__ import annotations
 
 import pytest
 
-from agenthub import BackgroundTaskSet, ConcurrencyLimitError, FrontendCallbacks, ProcmuxProcessConnection
+from agenthub import (
+    AgentHub,
+    BackgroundTaskSet,
+    ConcurrencyLimitError,
+    FrontendRouter,
+    LifecycleState,
+    ProcmuxProcessConnection,
+    TurnKind,
+    TurnOutcome,
+)
 from agenthub.types import ConcurrencyLimitError as DirectImport
 
 
@@ -24,7 +33,11 @@ class TestConcurrencyLimitError:
 
 class TestPackageExports:
     def test_all_exports_importable(self) -> None:
+        assert AgentHub is not None
         assert BackgroundTaskSet is not None
         assert ConcurrencyLimitError is not None
-        assert FrontendCallbacks is not None
+        assert FrontendRouter is not None
+        assert LifecycleState is not None
+        assert TurnKind is not None
+        assert TurnOutcome is not None
         assert ProcmuxProcessConnection is not None
