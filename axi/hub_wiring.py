@@ -44,7 +44,8 @@ def _make_agent_options(session: AgentSession, resume_id: str | None) -> Any:
     """
     from axi.agents import make_stderr_callback
 
-    _, resolved_model, resolved_env = config.get_resolved_model()
+    selected_model = session.model or config.get_model()
+    resolved_model, resolved_env = config.get_model_runtime(selected_model)
     base_env = {
         "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "100",
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
