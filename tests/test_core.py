@@ -20,36 +20,36 @@ def test_basic_response(discord: Discord, master_channel: str):
 
 
 def test_status_command(discord: Discord, master_channel: str):
-    """Test 2: //status returns agent info."""
+    """Test 2: /status returns agent info."""
     msgs = discord.send_and_wait(
-        master_channel, "// status", sentinel=False, timeout=15.0
+        master_channel, "/status", sentinel=False, timeout=15.0
     )
     text = discord.bot_response_text(msgs)
-    # //status should mention the agent name and state
+    # /status should mention the agent name and state
     assert "axi-master" in text.lower() or "master" in text.lower()
 
 
 def test_debug_toggle(discord: Discord, master_channel: str):
-    """Test 3: //debug toggles debug mode."""
+    """Test 3: /debug toggles debug mode."""
     # Toggle once
     msgs = discord.send_and_wait(
-        master_channel, "// debug", sentinel=False, timeout=15.0
+        master_channel, "/debug", sentinel=False, timeout=15.0
     )
     text = discord.bot_response_text(msgs)
     assert "debug mode" in text.lower()
 
     # Toggle again
     msgs = discord.send_and_wait(
-        master_channel, "// debug", sentinel=False, timeout=15.0
+        master_channel, "/debug", sentinel=False, timeout=15.0
     )
     text = discord.bot_response_text(msgs)
     assert "debug mode" in text.lower()
 
 
 def test_clear_context(discord: Discord, master_channel: str):
-    """Test 5: //clear confirms context cleared."""
-    msg_id = discord.send(master_channel, "// clear")
-    # //clear sends /clear to agent and also posts "Sent /clear to agent."
+    """Test 5: /clear confirms context cleared."""
+    msg_id = discord.send(master_channel, "/clear")
+    # /clear sends /clear to agent and also posts confirmation.
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         msgs = discord.history(master_channel, limit=5, after=msg_id)
@@ -63,9 +63,9 @@ def test_clear_context(discord: Discord, master_channel: str):
 
 
 def test_compact_context(discord: Discord, master_channel: str):
-    """Test 6: //compact shows token count."""
-    msg_id = discord.send(master_channel, "// compact")
-    # //compact triggers API compaction. Poll until we see the result.
+    """Test 6: /compact shows token count."""
+    msg_id = discord.send(master_channel, "/compact")
+    # /compact triggers API compaction. Poll until we see the result.
     deadline = time.monotonic() + 60
     text = ""
     while time.monotonic() < deadline:
@@ -301,7 +301,7 @@ def test_auto_sleep_and_wake(discord: Discord, master_channel: str):
         master_channel, "// status", sentinel=False, timeout=15.0
     )
     status_text = discord.bot_response_text(status_msgs)
-    # Note: //status shows master's status. We just verify the agent auto-slept
+    # Note: /status shows master's status. We just verify the agent auto-slept
     # by sending it a message and checking it wakes up.
 
     # Auto-wake: send a message to the sleeping agent

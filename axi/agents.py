@@ -184,7 +184,7 @@ def _wrap_content_with_flowchart(content: MessageContent, session: AgentSession)
     """Transform message content to route through a configured FlowCoder wrapper.
 
     - Non-string content (image blocks): returned as-is
-    - //raw prefix: stripped and returned without wrapping
+    - /raw prefix: stripped and returned without wrapping
     - Explicit /commands: returned as-is unless using the legacy soul wrapper
     - AXI_FC_WRAP=off/empty: returned as-is
     - AXI_FC_WRAP=soul: legacy /soul and /soul-flow behavior
@@ -200,9 +200,9 @@ def _wrap_content_with_flowchart(content: MessageContent, session: AgentSession)
 
     raw = _strip_ts(content)
 
-    # //raw bypass — strip prefix and send directly
-    if raw.startswith("//raw"):
-        return raw[5:].lstrip() if len(raw) > 5 else raw
+    # /raw bypass — strip prefix and send directly
+    if raw.startswith("/raw"):
+        return raw[4:].lstrip() if len(raw) > 4 else raw
 
     if wrap_name != "soul":
         if raw.startswith("/") or not _command_exists(wrap_name):
@@ -1797,6 +1797,9 @@ async def process_message_queue(session: AgentSession) -> None:
             attributes={"agent.name": session.name, "queue.size": len(session.message_queue)},
         ).end()  # mark event; individual messages are traced via process_message
     while session.message_queue:
+        if session.state.stop_requested:
+            session.state.stop_requested = False
+            break
         if hub and hub.shutdown_requested:
             log.info("Shutdown requested \u2014 not processing further queued messages for '%s'", session.name)
             break
@@ -1862,6 +1865,7 @@ async def process_message_queue(session: AgentSession) -> None:
                 )
             finally:
                 session.activity = ActivityState(phase="idle")
+    session.state.stop_requested = False
 
 
 # ---------------------------------------------------------------------------

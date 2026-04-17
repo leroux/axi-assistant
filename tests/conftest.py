@@ -11,12 +11,12 @@ import pytest
 from .helpers import Discord
 
 AXI_PY_DIR = Path(__file__).parent.parent
-WORKTREE_DIR = AXI_PY_DIR.parent
-DATA_DIR = WORKTREE_DIR.parent / f"{WORKTREE_DIR.name}-data"
-TEST_CONFIG = Path.home() / ".config/axi/test-config.json"
-INSTANCE_NAME = "smoke-test"
 REPO_DIR = Path(__file__).resolve().parent.parent
-INSTANCE_DIR = Path(os.environ.get("AXI_TEST_INSTANCE_DIR", str(REPO_DIR.parent / "axi-tests" / "smoke-test")))
+INSTANCE_NAME = os.environ.get("AXI_TEST_INSTANCE_NAME", "smoke-test")
+INSTANCE_DIR = Path(os.environ.get("AXI_TEST_INSTANCE_DIR", str(REPO_DIR)))
+WORKTREE_DIR = INSTANCE_DIR
+DATA_DIR = INSTANCE_DIR.parent / f"{INSTANCE_DIR.name}-data"
+TEST_CONFIG = Path.home() / ".config/axi/test-config.json"
 DEFAULT_TIMEOUT = 120.0
 SPAWN_TIMEOUT = 180.0
 

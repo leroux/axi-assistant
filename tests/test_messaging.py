@@ -87,7 +87,7 @@ def test_code_blocks(discord: Discord, master_channel: str):
 
 
 def test_status_while_busy(discord: Discord, master_channel: str):
-    """Test 26: //status during processing shows active state."""
+    """Test 26: /status during processing shows active state."""
     # Send a slow query
     msg_id = discord.send(
         master_channel,
@@ -96,9 +96,9 @@ def test_status_while_busy(discord: Discord, master_channel: str):
     # Wait a moment for processing to start
     time.sleep(3)
 
-    # Send //status while busy
+    # Send /status while busy
     status_msgs = discord.send_and_wait(
-        master_channel, "// status", sentinel=False, timeout=15.0
+        master_channel, "/status", sentinel=False, timeout=15.0
     )
     status_text = discord.bot_response_text(status_msgs)
 
@@ -106,7 +106,7 @@ def test_status_while_busy(discord: Discord, master_channel: str):
     passed, reason = llm_assert(
         status_text,
         "The status output shows the agent is currently active, busy, or writing a response (not idle/sleeping)",
-        context="Sent //status while bot was processing a long query",
+        context="Sent /status while bot was processing a long query",
     )
     # Don't assert — this is timing-dependent. Just check we got a response.
     assert len(status_text) > 0, "No status response received"
@@ -209,10 +209,10 @@ def test_long_output_splitting(discord: Discord, master_channel: str):
 
 
 def test_clear_while_busy(discord: Discord, master_channel: str):
-    """Test 27: //clear while agent is busy queues the clear command.
+    """Test 27: /clear while agent is busy queues the clear command."""
 
-    Rust bot: text command `// clear` sends /clear to agent and responds
-    'Sent /clear to agent.' regardless of busy state. No busy rejection.
+    Python bot: text command `/clear` sends /clear to the agent and responds
+    even while the agent is busy.
     """
     # Send a slow query
     msg_id = discord.send(
@@ -221,8 +221,8 @@ def test_clear_while_busy(discord: Discord, master_channel: str):
     )
     time.sleep(3)
 
-    # Try to clear while busy — Rust bot queues it and confirms
-    clear_id = discord.send(master_channel, "// clear")
+    # Try to clear while busy — current bot queues it and confirms
+    clear_id = discord.send(master_channel, "/clear")
     time.sleep(3)
 
     # Check for confirmation (Rust bot doesn't reject, it queues)

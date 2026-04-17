@@ -212,6 +212,23 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
     log.info("Question answered via reaction: %s -> %s", emoji_str, answer)
 
 
+async def _replace_latest_queued_user_message(
+    session: AgentSession,
+    content: Any,
+    channel: TextChannel,
+    message: discord.Message,
+    raw_content: Any,
+) -> int:
+    """For axi-master, keep only the latest queued user message while busy."""
+    dropped = 0
+    while session.message_queue:
+        _, _, dropped_msg, *_ = session.message_queue.popleft()
+        await agents.remove_reaction(dropped_msg, "📨")
+        dropped += 1
+    session.message_queue.append((content, channel, message, raw_content))
+    return dropped
+
+
 @bot.event
 async def on_message(message: discord.Message) -> None:
     """Handle incoming Discord messages."""
@@ -302,12 +319,9 @@ async def on_message(message: discord.Message) -> None:
         return
 
     ds = discord_state(session)
-    normalized_text = message.content.strip()
-    if normalized_text in {"/stop", "/skip"}:
-        message.content = "/" + normalized_text
 
-    # --- Text command handling (// prefix) ---
-    if message.content.strip().startswith("//"):
+    # --- Text command handling ---
+    if message.content.strip().startswith("/"):
         handled = await _handle_text_command(message, session, agent_name)
         if handled:
             return
@@ -375,12 +389,17 @@ async def on_message(message: discord.Message) -> None:
         )
         result_status = "queued_reconnecting"
     elif session.query_lock.locked():
-        session.message_queue.append((content, channel, message, raw_content))
+        replaced = 0
+        if session.name == "axi-master":
+            replaced = await _replace_latest_queued_user_message(session, content, channel, message, raw_content)
+        else:
+            session.message_queue.append((content, channel, message, raw_content))
         position = len(session.message_queue)
         if session.compacting:
+            detail = " Replaced older queued message." if replaced else ""
             await agents.send_system(
                 channel,
-                f"🔄 Agent **{session.name}** is compacting context — message queued (position {position}). Will process after compaction completes.",
+                f"🔄 Agent **{session.name}** is compacting context — message queued (position {position}). Will process after compaction completes.{detail}",
             )
         else:
             activity = session.activity
@@ -388,9 +407,10 @@ async def on_message(message: discord.Message) -> None:
             if activity.phase == "waiting" and activity.tool_name:
                 tool_suffix = f" (currently {tool_display(activity.tool_name)})"
             await _interrupt_agent(session)
+            detail = " Replaced older queued message." if replaced else ""
             await agents.send_system(
                 channel,
-                f"Agent **{session.name}** is busy — message queued (position {position}). Interrupting current task.{tool_suffix}",
+                f"Agent **{session.name}** is busy — message queued (position {position}). Interrupting current task.{tool_suffix}{detail}",
             )
         result_status = "queued"
     else:
@@ -661,11 +681,15 @@ async def _interrupt_agent(session: AgentSession) -> None:
     — no session rebuild needed.  Falls back to destructive interrupt_session()
     only if the graceful interrupt fails (timeout/error).
     """
-    if await agents.graceful_interrupt(session):
+    if session.dispatch_lock.locked():
+        log.info("Interrupt already in flight for '%s' — skipping duplicate request", session.name)
         return
-    # Graceful interrupt failed — fall back to killing the CLI process
-    log.warning("Graceful interrupt failed for '%s', falling back to process kill", session.name)
-    await agents.interrupt_session(session)
+    async with session.dispatch_lock:
+        if await agents.graceful_interrupt(session):
+            return
+        # Graceful interrupt failed — fall back to killing the CLI process
+        log.warning("Graceful interrupt failed for '%s', falling back to process kill", session.name)
+        await agents.interrupt_session(session)
 
 
 # ---------------------------------------------------------------------------
@@ -1355,8 +1379,6 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
     ).end()
 
     try:
-        await _interrupt_agent(session)
-
         plan_was_active = session.plan_mode
         if plan_was_active:
             session.plan_mode = False
@@ -1375,10 +1397,18 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
             ds.question_data = None
             ds.question_message_id = None
 
+        cleared = 0
+        session.state.stop_requested = True
+        while session.message_queue:
+            _, _, dropped_msg, *_ = session.message_queue.popleft()
+            await agents.remove_reaction(dropped_msg, "📨")
+            cleared += 1
+
+        await _interrupt_agent(session)
+
         parts = [f"*System:* Interrupt signal sent to **{agent_name}**."]
-        queued = len(session.message_queue)
-        if queued:
-            parts.append(f"Preserved {queued} queued message{'s' if queued != 1 else ''}.")
+        if cleared:
+            parts.append(f"Cleared {cleared} queued message{'s' if cleared != 1 else ''}.")
         if plan_was_active:
             parts.append("Plan mode deactivated.")
         if trace_tag:
@@ -1419,9 +1449,10 @@ async def skip_agent(interaction: discord.Interaction, agent_name: str | None = 
     try:
         await _interrupt_agent(session)
         if queued:
+            noun = "message" if queued == 1 else "messages"
             msg = (
                 f"*System:* Skipped current query for **{agent_name}**{tool_suffix}. "
-                f"{queued} queued message{'s' if queued != 1 else ''} will continue processing."
+                f"Latest {noun} will continue processing."
             )
         else:
             msg = f"*System:* Skipped current query for **{agent_name}**{tool_suffix}. No queued messages."
@@ -1495,16 +1526,19 @@ async def reset_context(interaction: discord.Interaction, agent_name: str | None
 
 
 async def _handle_text_command(message: discord.Message, session: AgentSession, agent_name: str) -> bool:
-    """Handle // text commands from Discord messages. Returns True if handled."""
+    """Handle single-slash text commands from Discord messages. Returns True if handled."""
     text = message.content.strip()
-    if not text.startswith("//"):
+    if not text.startswith("/"):
         return False
 
-    parts = text[2:].split(None, 1)
+    parts = text[1:].split(None, 1)
     if not parts:
         return False
 
     cmd = parts[0].lower()
+    allowed_commands = {"verbose", "debug", "status", "todo", "clear", "compact", "flowchart", "skip", "stop"}
+    if cmd not in allowed_commands:
+        return False
     cmd_args = parts[1].strip() if len(parts) > 1 else None
     assert isinstance(message.channel, TextChannel)
     channel = message.channel
@@ -1518,7 +1552,7 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
             elif mode_lower == "off":
                 discord_state(session).verbose = False
             else:
-                await agents.send_system(channel, "Usage: `//verbose` (toggle), `//verbose on`, `//verbose off`")
+                await agents.send_system(channel, "Usage: `/verbose` (toggle), `/verbose on`, `/verbose off`")
                 return True
         else:
             discord_state(session).verbose = not discord_state(session).verbose
@@ -1534,7 +1568,7 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
             elif mode_lower == "off":
                 discord_state(session).debug = False
             else:
-                await agents.send_system(channel, "Usage: `//debug` (toggle), `//debug on`, `//debug off`")
+                await agents.send_system(channel, "Usage: `/debug` (toggle), `/debug on`, `/debug off`")
                 return True
         else:
             discord_state(session).debug = not discord_state(session).debug
@@ -1600,7 +1634,7 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
             return True
 
         if not cmd_args:
-            await agents.send_system(channel, "Usage: `//flowchart <command> [args]`")
+            await agents.send_system(channel, "Usage: `/flowchart <command> [args]`")
             return True
 
         fc_parts = cmd_args.split(None, 1)
@@ -1636,9 +1670,10 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
             await _interrupt_agent(session)
             queued = len(session.message_queue)
             if queued:
+                noun = "message" if queued == 1 else "messages"
                 msg = (
                     f"Skipped current query for **{agent_name}**{tool_suffix}. "
-                    f"{queued} queued message{'s' if queued != 1 else ''} will continue processing."
+                    f"Latest {noun} will continue processing."
                 )
             else:
                 msg = f"Skipped current query for **{agent_name}**{tool_suffix}. No queued messages."
@@ -1654,19 +1689,17 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
             return True
 
         try:
-            await _interrupt_agent(session)
-
             plan_was_active = session.plan_mode
             if plan_was_active:
                 session.plan_mode = False
                 try:
                     await session.client.set_permission_mode("default")
                 except Exception:
-                    log.exception("Failed to reset permission mode for '%s' during //stop", agent_name)
+                    log.exception("Failed to reset permission mode for '%s' during /stop", agent_name)
 
             ds = discord_state(session)
             if ds.plan_approval_future and not ds.plan_approval_future.done():
-                ds.plan_approval_future.set_result({"approved": False, "message": "Interrupted by //stop."})
+                ds.plan_approval_future.set_result({"approved": False, "message": "Interrupted by /stop."})
             ds.plan_approval_message_id = None
 
             if ds.question_future and not ds.question_future.done():
@@ -1674,10 +1707,18 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
                 ds.question_data = None
                 ds.question_message_id = None
 
+            cleared = 0
+            session.state.stop_requested = True
+            while session.message_queue:
+                _, _, dropped_msg, *_ = session.message_queue.popleft()
+                await agents.remove_reaction(dropped_msg, "📨")
+                cleared += 1
+
+            await _interrupt_agent(session)
+
             parts = [f"Interrupt signal sent to **{agent_name}**."]
-            queued = len(session.message_queue)
-            if queued:
-                parts.append(f"Preserved {queued} queued message{'s' if queued != 1 else ''}.")
+            if cleared:
+                parts.append(f"Cleared {cleared} queued message{'s' if cleared != 1 else ''}.")
             if plan_was_active:
                 parts.append("Plan mode deactivated.")
             await agents.send_system(channel, " ".join(parts))
