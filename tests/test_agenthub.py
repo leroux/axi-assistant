@@ -9,6 +9,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from agenthub import AgentHub, FrontendRouter, StopResult, TurnKind, TurnOutcome
 from agenthub.stream_types import QueryResult, RateLimitHit, StreamEnd, StreamKilled, StreamStart, TransientError
@@ -138,33 +140,8 @@ class FakeFrontend:
     async def update_todo(self, agent_name: str, todos: list[dict[str, Any]]) -> None:
         self._record("update_todo", agent_name)
 
-    async def ensure_channel(self, agent_name: str, cwd: str | None = None) -> Any:
-        self._record("ensure_channel", agent_name)
-        return f"channel-{agent_name}"
-
-    async def move_to_killed(self, agent_name: str) -> None:
-        self._record("move_to_killed", agent_name)
-
-    async def get_channel(self, agent_name: str) -> Any:
-        return f"channel-{agent_name}"
-
-    async def save_session_metadata(self, agent_name: str, session: Any) -> None:
-        self._record("save_session_metadata", agent_name)
-
-    async def reconstruct_sessions(self) -> list[dict[str, Any]]:
-        return []
-
     async def on_log_event(self, event: Any) -> None:
         self._record("on_log_event", event.kind)
-
-    async def send_goodbye(self) -> None:
-        self._record("send_goodbye")
-
-    async def close_app(self) -> None:
-        self._record("close_app")
-
-    async def kill_process(self) -> None:
-        self._record("kill_process")
 
 
 @pytest.fixture
@@ -724,8 +701,103 @@ async def test_wake_sleep_and_snapshot_public_methods(frontend: FakeFrontend) ->
     assert ("on_sleep", ("public-agent",)) in frontend.calls
 
 
+@given(st.lists(st.sampled_from(["one", "two", "three"]), min_size=1, max_size=6))
 @pytest.mark.asyncio
-async def test_runtime_exports_types() -> None:
+async def test_submit_sequence_keeps_fifo_order_under_runtime(turns: list[str]) -> None:
+    router = FrontendRouter()
+    frontend = FakeFrontend("fake")
+    router.add(frontend)
+    gate = asyncio.Event()
+
+    class WaitingClient(FakeClient):
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+            await gate.wait()
+
+    client_ref: WaitingClient | None = None
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        nonlocal client_ref
+        client_ref = WaitingClient(session.name, mode="wait")
+        return client_ref
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        stream_factory=result_stream,
+    )
+    await hub.spawn_agent(name="fifo-agent", cwd="/tmp/fifo-agent")
+
+    results = []
+    for turn in turns:
+        results.append(await hub.submit_user_message("fifo-agent", turn))
+
+    assert results[0].status == "started"
+    session = hub.get_session("fifo-agent")
+    assert session is not None
+    assert [queued.content for queued in session.state.queued_turns] == turns[1:]
+
+    gate.set()
+    await asyncio.sleep(0.15)
+
+    assert client_ref is not None
+    assert client_ref.queries == turns
+    assert session.state.current_turn is None
+    assert len(session.state.queued_turns) == 0
+
+
+@given(st.lists(st.sampled_from(["a", "b", "c", "d"]), min_size=2, max_size=5))
+@pytest.mark.asyncio
+async def test_skip_preserves_followup_progression_under_runtime(turns: list[str]) -> None:
+    router = FrontendRouter()
+    frontend = FakeFrontend("fake")
+    router.add(frontend)
+    gate = asyncio.Event()
+
+    class WaitingClient(FakeClient):
+        async def query(self, content: Any) -> None:
+            self.queries.append(content)
+            await gate.wait()
+
+    client_ref: WaitingClient | None = None
+
+    async def create_client(session: Any, options: Any) -> FakeClient:
+        nonlocal client_ref
+        client_ref = WaitingClient(session.name, mode="wait")
+        return client_ref
+
+    async def disconnect_client(client: Any, name: str) -> None:
+        return None
+
+    hub = AgentHub(
+        frontends=[router],
+        create_client=create_client,
+        disconnect_client=disconnect_client,
+        make_agent_options=lambda session, sid: {},
+        stream_factory=result_stream,
+    )
+    await hub.spawn_agent(name="skip-fifo-agent", cwd="/tmp/skip-fifo-agent")
+
+    for turn in turns:
+        await hub.submit_user_message("skip-fifo-agent", turn)
+
+    skipped = await hub.request_skip("skip-fifo-agent")
+    assert skipped.status == "stopping"
+    gate.set()
+    await asyncio.sleep(0.15)
+
+    session = hub.get_session("skip-fifo-agent")
+    assert session is not None
+    assert client_ref is not None
+    assert client_ref.queries == turns
+    assert session.state.current_turn is None
+    assert len(session.state.queued_turns) == 0
+    assert session.state.skip_requested is False
     assert TurnKind.USER.value == "user"
     assert TurnOutcome.COMPLETED.value == "completed"
     assert isinstance(StreamStart(), StreamStart)

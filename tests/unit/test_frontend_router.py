@@ -80,33 +80,11 @@ class FakeFrontend:
     async def update_todo(self, agent_name: str, todos: list[dict[str, Any]]) -> None:
         self._record("update_todo", agent_name)
 
-    async def ensure_channel(self, agent_name: str, cwd: str | None = None) -> Any:
-        self._record("ensure_channel", agent_name)
-        return f"channel-{agent_name}"
-
-    async def move_to_killed(self, agent_name: str) -> None:
-        self._record("move_to_killed", agent_name)
-
-    async def get_channel(self, agent_name: str) -> Any:
-        return f"channel-{agent_name}"
-
-    async def save_session_metadata(self, agent_name: str, session: Any) -> None:
-        self._record("save_session_metadata", agent_name)
-
-    async def reconstruct_sessions(self) -> list[dict[str, Any]]:
-        return []
-
     async def on_log_event(self, event: LogEvent) -> None:
         self._record("on_log_event", event.kind)
 
-    async def send_goodbye(self) -> None:
-        self._record("send_goodbye")
-
-    async def close_app(self) -> None:
-        self._record("close_app")
-
-    async def kill_process(self) -> None:
-        self._record("kill_process")
+    async def start(self) -> None:
+        self._record("start")
 
 
 class TestFrontendRouter:
@@ -164,23 +142,6 @@ class TestFrontendRouter:
         assert answers == {"q1": "answer1"}
 
     @pytest.mark.asyncio
-    async def test_get_channel(self) -> None:
-        router = FrontendRouter()
-        fe = FakeFrontend("discord")
-        router.add(fe)
-
-        ch = await router.get_channel("master")
-        assert ch == "channel-master"
-
-    @pytest.mark.asyncio
-    async def test_ensure_channel_returns_value(self) -> None:
-        router = FrontendRouter()
-        fe = FakeFrontend("discord")
-        router.add(fe)
-        ch = await router.ensure_channel("master")
-        assert ch == "channel-master"
-
-    @pytest.mark.asyncio
     async def test_no_frontends_no_error(self) -> None:
         router = FrontendRouter()
         await router.post_message("agent", "text")
@@ -222,59 +183,6 @@ class TestFrontendRouter:
         assert result.approved is True
 
     @pytest.mark.asyncio
-    async def test_get_channel_falls_through_when_first_frontend_returns_none(self) -> None:
-        router = FrontendRouter()
-        fe1 = FakeFrontend("one")
-        fe2 = FakeFrontend("two")
-
-        async def none_channel(agent_name: str) -> Any:
-            return None
-
-        fe1.get_channel = none_channel  # type: ignore[assignment]
-        router.add(fe1)
-        router.add(fe2)
-
-        ch = await router.get_channel("master")
-        assert ch == "channel-master"
-
-    @pytest.mark.asyncio
-    async def test_ensure_channel_falls_through_when_first_frontend_raises(self) -> None:
-        router = FrontendRouter()
-        fe1 = FakeFrontend("one")
-        fe2 = FakeFrontend("two")
-
-        async def boom(agent_name: str, cwd: str | None = None) -> Any:
-            raise RuntimeError("boom")
-
-        fe1.ensure_channel = boom  # type: ignore[assignment]
-        router.add(fe1)
-        router.add(fe2)
-
-        ch = await router.ensure_channel("master")
-        assert ch == "channel-master"
-
-    @pytest.mark.asyncio
-    async def test_kill_process_stops_after_first_success(self) -> None:
-        router = FrontendRouter()
-        fe1 = FakeFrontend("one")
-        fe2 = FakeFrontend("two")
-        called: list[str] = []
-
-        async def kill_one() -> None:
-            called.append("one")
-
-        async def kill_two() -> None:
-            called.append("two")
-
-        fe1.kill_process = kill_one  # type: ignore[assignment]
-        fe2.kill_process = kill_two  # type: ignore[assignment]
-        router.add(fe1)
-        router.add(fe2)
-
-        await router.kill_process()
-        assert called == ["one"]
-
-    @pytest.mark.asyncio
     async def test_misc_broadcast_methods_are_relayed(self) -> None:
         router = FrontendRouter()
         fe = FakeFrontend("discord")
@@ -282,13 +190,9 @@ class TestFrontendRouter:
 
         await router.on_idle_reminder("agent", 5.0)
         await router.on_reconnect("agent", True)
-        await router.move_to_killed("agent")
-        await router.send_goodbye()
-        await router.close_app()
+        await router.on_log_event(type("E", (), {"kind": "stream"})())
 
         methods = [call[0] for call in fe.calls]
         assert "on_idle_reminder" in methods
         assert "on_reconnect" in methods
-        assert "move_to_killed" in methods
-        assert "send_goodbye" in methods
-        assert "close_app" in methods
+        assert "on_log_event" in methods

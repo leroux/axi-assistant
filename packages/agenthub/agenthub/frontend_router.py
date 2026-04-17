@@ -114,45 +114,8 @@ class FrontendRouter:
     async def update_todo(self, agent_name: str, todos: list[dict[str, Any]]) -> None:
         await self._broadcast("update_todo", agent_name, todos)
 
-    async def get_channel(self, agent_name: str) -> Any:
-        for fe in self.frontends.values():
-            try:
-                channel = await fe.get_channel(agent_name)
-                if channel is not None:
-                    return channel
-            except Exception:
-                log.warning("Frontend '%s'.get_channel failed", fe.name, exc_info=True)
-        return None
-
-    async def ensure_channel(self, agent_name: str, cwd: str | None = None) -> Any:
-        for fe in self.frontends.values():
-            try:
-                channel = await fe.ensure_channel(agent_name, cwd)
-                if channel is not None:
-                    return channel
-            except Exception:
-                log.warning("Frontend '%s'.ensure_channel failed", fe.name, exc_info=True)
-        return None
-
-    async def move_to_killed(self, agent_name: str) -> None:
-        await self._broadcast("move_to_killed", agent_name)
-
     async def on_log_event(self, event: LogEvent) -> None:
         await self._broadcast("on_log_event", event)
-
-    async def send_goodbye(self) -> None:
-        await self._broadcast("send_goodbye")
-
-    async def close_app(self) -> None:
-        await self._broadcast("close_app")
-
-    async def kill_process(self) -> None:
-        for fe in self.frontends.values():
-            try:
-                await fe.kill_process()
-                return
-            except Exception:
-                log.warning("Frontend '%s'.kill_process failed", fe.name, exc_info=True)
 
     async def start_all(self) -> None:
         for fe in self.frontends.values():
