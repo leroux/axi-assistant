@@ -68,6 +68,7 @@ from axi.worktrees import (
     write_queue as _write_queue,
 )
 from discordquery import DiscordClient
+from discordquery.wait import DEFAULT_STABLE_POLLS, wait_for_messages
 
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 TESTS_DIR = os.environ.get("AXI_TESTS_DIR", os.path.join(os.path.expanduser("~"), "axi-tests"))
@@ -799,6 +800,9 @@ def cmd_msg(args: argparse.Namespace) -> None:
     name = args.name
     message = args.message
     timeout = args.timeout
+    wait_mode = args.wait_mode
+    check = args.check
+    poll_interval = args.poll_interval
 
     # Read guild_id from slots file (source of truth)
     slots = _read_slots()
@@ -826,50 +830,77 @@ def cmd_msg(args: argparse.Namespace) -> None:
         print(f"Waiting for response (timeout: {timeout}s)...\n")
 
         # Poll for response
-        deadline = time.monotonic() + timeout
-        after_id = sent_id
-        collected: list[dict[str, Any]] = []
+        if wait_mode == "sentinel":
+            deadline = time.monotonic() + timeout
+            after_id = sent_id
+            collected: list[dict[str, Any]] = []
 
-        while time.monotonic() < deadline:
-            messages = client.get_messages(channel_id, limit=100, after=after_id)
+            while time.monotonic() < deadline:
+                messages = client.get_messages(channel_id, limit=100, after=after_id)
 
-            if messages:
-                # Update cursor to highest ID (newest first from API)
-                after_id = messages[0]["id"]
+                if messages:
+                    # Update cursor to highest ID (newest first from API)
+                    after_id = messages[0]["id"]
 
-                for msg in reversed(messages):
-                    # Skip our own sent message
-                    if msg["id"] == sent_id:
-                        continue
+                    for msg in reversed(messages):
+                        # Skip our own sent message
+                        if msg["id"] == sent_id:
+                            continue
 
-                    if is_sentinel(msg):
-                        # Print any remaining collected messages
-                        for m in collected:
-                            print(format_message(m))
+                        if is_sentinel(msg):
+                            # Print any remaining collected messages
+                            for m in collected:
+                                print(format_message(m))
+                            collected.clear()
+                            sys.exit(0)
+
+                        # Skip system messages
+                        content = msg.get("content", "")
+                        if content.startswith("*System:*"):
+                            continue
+
+                        collected.append(msg)
+                        print(format_message(msg))
                         collected.clear()
-                        sys.exit(0)
 
-                    # Skip system messages
-                    content = msg.get("content", "")
-                    if content.startswith("*System:*"):
-                        continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(poll_interval, remaining))
 
-                    collected.append(msg)
-                    print(format_message(msg))
-                    collected.clear()
+            # Timeout
+            for m in collected:
+                print(format_message(m))
+            print(
+                "\nWarning: timed out without sentinel — bot may still be responding, or there may be a bug",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(2.0, remaining))
-
-        # Timeout
-        for m in collected:
-            print(format_message(m))
-        print(
-            "\nWarning: timed out without sentinel — bot may still be responding, or there may be a bug",
-            file=sys.stderr,
+        stable_polls = DEFAULT_STABLE_POLLS if wait_mode == "stable" else 0
+        substring = check if wait_mode == "substring" else None
+        sender_me = client.get("/users/@me")
+        sender_user_id = str(sender_me["id"])
+        messages, _cursor = wait_for_messages(
+            client,
+            channel_id,
+            sent_id,
+            timeout,
+            ignore_author_ids={sender_user_id},
+            ignore_system=True,
+            poll_interval=poll_interval,
+            substring=substring,
+            stable_polls=stable_polls,
         )
+        if messages:
+            for msg in messages:
+                print(format_message(msg))
+            sys.exit(0)
+
+        if wait_mode == "substring" and check:
+            print(f"\nWarning: timed out without seeing substring: {check}", file=sys.stderr)
+        else:
+            print("\nWarning: timed out waiting for response", file=sys.stderr)
         sys.exit(1)
 
 
@@ -1207,6 +1238,14 @@ def main():
     p_msg.add_argument("name", help="Instance name")
     p_msg.add_argument("message", help="Message to send")
     p_msg.add_argument("--timeout", type=float, default=120, help="Timeout in seconds (default: 120)")
+    p_msg.add_argument(
+        "--wait-mode",
+        choices=["sentinel", "stable", "substring"],
+        default="sentinel",
+        help="How to wait for the bot response (default: sentinel)",
+    )
+    p_msg.add_argument("--check", help="Required substring when using --wait-mode substring")
+    p_msg.add_argument("--poll-interval", type=float, default=2.0, help="Polling interval in seconds (default: 2.0)")
     p_msg.set_defaults(func=cmd_msg)
 
     # merge

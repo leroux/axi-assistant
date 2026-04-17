@@ -301,8 +301,18 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
-    # --- Plan approval gate ---
     ds = discord_state(session)
+    normalized_text = message.content.strip()
+    if normalized_text in {"/stop", "/skip"}:
+        message.content = "/" + normalized_text
+
+    # --- Text command handling (// prefix) ---
+    if message.content.strip().startswith("//"):
+        handled = await _handle_text_command(message, session, agent_name)
+        if handled:
+            return
+
+    # --- Plan approval gate ---
     if ds.plan_approval_future is not None and not ds.plan_approval_future.done():
         raw = content.strip() if isinstance(content, str) else ""
         text = re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\]\s*", "", raw).strip().lower()
@@ -337,12 +347,6 @@ async def on_message(message: discord.Message) -> None:
         ds.question_future.set_result(answer)
         await agents.add_reaction(message, "\u2705")
         return
-
-    # --- Text command handling (// prefix) ---
-    if message.content.strip().startswith("//"):
-        handled = await _handle_text_command(message, session, agent_name)
-        if handled:
-            return
 
     # --- Centralized message processing via Axi hub wrapper ---
     msg_id = message.id
@@ -383,17 +387,11 @@ async def on_message(message: discord.Message) -> None:
             tool_suffix = ""
             if activity.phase == "waiting" and activity.tool_name:
                 tool_suffix = f" (currently {tool_display(activity.tool_name)})"
-            interrupted = await agents.graceful_interrupt(session)
-            if interrupted:
-                await agents.send_system(
-                    channel,
-                    f"Agent **{session.name}** is busy — message queued (position {position}). Interrupting current task.{tool_suffix}",
-                )
-            else:
-                await agents.send_system(
-                    channel,
-                    f"Agent **{session.name}** is busy — message queued (position {position}). Will process after current turn.{tool_suffix}",
-                )
+            await _interrupt_agent(session)
+            await agents.send_system(
+                channel,
+                f"Agent **{session.name}** is busy — message queued (position {position}). Interrupting current task.{tool_suffix}",
+            )
         result_status = "queued"
     else:
         agents.scheduler.mark_interactive(session.name)
@@ -1377,15 +1375,10 @@ async def stop_agent(interaction: discord.Interaction, agent_name: str | None = 
             ds.question_data = None
             ds.question_message_id = None
 
-        cleared = 0
-        while session.message_queue:
-            _, ch, dropped_msg, *_ = session.message_queue.popleft()
-            await agents.remove_reaction(dropped_msg, "📨")
-            cleared += 1
-
         parts = [f"*System:* Interrupt signal sent to **{agent_name}**."]
-        if cleared:
-            parts.append(f"Cleared {cleared} queued message{'s' if cleared != 1 else ''}.")
+        queued = len(session.message_queue)
+        if queued:
+            parts.append(f"Preserved {queued} queued message{'s' if queued != 1 else ''}.")
         if plan_was_active:
             parts.append("Plan mode deactivated.")
         if trace_tag:
@@ -1681,15 +1674,10 @@ async def _handle_text_command(message: discord.Message, session: AgentSession, 
                 ds.question_data = None
                 ds.question_message_id = None
 
-            cleared = 0
-            while session.message_queue:
-                _, ch_q, dropped_msg, *_ = session.message_queue.popleft()
-                await agents.remove_reaction(dropped_msg, "📨")
-                cleared += 1
-
             parts = [f"Interrupt signal sent to **{agent_name}**."]
-            if cleared:
-                parts.append(f"Cleared {cleared} queued message{'s' if cleared != 1 else ''}.")
+            queued = len(session.message_queue)
+            if queued:
+                parts.append(f"Preserved {queued} queued message{'s' if queued != 1 else ''}.")
             if plan_was_active:
                 parts.append("Plan mode deactivated.")
             await agents.send_system(channel, " ".join(parts))

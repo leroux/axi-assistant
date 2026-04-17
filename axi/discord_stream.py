@@ -1017,6 +1017,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
         # Stream ended without a ResultMessage — the CLI process was killed
         # (e.g. by /stop) or crashed.  Sleep the agent so the next message
         # triggers a fresh wake with a new CLI process.
+        await _hide_thinking(ctx)
+        _stop_typing(ctx, typing_ctx)
         if ctx.deferred_msg:
             assert _send_long is not None
             await _send_long(channel, ctx.deferred_msg)

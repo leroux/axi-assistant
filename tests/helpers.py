@@ -3,6 +3,8 @@
 import time
 
 import httpx
+from discordquery import DiscordClient
+from discordquery.wait import DEFAULT_STABLE_POLLS, wait_for_messages
 
 API_BASE = "https://discord.com/api/v10"
 
@@ -95,76 +97,69 @@ class Discord:
         timeout: float = 120.0,
         poll_interval: float = 2.0,
         sentinel: bool = True,
+        check: str | None = None,
     ) -> list[dict]:
         """Wait for the bot to respond after a given message ID.
 
         If sentinel=True (default), waits for the "awaiting input" sentinel.
-        If sentinel=False, uses stability-based detection (no new messages for
-        `poll_interval * 2` seconds).
+        Otherwise uses shared polling helpers, either stability-based collection
+        or substring matching if `check` is provided.
 
         Returns all bot messages after `after`, in chronological order.
         """
-        deadline = time.monotonic() + timeout
         sender_user_id = self._get_sender_user_id()
-        last_seen_id = after
-        collected: list[dict] = []
-        stable_since: float | None = None
 
-        while time.monotonic() < deadline:
-            msgs = self.history(channel_id, limit=100, after=after)
-            if msgs:
-                # Discord returns newest-first with no `after`, but oldest-first with `after`
-                # Actually, Discord always returns newest-first. We reverse for chronological.
-                msgs_chrono = list(reversed(msgs))
-                new_bot_msgs = []
+        if sentinel:
+            deadline = time.monotonic() + timeout
+            last_seen_id = after
+            collected: list[dict] = []
 
-                for m in msgs_chrono:
-                    mid = m["id"]
-                    author_id = m["author"]["id"]
+            while time.monotonic() < deadline:
+                msgs = self.history(channel_id, limit=100, after=after)
+                if msgs:
+                    msgs_chrono = list(reversed(msgs))
+                    new_bot_msgs = []
 
-                    # Skip sender's own messages
-                    if author_id == sender_user_id:
-                        continue
+                    for m in msgs_chrono:
+                        mid = m["id"]
+                        author_id = m["author"]["id"]
+                        if author_id == sender_user_id:
+                            continue
+                        if int(mid) > int(last_seen_id):
+                            new_bot_msgs.append(m)
+                            last_seen_id = mid
 
-                    # Check if this message is new
-                    if int(mid) > int(last_seen_id):
-                        new_bot_msgs.append(m)
-                        last_seen_id = mid
-
-                if new_bot_msgs:
-                    collected.extend(new_bot_msgs)
-                    stable_since = None  # Reset stability timer
-
-                    if sentinel:
-                        # Check if any message contains the sentinel
+                    if new_bot_msgs:
+                        collected.extend(new_bot_msgs)
                         for m in new_bot_msgs:
                             content = m.get("content", "")
                             if "awaiting input" in content:
-                                # Filter out the sentinel message itself
                                 return [
                                     m
                                     for m in collected
                                     if "awaiting input" not in m.get("content", "")
                                 ]
-                else:
-                    # No new messages — track stability
-                    if stable_since is None:
-                        stable_since = time.monotonic()
-                    elif not sentinel and (time.monotonic() - stable_since) > (poll_interval * 3):
-                        return collected
-            else:
-                if stable_since is None:
-                    stable_since = time.monotonic()
-                elif not sentinel and (time.monotonic() - stable_since) > (poll_interval * 3):
-                    return collected
 
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(poll_interval, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(poll_interval, remaining))
 
-        # Timed out — return whatever we collected
-        return collected
+            return collected
+
+        with DiscordClient(self.bot_token) as client:
+            messages, _cursor = wait_for_messages(
+                client,
+                channel_id,
+                after,
+                timeout,
+                ignore_author_ids={sender_user_id},
+                ignore_system=True,
+                poll_interval=poll_interval,
+                substring=check,
+                stable_polls=DEFAULT_STABLE_POLLS if check is None else 0,
+            )
+        return messages
 
     def send_and_wait(
         self,
@@ -244,12 +239,12 @@ class Discord:
         poll_interval: float = 3.0,
     ) -> str:
         """Poll channel history until `check` substring appears. Returns full text."""
-        deadline = time.monotonic() + timeout
-        text = ""
-        while time.monotonic() < deadline:
-            msgs = self.history(channel_id, limit=30, after=after)
-            text = "\n".join(m.get("content", "") for m in msgs)
-            if check.lower() in text.lower():
-                return text
-            time.sleep(poll_interval)
-        return text
+        messages = self.wait_for_bot(
+            channel_id,
+            after=after,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            sentinel=False,
+            check=check,
+        )
+        return "\n".join(m.get("content", "") for m in messages)

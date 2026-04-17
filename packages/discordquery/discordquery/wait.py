@@ -34,6 +34,13 @@ from discordquery.client import DiscordClient
 
 DEFAULT_TIMEOUT = 120
 POLL_INTERVAL = 2.0
+DEFAULT_STABLE_POLLS = 3
+
+
+def _message_matches(msg: dict[str, Any], substring: str | None) -> bool:
+    if substring is None:
+        return True
+    return substring.lower() in msg.get("content", "").lower()
 
 
 def get_latest_message_id(client: DiscordClient, channel_id: str) -> str | None:
@@ -73,15 +80,23 @@ def wait_for_messages(
     ignore_author_ids: set[str],
     ignore_system: bool = True,
     poll_interval: float = POLL_INTERVAL,
+    substring: str | None = None,
+    stable_polls: int = DEFAULT_STABLE_POLLS,
 ) -> tuple[list[dict[str, Any]], str]:
     """Poll until new messages appear after after_id.
 
     Returns (matching_messages, cursor) where cursor is the highest
     message ID seen (including filtered messages), so the next call
     with --after cursor won't re-process anything.
+
+    If substring is provided, only returns once a matching message appears.
+    If stable_polls > 0, returns accumulated messages after that many polls
+    with no new matching messages once at least one matching message has been seen.
     """
     deadline = time.monotonic() + timeout
     cursor = after_id
+    collected: list[dict[str, Any]] = []
+    idle_polls = 0
 
     while time.monotonic() < deadline:
         messages = client.get_messages(channel_id, limit=100, after=after_id)
@@ -101,20 +116,35 @@ def wait_for_messages(
                 if ignore_system and is_system_message(msg):
                     continue
 
-                matching.append(msg)
+                if _message_matches(msg, substring):
+                    matching.append(msg)
+
+            after_id = cursor
 
             if matching:
-                return matching, cursor
-
-            # Messages exist but all filtered — advance baseline
-            after_id = cursor
+                collected.extend(matching)
+                if substring is not None:
+                    return collected, cursor
+                idle_polls = 0
+                if stable_polls <= 0:
+                    return collected, cursor
+            elif collected and stable_polls > 0:
+                idle_polls += 1
+                if idle_polls >= stable_polls:
+                    return collected, cursor
+            elif stable_polls <= 0 and substring is None and collected:
+                return collected, cursor
+        elif collected and stable_polls > 0:
+            idle_polls += 1
+            if idle_polls >= stable_polls:
+                return collected, cursor
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(poll_interval, remaining))
 
-    return [], cursor
+    return collected, cursor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -135,6 +165,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--poll-interval", type=float, default=POLL_INTERVAL, help=f"Seconds between polls (default {POLL_INTERVAL})."
+    )
+    parser.add_argument(
+        "--check", help="Wait until a message contains this case-insensitive substring."
+    )
+    parser.add_argument(
+        "--stable-polls",
+        type=int,
+        default=DEFAULT_STABLE_POLLS,
+        help=f"Number of idle polls before returning accumulated messages (default {DEFAULT_STABLE_POLLS}). Use 0 to return on first match.",
     )
     parser.add_argument("--no-cursor", action="store_true", help="Don't emit cursor line at end of output.")
     return parser
@@ -169,6 +208,8 @@ def main(argv: list[str] | None = None) -> None:
             ignore_ids,
             ignore_system=not args.include_system,
             poll_interval=args.poll_interval,
+            substring=args.check,
+            stable_polls=args.stable_polls,
         )
 
         if messages:
