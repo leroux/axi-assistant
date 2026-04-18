@@ -1269,7 +1269,7 @@ async def reconstruct_agents_from_channels() -> int:
                 if isinstance(append_text, str):
                     session.system_prompt["append"] = (
                         append_text.replace("{channel_id}", str(ch.id))
-                        .replace("{channel_name}", ch.name)
+                        .replace("{channel_name}", _channels_mod.strip_status_prefix(ch.name))
                         .replace("{guild_id}", str(ch.guild.id))
                         .replace("{guild_name}", ch.guild.name)
                     )
@@ -1668,7 +1668,7 @@ async def spawn_agent(
             if isinstance(append_text, str):
                 session.system_prompt["append"] = (
                     append_text.replace("{channel_id}", str(channel.id))
-                    .replace("{channel_name}", channel.name)
+                    .replace("{channel_name}", _channels_mod.strip_status_prefix(channel.name))
                     .replace("{guild_id}", str(channel.guild.id))
                     .replace("{guild_name}", channel.guild.name)
                 )

@@ -2230,7 +2230,7 @@ def _register_agent_from_channel(channel: TextChannel, cwd: str) -> None:
         session.system_prompt["append"] = (
             session.system_prompt["append"]
             .replace("{channel_id}", str(channel.id))
-            .replace("{channel_name}", channel.name)
+            .replace("{channel_name}", channels.strip_status_prefix(channel.name))
             .replace("{guild_id}", str(channel.guild.id))
             .replace("{guild_name}", channel.guild.name)
         )

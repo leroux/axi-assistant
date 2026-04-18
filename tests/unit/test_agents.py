@@ -18,6 +18,7 @@ from axi.agents import (
     wrap_content_with_flowchart,
 )
 from axi.axi_types import AgentSession
+from axi.channels import strip_status_prefix
 from axi.rate_limits import parse_rate_limit_seconds as _parse_rate_limit_seconds
 
 
@@ -81,6 +82,30 @@ class TestNormalizeChannelName:
     def test_truncation(self) -> None:
         long_name = "a" * 150
         assert len(normalize_channel_name(long_name)) == 100
+
+
+class TestStripStatusPrefix:
+    def test_no_prefix_unchanged(self) -> None:
+        assert strip_status_prefix("my-channel") == "my-channel"
+
+    def test_emoji_prefix_stripped(self) -> None:
+        assert strip_status_prefix("🚀my-channel") == "my-channel"
+
+    def test_status_emoji_stripped(self) -> None:
+        assert strip_status_prefix("🔴my-agent") == "my-agent"
+
+    def test_multiple_emojis_stripped(self) -> None:
+        assert strip_status_prefix("🔴🚀my-channel") == "my-channel"
+
+    def test_empty_string(self) -> None:
+        assert strip_status_prefix("") == ""
+
+    def test_prompt_substitution_strips_prefix(self) -> None:
+        # Regression: channel names embedded in prompts should not carry emoji prefixes
+        template = "Your Discord channel: #{channel_name}"
+        channel_name = "🔴strip-prompt-emoji"
+        result = template.replace("{channel_name}", strip_status_prefix(channel_name))
+        assert result == "Your Discord channel: #strip-prompt-emoji"
 
 
 class TestFlowCoderWrapContent:
