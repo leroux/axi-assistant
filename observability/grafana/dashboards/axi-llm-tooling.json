@@ -1,0 +1,162 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "sum by (model, outcome) (axi_llm_requests_total)",
+          "legendFormat": "{{model}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "LLM request rate by model and outcome",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model, outcome) (axi_llm_request_duration_seconds_bucket))",
+          "legendFormat": "{{model}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "LLM duration p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model, outcome) (axi_llm_api_duration_seconds_bucket))",
+          "legendFormat": "{{model}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Claude API duration p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "sum by (model, kind) (axi_llm_tokens_total)",
+          "legendFormat": "{{model}} {{kind}}",
+          "refId": "A"
+        }
+      ],
+      "title": "LLM tokens over the last hour",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "sum by (model) (axi_llm_cost_usd_total)",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "LLM cost over the last 6 hours",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 6,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "sum by (model, tool) (axi_llm_server_tool_requests_total)",
+          "legendFormat": "{{model}} {{tool}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Claude server-side tool requests",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 7,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "sum by (tool_name, outcome) (axi_tool_calls_total)",
+          "legendFormat": "{{tool_name}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool call rate by outcome",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 8,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, tool_name, outcome) (axi_tool_call_duration_seconds_bucket))",
+          "legendFormat": "{{tool_name}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool call latency p95",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["axi", "observability"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Axi LLM and Tooling",
+  "uid": "axi-llm-tooling",
+  "version": 1,
+  "weekStart": ""
+}

@@ -31,21 +31,24 @@ from claude_agent_sdk.types import (
     ResultMessage,
     StreamEvent,
     SystemMessage,
+    ToolResultBlock,
+    UserMessage,
 )
+from claudewire.events import as_stream, update_activity
+from claudewire.session import get_stdio_logger
 from discord import TextChannel
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 
 from axi import config
 from axi.axi_types import ActivityState, AgentSession, discord_state
+from axi.metrics import observe_llm_result, observe_tool_result
 from axi.rate_limits import (
     record_session_usage as _record_session_usage,
 )
 from axi.rate_limits import (
     update_rate_limit_quota as _update_rate_limit_quota,
 )
-from claudewire.events import as_stream, update_activity
-from claudewire.session import get_stdio_logger
 from discordquery import split_message
 
 if TYPE_CHECKING:
@@ -97,6 +100,8 @@ async def _retry_discord_503(fn: Callable[..., Awaitable[Any]], *args: Any, **kw
                 await asyncio.sleep(delay)
             else:
                 raise
+
+    raise RuntimeError("unreachable: Discord 503 retry loop exhausted")
 
 
 async def _drain_and_send_stderr(session: AgentSession, channel: TextChannel) -> None:
@@ -303,6 +308,8 @@ class _StreamCtx:
     """Mutable state for a single stream_response_to_channel invocation."""
 
     __slots__ = (
+        "active_tool_uses",
+        "current_model",
         "deferred_msg",
         "flush_count",
         "got_result",
@@ -315,15 +322,17 @@ class _StreamCtx:
         "last_flushed_msg_id",
         "live_edit",
         "msg_total",
+        "suppress_stream",
         "text_buffer",
         "thinking_message",
         "tool_input_json",
         "typing_stopped",
-        "suppress_stream",
     )
 
     def __init__(self, live_edit: _LiveEditState | None = None) -> None:
         self.text_buffer: str = ""
+        self.active_tool_uses: dict[str, tuple[str, float]] = {}
+        self.current_model: str | None = None
         self.got_result: bool = False  # True once a ResultMessage is received
         self.hit_rate_limit: bool = False
         self.hit_transient_error: str | None = None
@@ -582,6 +591,10 @@ async def _handle_stream_event(
         block = event.get("content_block", {})
         if block.get("type") == "tool_use":
             ctx.tool_input_json = ""
+            tool_use_id = block.get("id")
+            tool_name = block.get("name") or session.activity.tool_name or "unknown"
+            if tool_use_id:
+                ctx.active_tool_uses[tool_use_id] = (tool_name, time.monotonic())
     elif event_type == "content_block_delta":
         delta = event.get("delta", {})
         if delta.get("type") == "input_json_delta":
@@ -636,6 +649,8 @@ async def _handle_stream_event(
             await _flush_text(ctx, session, channel, "end_turn")
             ctx.text_buffer = ""
             await _hide_thinking(ctx)
+    elif event_type == "message_start":
+        ctx.current_model = event.get("message", {}).get("model") or ctx.current_model
 
 
 def _log_stream_event(session: AgentSession, event_type: str, event: dict[str, Any]) -> None:
@@ -661,11 +676,25 @@ def _log_stream_event(session: AgentSession, event_type: str, event: dict[str, A
         session.agent_log.debug("STREAM: %s %s", event_type, json.dumps(event)[:300])
 
 
+async def _handle_user_message(ctx: _StreamCtx, session: AgentSession, msg: UserMessage) -> None:
+    """Handle SDK user messages, including tool results."""
+    if not isinstance(msg.content, list):
+        return
+    for block in msg.content:
+        if not isinstance(block, ToolResultBlock):
+            continue
+        tool_name, started_at = ctx.active_tool_uses.pop(block.tool_use_id, ("unknown", 0.0))
+        duration_seconds = None if started_at <= 0 else time.monotonic() - started_at
+        observe_tool_result(tool_name, duration_seconds, block.is_error)
+
+
 async def _handle_assistant_message(
     ctx: _StreamCtx, session: AgentSession, channel: TextChannel, msg: AssistantMessage, typing_ctx: Any
 ) -> None:
     """Handle an AssistantMessage during response streaming."""
+    ctx.current_model = msg.model or ctx.current_model
     if msg.error in ("rate_limit", "billing_error"):
+        observe_llm_result(model=msg.model, outcome=msg.error)
         error_text = ctx.text_buffer
         for block in msg.content or []:
             if hasattr(block, "text"):
@@ -678,6 +707,7 @@ async def _handle_assistant_message(
         ctx.text_buffer = ""
         ctx.hit_rate_limit = True
     elif msg.error:
+        observe_llm_result(model=msg.model, outcome="error")
         error_text = ctx.text_buffer
         for block in msg.content or []:
             if hasattr(block, "text"):
@@ -706,6 +736,10 @@ async def _handle_assistant_message(
             if hasattr(block, "text"):
                 session.agent_log.info("ASSISTANT: %s", block_any.text[:2000])
             elif hasattr(block, "type") and block_any.type == "tool_use":
+                tool_use_id = getattr(block_any, "id", None)
+                tool_name = getattr(block_any, "name", None) or "unknown"
+                if tool_use_id and tool_use_id not in ctx.active_tool_uses:
+                    ctx.active_tool_uses[tool_use_id] = (tool_name, time.monotonic())
                 session.agent_log.info(
                     "TOOL_USE: %s(%s)",
                     block_any.name,
@@ -746,6 +780,16 @@ async def _handle_result_message(
 
     assert _set_session_id_fn is not None
     await _set_session_id_fn(session, msg, channel=channel)
+    usage = msg.usage if isinstance(msg.usage, dict) else {}
+    model = ctx.current_model or session.model or None
+    observe_llm_result(
+        model=model,
+        outcome="error" if msg.is_error else "ok",
+        duration_ms=msg.duration_ms,
+        api_duration_ms=msg.duration_api_ms,
+        usage=usage,
+        total_cost_usd=msg.total_cost_usd,
+    )
     _record_session_usage(session.name, msg)
 
 
@@ -800,7 +844,7 @@ async def _handle_system_message(
             ctx.text_buffer = ""
             ctx.suppress_stream = (
                 bool(msg.data.get("data", {}).get("has_output_schema"))
-                and not os.environ.get("FC_SHOW_OUTPUT_SCHEMA", "").lower() in ("1", "true", "yes")
+                and os.environ.get("FC_SHOW_OUTPUT_SCHEMA", "").lower() not in ("1", "true", "yes")
             )
         data = msg.data.get("data", {})
         block_name = data.get("block_name", "?")
@@ -898,7 +942,7 @@ async def _stall_watchdog(
         try:
             await asyncio.wait_for(done.wait(), timeout=_STALL_WARN_SECS)
             return  # stream finished normally
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         elapsed = time.monotonic() - t_last_event[0]
         if elapsed >= _STALL_WARN_SECS:
@@ -960,6 +1004,8 @@ async def stream_response_to_channel(session: AgentSession, channel: TextChannel
                 await _handle_stream_event(ctx, session, channel, msg, typing_ctx)
             elif isinstance(msg, AssistantMessage):
                 await _handle_assistant_message(ctx, session, channel, msg, typing_ctx)
+            elif isinstance(msg, UserMessage):
+                await _handle_user_message(ctx, session, msg)
             elif isinstance(msg, ResultMessage):
                 await _handle_result_message(ctx, session, channel, msg, typing_ctx)
             elif isinstance(msg, SystemMessage):

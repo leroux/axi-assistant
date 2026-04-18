@@ -32,6 +32,13 @@ from opentelemetry import trace
 from axi import agents, channels, config, scheduler, tools, worktrees
 from axi.axi_types import ActivityState, AgentSession, ConcurrencyLimitError, discord_state, tool_display
 from axi.log_context import set_agent_context, set_trigger
+from axi.metrics import (
+    make_discord_http_trace_config,
+    observe_agent_message_event,
+    observe_inbound_discord_event,
+    set_agent_sessions_provider,
+    set_scheduler_status_provider,
+)
 from axi.prompts import (
     MASTER_SYSTEM_PROMPT,
     compute_prompt_hash,
@@ -111,6 +118,7 @@ signal.signal(signal.SIGUSR2, _dump_asyncio_tasks)
 # ---------------------------------------------------------------------------
 
 bot = Bot(command_prefix="!", intents=config.intents)
+bot.http.http_trace = make_discord_http_trace_config("discordpy")
 
 
 @bot.tree.interaction_check  # type: ignore[arg-type]
@@ -154,8 +162,10 @@ async def on_error(event_method: str, *args: Any, **kwargs: Any) -> None:
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
     """Handle reaction adds — plan approval and AskUserQuestion emoji answers."""
+    observe_inbound_discord_event("reaction_add", "received")
     # Ignore own reactions (bot pre-adding them)
     if bot.user and payload.user_id == bot.user.id:
+        observe_inbound_discord_event("reaction_add", "ignored_self")
         return
 
     _tracer.start_span(
@@ -232,11 +242,14 @@ async def _replace_latest_queued_user_message(
 @bot.event
 async def on_message(message: discord.Message) -> None:
     """Handle incoming Discord messages."""
+    observe_inbound_discord_event("message", "received")
     if not _startup_complete:
+        observe_inbound_discord_event("message", "ignored_startup")
         return
 
     # Dedup: Discord may deliver the same message twice on gateway reconnects
     if message.id in _seen_message_ids:
+        observe_inbound_discord_event("message", "deduplicated")
         log.warning("DEDUP[%s] duplicate on_message delivery — skipping", message.id)
         return
     _seen_message_ids[message.id] = None
@@ -245,15 +258,19 @@ async def on_message(message: discord.Message) -> None:
 
     # --- Authorization and channel checks ---
     if bot.user is not None and message.author.id == bot.user.id:
+        observe_inbound_discord_event("message", "ignored_self")
         return
     if message.type not in (discord.MessageType.default, discord.MessageType.reply):
+        observe_inbound_discord_event("message", "ignored_type")
         return
     if message.author.bot and message.author.id not in config.ALLOWED_USER_IDS:
+        observe_inbound_discord_event("message", "ignored_bot")
         return
 
     # DM messages — redirect to guild
     if message.channel.type == ChannelType.private:
         if message.author.id not in config.ALLOWED_USER_IDS:
+            observe_inbound_discord_event("message", "ignored_dm_unauthorized")
             return
         master_session = agents.get_master_session()
         if master_session and discord_state(master_session).channel_id:
@@ -266,10 +283,13 @@ async def on_message(message: discord.Message) -> None:
 
     # Guild messages — only process in our target guild
     if message.guild is None or message.guild.id != config.DISCORD_GUILD_ID:
+        observe_inbound_discord_event("message", "ignored_other_guild")
         return
     if not isinstance(message.channel, TextChannel):
+        observe_inbound_discord_event("message", "ignored_non_text")
         return
     if message.author.id not in config.ALLOWED_USER_IDS:
+        observe_inbound_discord_event("message", "ignored_unauthorized")
         return
 
     channel = message.channel
@@ -295,14 +315,17 @@ async def on_message(message: discord.Message) -> None:
     )
 
     if agents.shutdown_coordinator and agents.shutdown_coordinator.requested:
+        observe_inbound_discord_event("message", "ignored_shutdown")
         await agents.send_system(channel, "Bot is restarting — not accepting new messages.")
         return
 
     if agent_name is None:
+        observe_inbound_discord_event("message", "ignored_unmapped_channel")
         return
 
     session = agents.agents.get(agent_name)
     if session is None:
+        observe_inbound_discord_event("message", "ignored_missing_session")
         if channels.is_killed_channel(channel):
             await agents.send_system(
                 channel,
@@ -312,6 +335,7 @@ async def on_message(message: discord.Message) -> None:
 
     # Block killed agents
     if channels.is_killed_channel(channel):
+        observe_inbound_discord_event("message", "ignored_killed_channel")
         await agents.send_system(
             channel,
             "This agent has been killed. Use `/spawn` to create a new one.",
@@ -381,6 +405,7 @@ async def on_message(message: discord.Message) -> None:
         await agents.send_system(channel, "Bot is restarting — not accepting new messages.")
         result_status = "shutdown"
     elif session.reconnecting:
+        observe_agent_message_event("queue_enqueued_reconnecting")
         session.message_queue.append((content, channel, message, raw_content))
         position = len(session.message_queue)
         await agents.send_system(
@@ -394,6 +419,7 @@ async def on_message(message: discord.Message) -> None:
             replaced = await _replace_latest_queued_user_message(session, content, channel, message, raw_content)
         else:
             session.message_queue.append((content, channel, message, raw_content))
+        observe_agent_message_event("queue_enqueued_busy")
         position = len(session.message_queue)
         if session.compacting:
             detail = " Replaced older queued message." if replaced else ""
@@ -421,6 +447,7 @@ async def on_message(message: discord.Message) -> None:
                 try:
                     await agents.wake_agent(session)
                 except ConcurrencyLimitError:
+                    observe_agent_message_event("queue_enqueued_slot_wait")
                     session.message_queue.append((content, channel, message, raw_content))
                     awake = agents.count_awake_agents()
                     await agents.send_system(
@@ -2773,6 +2800,8 @@ async def on_ready() -> None:
         get_agents=lambda: agents.agents,
         sleep_fn=lambda s: agents.sleep_agent(s),
     )
+    set_agent_sessions_provider(lambda: agents.agents)
+    set_scheduler_status_provider(scheduler.status)
     init_tracing("axi-bot")
 
     # Re-initialize _tracer now that the provider is set up

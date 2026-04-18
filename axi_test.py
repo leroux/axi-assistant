@@ -392,6 +392,8 @@ def _write_env(
         f"SCHEDULE_TIMEZONE={defaults.get('schedule_timezone', 'UTC')}\n"
         f"DEFAULT_CWD={instance_path}\n"
         f"AXI_USER_DATA={data_path}\n"
+        f"HTTP_API_HOST=0.0.0.0\n"
+        f"HTTP_API_PORT=8787\n"
         f"DAY_BOUNDARY_HOUR={defaults.get('day_boundary_hour', '0')}\n"
         f"AXI_MODEL=haiku\n"
     )

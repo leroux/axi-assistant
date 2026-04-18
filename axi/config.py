@@ -549,9 +549,19 @@ KILLED_CATEGORY_NAME = "Killed"
 # Discord REST API client
 # ---------------------------------------------------------------------------
 
+from axi.metrics import observe_discord_rest_request
 from discordquery import AsyncDiscordClient
 
-discord_client = AsyncDiscordClient(DISCORD_TOKEN)
+discord_client = AsyncDiscordClient(
+    DISCORD_TOKEN,
+    on_request_observer=lambda method, path, status, duration: observe_discord_rest_request(
+        "discordquery",
+        method,
+        path,
+        status,
+        duration,
+    ),
+)
 
 from axi.egress_filter import scrub_secrets
 

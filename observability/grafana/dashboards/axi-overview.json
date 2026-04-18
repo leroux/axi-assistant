@@ -1,0 +1,163 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "sum by (status) (axi_discord_rest_requests_total{client=\"discordpy\"})",
+          "legendFormat": "status {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Discord API requests by status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route) (axi_discord_rest_request_duration_seconds_bucket{client=\"discordpy\"}))",
+          "legendFormat": "p95 {{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Discord API latency p95 by route",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "sum by (outcome) (axi_discord_inbound_events_total{event=\"message\"})",
+          "legendFormat": "message {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (outcome) (axi_discord_inbound_events_total{event=\"reaction_add\"})",
+          "legendFormat": "reaction {{outcome}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Inbound Discord events by outcome",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "sum by (route) (axi_http_requests_total)",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Axi HTTP endpoints",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "axi_agents_awake",
+          "legendFormat": "awake",
+          "refId": "A"
+        },
+        {
+          "expr": "axi_agents_busy",
+          "legendFormat": "busy",
+          "refId": "B"
+        },
+        {
+          "expr": "axi_scheduler_waiters",
+          "legendFormat": "scheduler waiters",
+          "refId": "C"
+        }
+      ],
+      "title": "Agent concurrency state",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 6,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "expr": "axi_agent_message_queue_messages",
+          "legendFormat": "total queued",
+          "refId": "A"
+        },
+        {
+          "expr": "axi_agent_message_queue_max",
+          "legendFormat": "max per agent",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (event) (axi_agent_message_events_total)",
+          "legendFormat": "{{event}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Queue depth and queue events",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["axi", "observability"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Axi Overview",
+  "uid": "axi-overview",
+  "version": 1,
+  "weekStart": ""
+}

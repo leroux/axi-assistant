@@ -23,6 +23,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.20",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
+    "prometheus-client>=0.22",
 ]
 
 [tool.uv.sources]

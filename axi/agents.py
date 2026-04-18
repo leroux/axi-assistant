@@ -19,9 +19,6 @@ import traceback
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
 import anyio
 import discord
 import httpx
@@ -92,6 +89,7 @@ from axi.discord_ui import (  # noqa: F401
 )
 from axi.extensions import DEFAULT_EXTENSIONS, resolve_extension_hooks, resolve_prompt_hooks
 from axi.log_context import set_agent_context, set_trigger
+from axi.metrics import observe_agent_message_event
 from axi.prompts import (
     compute_prompt_hash,
     make_spawned_agent_system_prompt,
@@ -120,6 +118,8 @@ from axi.tracing import shutdown_tracing
 from procmux import ensure_running as ensure_bridge
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from discord.ext.commands import Bot
 
     from agenthub import AgentHub
@@ -1829,6 +1829,7 @@ async def run_initial_prompt(session: AgentSession, prompt: MessageContent, chan
 async def process_message_queue(session: AgentSession) -> None:
     """Process any queued messages for an agent after the current query finishes."""
     if session.message_queue:
+        observe_agent_message_event("queue_process_start")
         log.info("QUEUE[%s] processing %d queued messages", session.name, len(session.message_queue))
         _tracer.start_span(
             "process_message_queue",
@@ -1847,6 +1848,7 @@ async def process_message_queue(session: AgentSession) -> None:
             await sleep_agent(session)
             return
         content, channel, orig_message, *rest = session.message_queue.popleft()
+        observe_agent_message_event("queue_dequeued")
         raw_content = rest[0] if rest else content
 
         remaining = len(session.message_queue)

@@ -24,10 +24,8 @@ import asyncio
 import logging
 import time
 import urllib.parse
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -36,6 +34,20 @@ log = logging.getLogger(__name__)
 API_BASE = "https://discord.com/api/v10"
 MAX_RETRIES = 3
 MAX_RATELIMIT_RETRIES = 10
+
+DiscordRestObserver = Callable[[str, str, int | str, float], None]
+
+
+def _record_discord_rest_attempt(
+    observer: DiscordRestObserver | None,
+    method: str,
+    path: str,
+    started_at: float,
+    status: int | str,
+) -> None:
+    if observer is None:
+        return
+    observer(method, path, status, time.monotonic() - started_at)
 
 
 # ---------------------------------------------------------------------------
@@ -190,12 +202,20 @@ class DiscordClient:
 class AsyncDiscordClient:
     """Asynchronous Discord REST client for bots and async applications."""
 
-    def __init__(self, token: str, *, base_url: str = API_BASE, timeout: float = 15.0) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        base_url: str = API_BASE,
+        timeout: float = 15.0,
+        on_request_observer: DiscordRestObserver | None = None,
+    ) -> None:
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers={"Authorization": f"Bot {token}"},
             timeout=timeout,
         )
+        self.on_request_observer = on_request_observer
         # Optional content filter — called on outgoing message text before send/edit.
         # Set to a callable(str) -> str to scrub content (e.g. secret redaction).
         self.content_filter: Callable[[str], str] | None = None
@@ -218,7 +238,14 @@ class AsyncDiscordClient:
         failures = 0
         ratelimit_retries = 0
         while True:
-            resp = await self._client.request(method, path, **kwargs)
+            started_at = time.monotonic()
+            try:
+                resp = await self._client.request(method, path, **kwargs)
+            except Exception:
+                _record_discord_rest_attempt(self.on_request_observer, method, path, started_at, "exception")
+                raise
+
+            _record_discord_rest_attempt(self.on_request_observer, method, path, started_at, resp.status_code)
 
             if resp.status_code in (200, 201, 204):
                 return resp
