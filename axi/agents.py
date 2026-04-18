@@ -17,7 +17,10 @@ import shlex
 import time
 import traceback
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import anyio
 import discord
@@ -1639,6 +1642,8 @@ async def spawn_agent(
             mcp_server_names=mcp_names,
             mcp_servers=mcp_servers,
             compact_instructions=compact_instructions,
+            startup_command=command or None,
+            startup_command_args=command_args,
             extra_excluded_commands=merged_excluded,
             extra_write_dirs=merged_write_dirs,
             model=model,
@@ -1713,10 +1718,32 @@ async def send_prompt_to_agent(agent_name: str, prompt: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _initial_agent_message(session: AgentSession, prompt: MessageContent) -> MessageContent:
+    """Build the first message for a spawned agent."""
+    if (
+        session.agent_type == "flowcoder"
+        and config.FLOWCODER_ENABLED
+        and session.startup_command
+        and isinstance(prompt, str)
+    ):
+        command = session.startup_command
+        command_args = session.startup_command_args
+        session.startup_command = None
+        session.startup_command_args = ""
+        slash = f"/{command.lstrip('/')}"
+        if command_args:
+            slash += f" {command_args}"
+        if prompt:
+            slash += f" {prompt}"
+        return slash
+    return prompt
+
+
 async def run_initial_prompt(session: AgentSession, prompt: MessageContent, channel: TextChannel) -> None:
     """Run the initial prompt for a spawned agent."""
     set_agent_context(session.name, channel_id=channel.id)
     set_trigger("initial_prompt")
+    prompt = _initial_agent_message(session, prompt)
     with _tracer.start_as_current_span(
         "run_initial_prompt",
         attributes={

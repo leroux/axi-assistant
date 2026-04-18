@@ -17,6 +17,7 @@ dependencies = [
     "procmux",
     "claudewire",
     "discordquery",
+    "discord-e2e",
     "agenthub",
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
@@ -35,6 +36,7 @@ flowcoder-tui = { path = "packages/flowcoder_tui", editable = true }
 procmux = { git = "https://github.com/leroux/procmux.git", rev = "88cc1eb91bf91b2653905e8a836abb15999e017d", subdirectory = "py" }
 claudewire = { git = "https://github.com/px-pride/claudewire.git", rev = "d29f537d7449158fb92ad2d8fdf50bde2dcd5d6c", subdirectory = "py" }
 discordquery = { path = "packages/discordquery", editable = true }
+discord-e2e = { path = "packages/discord_e2e", editable = true }
 agenthub = { path = "packages/agenthub", editable = true }
 
 [dependency-groups]
@@ -100,7 +102,7 @@ ignore = [
 "lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
 
 [tool.ruff.lint.isort]
-known-first-party = ["axi", "discordquery", "procmux", "agenthub"]
+known-first-party = ["axi", "discordquery", "discord_e2e", "procmux", "agenthub"]
 known-third-party = ["claudewire"]
 
 [tool.ruff.format]

@@ -24,7 +24,10 @@ import asyncio
 import logging
 import time
 import urllib.parse
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import httpx
 
@@ -144,6 +147,39 @@ class DiscordClient:
         if after is not None:
             params["after"] = after
         return self.get(f"/channels/{channel_id}/messages", params)
+    def find_channel(self, guild_id: str | int, name: str) -> dict[str, Any] | None:
+        """Find a text channel by name in a guild. Returns None if not found."""
+        channels: list[dict[str, Any]] = self.get(f"/guilds/{guild_id}/channels")
+        for ch in channels:
+            if ch["type"] in (0, 5) and ch["name"].lower() == name.lower():
+                return ch
+        return None
+
+    def create_channel(
+        self,
+        guild_id: str | int,
+        name: str,
+        *,
+        channel_type: int = 0,
+        parent_id: str | int | None = None,
+    ) -> dict[str, Any]:
+        """Create a channel in a guild."""
+        payload: dict[str, Any] = {"name": name, "type": channel_type}
+        if parent_id is not None:
+            payload["parent_id"] = str(parent_id)
+        return self.post(f"/guilds/{guild_id}/channels", json=payload)
+
+    def get_channel(self, channel_id: str | int) -> dict[str, Any]:
+        """Fetch channel metadata."""
+        return self.get(f"/channels/{channel_id}")
+
+    def send_message(self, channel_id: str | int, content: str) -> dict[str, Any]:
+        """Send a text message to a channel. Returns the message object."""
+        return self.post(f"/channels/{channel_id}/messages", json={"content": content})
+
+    def delete_channel(self, channel_id: str | int) -> None:
+        """Delete a channel."""
+        self.request("DELETE", f"/channels/{channel_id}")
 
 
 # ---------------------------------------------------------------------------
