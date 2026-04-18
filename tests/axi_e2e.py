@@ -37,6 +37,9 @@ class AxiDiscordEntrypoints:
     def kill_agent(self, name: str, *, timeout: float = 60.0) -> list[dict]:
         return self.master.send_and_wait(f'Kill the agent named "{name}"', timeout=timeout).messages
 
+    def restart_agent(self, name: str, *, timeout: float = 90.0) -> list[dict]:
+        return self.master.send_and_wait(f'Restart the agent named "{name}"', timeout=timeout).messages
+
     def send_to_agent(self, name: str, message: str, *, timeout: float = 60.0) -> list[dict]:
         content = f'Send a message to the agent "{name}" saying: "{message}"'
         return self.master.send_and_wait(content, timeout=timeout).messages

@@ -1,3 +1,5 @@
+<!-- test: tests/test_spawn_and_kill_smoke_generated.py -->
+
 # Axi Spawn-and-Kill Smoke
 
 ## Application Overview

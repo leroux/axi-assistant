@@ -29,6 +29,7 @@ def test_axi_entrypoints_format_spawn_kill_and_message() -> None:
         timeout=180.0,
     )
     axi.kill_agent("worker", timeout=60.0)
+    axi.restart_agent("worker", timeout=90.0)
     axi.send_to_agent("worker", "Say exactly: LATER", timeout=45.0)
 
     assert master.sent == [
@@ -37,5 +38,6 @@ def test_axi_entrypoints_format_spawn_kill_and_message() -> None:
             180.0,
         ),
         ('Kill the agent named "worker"', 60.0),
+        ('Restart the agent named "worker"', 90.0),
         ('Send a message to the agent "worker" saying: "Say exactly: LATER"', 45.0),
     ]

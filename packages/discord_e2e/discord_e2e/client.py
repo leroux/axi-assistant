@@ -110,6 +110,30 @@ class DiscordE2EClient:
             raise AssertionError(f"Channel '{name}' not found")
         return self.channel(channel_id, name=name)
 
+    def find_channel_by_prefix(self, prefix: str) -> dict[str, Any] | None:
+        for channel in self._reader.list_channels(self.guild_id):
+            if channel.get("name", "").startswith(prefix):
+                return channel
+        return None
+
+    def wait_for_channel(
+        self,
+        prefix: str,
+        *,
+        timeout: float = 60.0,
+        poll_interval: float = 2.0,
+    ) -> DiscordChannel:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            channel = self.find_channel_by_prefix(prefix)
+            if channel is not None:
+                return self.channel(str(channel["id"]), name=channel.get("name"))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(poll_interval, remaining))
+        raise AssertionError(f"No channel with prefix '{prefix}' appeared within {timeout}s")
+
     def find_category(self, name: str) -> str | None:
         channels = self._reader.get(f"/guilds/{self.guild_id}/channels")
         for channel in channels:

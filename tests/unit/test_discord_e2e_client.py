@@ -98,6 +98,60 @@ def test_discord_e2e_client_uses_reusable_transport() -> None:
     client.delete_channel("456")
 
 
+def test_find_channel_by_prefix_matches_first_hit() -> None:
+    class PrefixStub:
+        def close(self) -> None:
+            return None
+
+        def list_channels(self, guild_id: str) -> list[dict[str, object]]:
+            return [
+                {"id": "1", "name": "general"},
+                {"id": "2", "name": "smoke-probe-abc"},
+                {"id": "3", "name": "smoke-probe-xyz"},
+            ]
+
+    client = DiscordE2EClient(reader_token="bot", sender_token="ZmFrZQ==.rest", guild_id="guild")
+    client._reader = PrefixStub()  # type: ignore[assignment]
+
+    hit = client.find_channel_by_prefix("smoke-probe")
+    assert hit is not None
+    assert hit["id"] == "2"
+    assert client.find_channel_by_prefix("no-such-") is None
+
+
+def test_wait_for_channel_returns_immediately_when_present() -> None:
+    class PrefixStub:
+        def close(self) -> None:
+            return None
+
+        def list_channels(self, guild_id: str) -> list[dict[str, object]]:
+            return [{"id": "42", "name": "smoke-probe-now"}]
+
+    client = DiscordE2EClient(reader_token="bot", sender_token="ZmFrZQ==.rest", guild_id="guild")
+    client._reader = PrefixStub()  # type: ignore[assignment]
+
+    channel = client.wait_for_channel("smoke-probe-", timeout=1.0, poll_interval=0.1)
+    assert channel.channel_id == "42"
+    assert channel.name == "smoke-probe-now"
+
+
+def test_wait_for_channel_raises_on_timeout() -> None:
+    import pytest
+
+    class EmptyStub:
+        def close(self) -> None:
+            return None
+
+        def list_channels(self, guild_id: str) -> list[dict[str, object]]:
+            return []
+
+    client = DiscordE2EClient(reader_token="bot", sender_token="ZmFrZQ==.rest", guild_id="guild")
+    client._reader = EmptyStub()  # type: ignore[assignment]
+
+    with pytest.raises(AssertionError, match="smoke-probe-"):
+        client.wait_for_channel("smoke-probe-", timeout=0.1, poll_interval=0.05)
+
+
 def test_discord_channel_delegates_to_client() -> None:
     framework = StubFrameworkClient()
     channel = DiscordChannel(client=framework, channel_id="123", name="general")  # type: ignore[arg-type]
