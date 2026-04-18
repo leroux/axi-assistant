@@ -89,6 +89,8 @@ class AgentSession:
     mcp_server_names: list[str] | None = None
     frontend_state: Any = None
     compact_instructions: str | None = None
+    startup_command: str | None = None
+    startup_command_args: str = ""
     extra_excluded_commands: list[str] = field(default_factory=list)
     extra_write_dirs: list[str] = field(default_factory=list)
     model: str | None = None

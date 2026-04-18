@@ -849,6 +849,10 @@ async def _handle_system_message(
         status = "**completed**" if data.get("status") == "completed" else "**failed**"
         assert _send_system is not None
         await _send_system(channel, f"Flowchart {status} in {duration_s:.0f}s | Cost: ${cost:.4f} | Blocks: {blocks}")
+        test_sentinel = os.environ.get("AXI_TEST_SENTINEL")
+        if test_sentinel:
+            assert _send_long is not None
+            await _send_long(channel, test_sentinel)
         # Persist inner Claude's session_id so resume works after flowchart turns.
         # Only persist from successful runs — failed runs generate phantom
         # session_ids that don't have conversation data on disk, causing an

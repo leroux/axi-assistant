@@ -1,0 +1,63 @@
+{
+  "id": "ca0ea35b-a73e-4100-98e2-84dcb61455c1",
+  "name": "discord-test-planner",
+  "description": "Playwright-style Planner for Discord bot tests. Explores the harness and writes a structured markdown scenario plan under specs/.",
+  "flowchart": {
+    "blocks": {
+      "start": {
+        "id": "start",
+        "type": "start",
+        "name": "START",
+        "position": { "x": 300, "y": 50 }
+      },
+      "plan": {
+        "id": "plan",
+        "type": "prompt",
+        "name": "PLAN",
+        "position": { "x": 300, "y": 150 },
+        "prompt": "[Automated flowchart step — output goes to the user.]\n\nYou are the Discord Test **Planner** agent, modeled on Playwright's planner. Your job is ONLY to produce a human-readable markdown scenario plan. You do NOT write Python test code in this step; that is the Generator's job.\n\nTest goal:\n$1\n\nProcess:\n1. Inspect the existing Discord test harness so the plan is grounded in real capabilities:\n   - `tests/axi_e2e.py` — Axi-specific master-agent entrypoints (spawn, kill, send).\n   - `tests/helpers.py` — the Discord adapter built on `discord_e2e`.\n   - `tests/conftest.py` — fixtures (`discord`, `master_channel`, `warmup`).\n   - `packages/discord_e2e/discord_e2e/client.py` — the generic Discord E2E client.\n2. Choose a short kebab-case slug for this plan (e.g. `spawn-and-kill-smoke`).\n3. Write exactly one file: `specs/<slug>.md`. Create the `specs/` directory if it does not exist. If the file already exists, OVERWRITE it.\n4. The file MUST follow this structure exactly, starting with an HTML comment that declares the target test path so the spec↔test mapping is explicit and machine-verifiable:\n\n   ```\n   <!-- test: tests/test_<slug-underscored>_generated.py -->\n\n   # <Plan Title>\n\n   ## Application Overview\n   <2–3 sentences describing the bot under test and what this plan covers>\n\n   ## Scenarios\n\n   ### 1. <Scenario Name>\n\n   **Steps:**\n   1. <imperative natural-language step>\n   2. ...\n\n   **Expected Results:**\n   - <one bullet per observable outcome>\n   ```\n\n   Example for slug `spawn-and-kill-smoke`:\n\n       <!-- test: tests/test_spawn_and_kill_smoke_generated.py -->\n\n       # Axi Spawn-and-Kill Smoke\n\n   The `<!-- test: -->` comment MUST be the very first line. The slug in the test path MUST match the spec's filename stem with hyphens converted to underscores. `tests/unit/test_spec_test_mapping.py` enforces this at CI time.\n\n5. For v1, include EXACTLY ONE scenario unless the goal clearly demands more. Do not speculate about edge cases.\n6. Steps must be concrete Discord-level actions (\"send message to #axi-master saying X\", \"wait for channel whose name starts with Y\"), not implementation details.\n7. Expected Results must be observable, deterministic outcomes — not vague qualities like \"works correctly\".\n8. Do NOT modify any Python file. Do NOT run pytest.\n9. End your final message with exactly one line: `SPEC: specs/<slug>.md`",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "end": {
+        "id": "end",
+        "type": "end",
+        "name": "END",
+        "position": { "x": 300, "y": 250 }
+      }
+    },
+    "connections": [
+      {
+        "id": "1ba83d1c-d09e-4b27-80f4-060e71932d49",
+        "source_block_id": "start",
+        "target_block_id": "plan",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "0089379c-aa50-4737-85c2-afb7d5b3cb8b",
+        "source_block_id": "plan",
+        "target_block_id": "end",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "start"
+  },
+  "metadata": {
+    "created": "2026-04-18T00:00:00.000000",
+    "modified": "2026-04-18T00:00:00.000000",
+    "version": "1.0",
+    "author": null,
+    "tags": ["testing", "discord", "planner"]
+  },
+  "arguments": [
+    { "name": "goal", "description": "Natural-language description of the test goal (what scenario to plan).", "required": true }
+  ]
+}

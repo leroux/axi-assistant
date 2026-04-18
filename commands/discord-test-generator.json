@@ -1,0 +1,63 @@
+{
+  "id": "e6faef67-17c8-4188-a766-69d335051110",
+  "name": "discord-test-generator",
+  "description": "Playwright-style Generator for Discord bot tests. Converts a markdown scenario plan from specs/ into an executable pytest file under tests/.",
+  "flowchart": {
+    "blocks": {
+      "start": {
+        "id": "start",
+        "type": "start",
+        "name": "START",
+        "position": { "x": 300, "y": 50 }
+      },
+      "generate": {
+        "id": "generate",
+        "type": "prompt",
+        "name": "GENERATE",
+        "position": { "x": 300, "y": 150 },
+        "prompt": "[Automated flowchart step — output goes to the user.]\n\nYou are the Discord Test **Generator** agent, modeled on Playwright's generator. Your job is to turn a markdown scenario plan into one executable pytest file. You do NOT run pytest; that is the Healer's job.\n\nSpec path:\n$1\n\nProcess:\n1. Read the spec file at the path above. If the path does not exist, stop and report the error.\n2. Read the harness you will build on top of:\n   - `tests/axi_e2e.py` — Axi-specific master-agent entrypoints.\n   - `tests/helpers.py` — Discord adapter (`Discord` class, thin wrapper over `discord_e2e`).\n   - `tests/conftest.py` — fixtures (`discord`, `master_channel`, `warmup`, `instance_env`).\n   - `packages/discord_e2e/discord_e2e/client.py` — generic client API.\n3. Derive the slug from the spec filename (e.g. `specs/spawn-and-kill-smoke.md` → slug `spawn-and-kill-smoke`).\n4. Write exactly one test file: `tests/test_<slug>_generated.py`. OVERWRITE it if it exists.\n5. The generated file MUST:\n   a. Start with a single-line header comment linking back to the spec: `# spec: <spec-path>`. The path MUST exactly match the spec argument passed to this command (e.g. `# spec: specs/spawn-and-kill-smoke.md`). `tests/unit/test_spec_test_mapping.py` enforces this bidirectional linkage at CI time; a mismatch will fail that unit test.\n   b. Use the existing pytest fixtures from `tests/conftest.py`. Do not invent new transport code.\n   c. Use `AxiDiscordEntrypoints` from `tests/axi_e2e.py` or the `Discord` helper for every Discord interaction.\n   d. Contain ONE `test_` function per scenario in the spec. Function name: `test_<scenario-slug>` (kebab scenario name → snake_case).\n   e. Clean up any spawned agents or channels in a `finally:` block.\n   f. Prefer deterministic assertions (substring match, channel existence, message count). Avoid LLM-judge assertions unless the spec's Expected Results genuinely cannot be expressed deterministically.\n   g. Use unique, timestamped names for any spawned resources so reruns do not collide.\n6. Do NOT modify the spec file. Do NOT modify production code (`axi/`, `packages/`). Do NOT run pytest.\n7. End your final message with exactly one line: `GENERATED: tests/test_<slug>_generated.py`",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "end": {
+        "id": "end",
+        "type": "end",
+        "name": "END",
+        "position": { "x": 300, "y": 250 }
+      }
+    },
+    "connections": [
+      {
+        "id": "257ebf8c-39c5-49ea-9c12-657f9738a524",
+        "source_block_id": "start",
+        "target_block_id": "generate",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "2a2e3463-1ee2-4405-b071-ebb948ac3cc9",
+        "source_block_id": "generate",
+        "target_block_id": "end",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "start"
+  },
+  "metadata": {
+    "created": "2026-04-18T00:00:00.000000",
+    "modified": "2026-04-18T00:00:00.000000",
+    "version": "1.0",
+    "author": null,
+    "tags": ["testing", "discord", "generator"]
+  },
+  "arguments": [
+    { "name": "spec", "description": "Path to the markdown spec file (e.g. specs/spawn-and-kill-smoke.md) produced by the planner.", "required": true }
+  ]
+}

@@ -13,7 +13,7 @@ from .helpers import Discord
 AXI_PY_DIR = Path(__file__).parent.parent
 REPO_DIR = Path(__file__).resolve().parent.parent
 INSTANCE_NAME = os.environ.get("AXI_TEST_INSTANCE_NAME", "smoke-test")
-INSTANCE_DIR = Path(os.environ.get("AXI_TEST_INSTANCE_DIR", str(REPO_DIR)))
+INSTANCE_DIR = Path(os.environ.get("AXI_TEST_INSTANCE_DIR", str(REPO_DIR.parent / INSTANCE_NAME)))
 WORKTREE_DIR = INSTANCE_DIR
 DATA_DIR = INSTANCE_DIR.parent / f"{INSTANCE_DIR.name}-data"
 TEST_CONFIG = Path.home() / ".config/axi/test-config.json"
@@ -54,8 +54,18 @@ def _read_env(env_path: Path) -> dict:
     return env
 
 
-def _restart_bot() -> None:
-    """Restart the bot with a clean session (no --resume)."""
+def _restart_bot(discord_client: "Discord | None" = None, channel_id: str | None = None) -> None:
+    """Restart the bot with a clean session (no --resume).
+
+    In ``AXI_MOCK_MODE=1`` we don't restart a systemd unit; we send a control
+    message that tells the mock bot to reset its in-memory state and re-emit
+    its "ready" banner. That keeps the conftest single-source-of-truth for
+    both real axi and the deterministic mock.
+    """
+    if os.environ.get("AXI_MOCK_MODE") == "1":
+        if discord_client is not None and channel_id is not None:
+            discord_client.send(channel_id, "[MOCK_RESTART]")
+        return
     (INSTANCE_DIR / ".master_session_id").unlink(missing_ok=True)
     subprocess.run(
         ["uv", "run", "python", "../axi_test.py", "restart", INSTANCE_NAME],
@@ -74,7 +84,7 @@ def test_config():
 @pytest.fixture(scope="session")
 def instance_env():
     """Return the .env vars for the test instance."""
-    env_path = WORKTREE_DIR / ".env"
+    env_path = INSTANCE_DIR / ".env"
     if not env_path.exists():
         pytest.skip(
             f"No .env file at {env_path}. Run `uv run python axi_test.py up {INSTANCE_NAME}` first."
@@ -133,7 +143,7 @@ def warmup(discord: Discord, master_channel: str):
     """
     # Record latest message BEFORE restart so we can detect the NEW ready message
     latest = discord.latest_message_id(master_channel) or "0"
-    _restart_bot()
+    _restart_bot(discord, master_channel)
     # Wait for the NEW ready notification (after the restart)
     text = discord.poll_history(master_channel, after=latest, check="ready", timeout=45.0)
     if "ready" not in text.lower():
@@ -168,7 +178,7 @@ def _recover_after_failure(warmup, discord: Discord, master_channel: str):
     if _last_test_failed:
         _last_test_failed = False
         latest = discord.latest_message_id(master_channel) or "0"
-        _restart_bot()
+        _restart_bot(discord, master_channel)
         discord.poll_history(master_channel, after=latest, check="ready", timeout=45.0)
         # Verify the bot is responsive
         msgs = discord.send_and_wait(
