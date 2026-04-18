@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 from .axi_e2e import AxiDiscordEntrypoints
 from .conftest import agent_cwd
-from .helpers import Discord
+
+if TYPE_CHECKING:
+    from .helpers import Discord
 
 
 def test_restart_preserves_channel_and_agent_responds(
@@ -32,20 +35,16 @@ def test_restart_preserves_channel_and_agent_responds(
 
         axi.restart_agent(name, timeout=90.0)
 
-        after = agent.latest_message_id() or "0"
         reply = agent.send_and_wait(
             "Say exactly: POST_RESTART_OK",
             timeout=120.0,
         )
-        text = reply.text
-        assert "POST_RESTART_OK" in text, (
-            f"Agent did not respond after restart. Got: {text[:300]!r}"
+        assert "POST_RESTART_OK" in reply.text, (
+            f"Agent did not respond after restart. Got: {reply.text[:300]!r}"
         )
         refreshed = discord.wait_for_channel(name, timeout=10.0)
         assert refreshed.channel_id == original_channel_id, (
             f"Restart created a new channel: before={original_channel_id}, after={refreshed.channel_id}"
         )
-        # suppress unused-variable warning
-        _ = after
     finally:
         axi.kill_agent(name, timeout=60.0)

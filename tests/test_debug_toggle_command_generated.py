@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-from .helpers import Discord
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .helpers import Discord
 
 
 def test_debug_toggle_responds_both_directions(

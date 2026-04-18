@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 from .axi_e2e import AxiDiscordEntrypoints
 from .conftest import agent_cwd
-from .helpers import Discord
+
+if TYPE_CHECKING:
+    from .helpers import Discord
 
 
 def test_killed_agent_channel_rejects_messages(
