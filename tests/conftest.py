@@ -13,7 +13,7 @@ from .helpers import Discord
 AXI_PY_DIR = Path(__file__).parent.parent
 REPO_DIR = Path(__file__).resolve().parent.parent
 INSTANCE_NAME = os.environ.get("AXI_TEST_INSTANCE_NAME", "smoke-test")
-INSTANCE_DIR = Path(os.environ.get("AXI_TEST_INSTANCE_DIR", str(REPO_DIR)))
+INSTANCE_DIR = Path(os.environ.get("AXI_TEST_INSTANCE_DIR", str(REPO_DIR.parent / INSTANCE_NAME)))
 WORKTREE_DIR = INSTANCE_DIR
 DATA_DIR = INSTANCE_DIR.parent / f"{INSTANCE_DIR.name}-data"
 TEST_CONFIG = Path.home() / ".config/axi/test-config.json"
@@ -74,7 +74,7 @@ def test_config():
 @pytest.fixture(scope="session")
 def instance_env():
     """Return the .env vars for the test instance."""
-    env_path = WORKTREE_DIR / ".env"
+    env_path = INSTANCE_DIR / ".env"
     if not env_path.exists():
         pytest.skip(
             f"No .env file at {env_path}. Run `uv run python axi_test.py up {INSTANCE_NAME}` first."

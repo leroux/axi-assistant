@@ -248,6 +248,7 @@ dependencies = [
     { name = "claude-agent-sdk" },
     { name = "claudewire" },
     { name = "croniter" },
+    { name = "discord-e2e" },
     { name = "discord-py", extra = ["voice"] },
     { name = "discordquery" },
     { name = "fastapi" },
@@ -284,6 +285,7 @@ requires-dist = [
     { name = "claude-agent-sdk" },
     { name = "claudewire", git = "https://github.com/px-pride/claudewire.git?subdirectory=py&rev=d29f537d7449158fb92ad2d8fdf50bde2dcd5d6c" },
     { name = "croniter" },
+    { name = "discord-e2e", editable = "packages/discord_e2e" },
     { name = "discord-py", extras = ["voice"], specifier = ">=2.7" },
     { name = "discordquery", editable = "packages/discordquery" },
     { name = "fastapi", specifier = ">=0.115" },
@@ -563,6 +565,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/89/48/e69d6f6d855f0c6740ff2dde9ebb2f43033431002e1e5a949c8ad47e74f8/davey-0.1.5-cp314-cp314t-musllinux_1_2_i686.whl", hash = "sha256:58d7d412e7dff5e24f59c78c1e8de3690bd765a536d4000addf57004873f12a5", size = 1137332, upload-time = "2026-03-29T02:36:31.658Z" },
     { url = "https://files.pythonhosted.org/packages/bb/3e/e8f2dc2bb56e2b1916cbc098f85f8f10952ead41b5f965ea56cf8fec35ad/davey-0.1.5-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:f853461bd751b6b47f0ca6fdb53d7d4b37a429d22a1749ada32881cfb00fbddb", size = 1129624, upload-time = "2026-03-29T02:36:52.073Z" },
 ]
+
+[[package]]
+name = "discord-e2e"
+version = "0.1.0"
+source = { editable = "packages/discord_e2e" }
+dependencies = [
+    { name = "discordquery" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "discordquery" }]
 
 [[package]]
 name = "discord-py"

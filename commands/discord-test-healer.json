@@ -1,0 +1,63 @@
+{
+  "id": "09c05fab-09cf-408e-ada5-203e82017f52",
+  "name": "discord-test-healer",
+  "description": "Playwright-style Healer for Discord bot tests. Runs a generated pytest file, and if it fails, attempts exactly one targeted repair and reruns.",
+  "flowchart": {
+    "blocks": {
+      "start": {
+        "id": "start",
+        "type": "start",
+        "name": "START",
+        "position": { "x": 300, "y": 50 }
+      },
+      "heal": {
+        "id": "heal",
+        "type": "prompt",
+        "name": "HEAL",
+        "position": { "x": 300, "y": 150 },
+        "prompt": "[Automated flowchart step — output goes to the user.]\n\nYou are the Discord Test **Healer** agent, modeled on Playwright's healer. You run a generated test file, and if it fails, you attempt EXACTLY ONE targeted repair and rerun. You do NOT plan new scenarios and you do NOT modify the spec or production code.\n\nTest path:\n$1\n\nProcess:\n1. Run the test file: `uv run pytest -q <test-path>` (use the exact path passed above). Capture the output.\n2. If the run PASSES, skip to step 6 and report `RESULT: PASS`.\n3. If the run FAILS:\n   a. Read the failure output carefully. Also re-read the test file and the spec file referenced in its `# spec:` header.\n   b. Identify ONE root cause. Typical healable causes: flaky waits (insufficient timeout), stale channel/agent name collisions, missed sentinel strings. Non-healable causes: the bot is actually broken, the spec's Expected Results don't match reality.\n   c. If the cause is healable, make ONE targeted edit to the test file ONLY. Do not touch the spec. Do not touch any file under `axi/`, `packages/`, or `tests/conftest.py`.\n   d. Rerun: `uv run pytest -q <test-path>`. This is your ONE AND ONLY retry — do not attempt further edits.\n4. If the cause is not healable, or after one retry the test still fails, stop and report the remaining failure honestly — do not loop.\n5. If during the failure analysis it appears the bot under test is genuinely broken (not a test flake), explicitly say so and recommend escalating to a bug fix rather than healing the test.\n6. End your final message with exactly one line: `RESULT: PASS` or `RESULT: FAIL`.\n\nHard constraints:\n- Max one repair edit. Never loop.\n- Never modify the spec or any file outside the generated test file.\n- Never use `--no-verify` or otherwise bypass hooks.",
+        "output_schema": null,
+        "sound_effect": null
+      },
+      "end": {
+        "id": "end",
+        "type": "end",
+        "name": "END",
+        "position": { "x": 300, "y": 250 }
+      }
+    },
+    "connections": [
+      {
+        "id": "3f5c73d3-c11f-46dc-a7e7-b83195414d58",
+        "source_block_id": "start",
+        "target_block_id": "heal",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      },
+      {
+        "id": "f199a434-06a2-4a6d-8604-70acf02daab3",
+        "source_block_id": "heal",
+        "target_block_id": "end",
+        "source_port": "bottom",
+        "target_port": "top",
+        "is_true_path": true,
+        "condition": null,
+        "label": null
+      }
+    ],
+    "start_block_id": "start"
+  },
+  "metadata": {
+    "created": "2026-04-18T00:00:00.000000",
+    "modified": "2026-04-18T00:00:00.000000",
+    "version": "1.0",
+    "author": null,
+    "tags": ["testing", "discord", "healer"]
+  },
+  "arguments": [
+    { "name": "test", "description": "Path to the generated pytest file (e.g. tests/test_spawn_and_kill_smoke_generated.py) to run and heal.", "required": true }
+  ]
+}
