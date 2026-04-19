@@ -253,7 +253,6 @@ dependencies = [
     { name = "fastapi" },
     { name = "flowcoder-engine" },
     { name = "flowcoder-flowchart" },
-    { name = "flowcoder-tui" },
     { name = "httpx", extra = ["socks"] },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
@@ -289,7 +288,6 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "flowcoder-engine", git = "https://github.com/px-pride/flowcoder.git?subdirectory=packages%2Fflowcoder-engine&rev=6b42aafc0fb675ada139ec4e36929a0abf530084" },
     { name = "flowcoder-flowchart", git = "https://github.com/px-pride/flowcoder.git?subdirectory=packages%2Fflowcoder-flowchart&rev=6b42aafc0fb675ada139ec4e36929a0abf530084" },
-    { name = "flowcoder-tui", editable = "packages/flowcoder_tui" },
     { name = "httpx", extras = ["socks"] },
     { name = "opentelemetry-api", specifier = ">=1.20" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.20" },
@@ -660,24 +658,6 @@ source = { git = "https://github.com/px-pride/flowcoder.git?subdirectory=package
 dependencies = [
     { name = "pydantic" },
 ]
-
-[[package]]
-name = "flowcoder-tui"
-version = "0.1.0"
-source = { editable = "packages/flowcoder_tui" }
-dependencies = [
-    { name = "flowcoder-engine" },
-    { name = "flowcoder-flowchart" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "flowcoder-engine", specifier = ">=0.1.0" },
-    { name = "flowcoder-flowchart", specifier = ">=0.1.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "frozenlist"

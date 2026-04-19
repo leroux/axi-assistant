@@ -13,7 +13,6 @@ dependencies = [
     "arrow",
     "flowcoder-engine",
     "flowcoder-flowchart",
-    "flowcoder-tui",
     "procmux",
     "claudewire",
     "discordquery",
@@ -31,7 +30,6 @@ dependencies = [
 #   flowcoder-flowchart = { path = "../flowcoder/packages/flowcoder-flowchart", editable = true }
 flowcoder-engine = { git = "https://github.com/px-pride/flowcoder.git", rev = "6b42aafc0fb675ada139ec4e36929a0abf530084", subdirectory = "packages/flowcoder-engine" }
 flowcoder-flowchart = { git = "https://github.com/px-pride/flowcoder.git", rev = "6b42aafc0fb675ada139ec4e36929a0abf530084", subdirectory = "packages/flowcoder-flowchart" }
-flowcoder-tui = { path = "packages/flowcoder_tui", editable = true }
 procmux = { path = "packages/procmux", editable = true }
 claudewire = { git = "https://github.com/px-pride/claudewire.git", rev = "d29f537d7449158fb92ad2d8fdf50bde2dcd5d6c", subdirectory = "py" }
 discordquery = { path = "packages/discordquery", editable = true }
@@ -95,7 +93,6 @@ ignore = [
 "packages/discordquery/discordquery/query.py" = ["T20"]  # CLI tool
 "packages/discordquery/discordquery/wait.py" = ["T20"]   # CLI tool
 "packages/procmux/procmux/server.py" = ["T20"]  # CLI entrypoint
-"packages/flowcoder_tui/flowcoder_tui/repl.py" = ["T20"]  # TUI prints to terminal
 "lint/rules.py" = ["RUF012"]  # VALID/INVALID class attrs are Fixit's API pattern
 
 [tool.ruff.lint.isort]

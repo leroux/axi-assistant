@@ -186,7 +186,6 @@ axi/supervisor.py (process supervisor — crash detection, rollback, hot restart
 | `procmux` | Process multiplexer over Unix socket for hot restart support |
 | `flowcoder_engine` | FlowCoder execution engine for flowchart-driven agent behavior |
 | `flowcoder_flowchart` | FlowCoder flowchart loader and tools |
-| `flowcoder_tui` | TUI for testing FlowCoder charts locally |
 
 ---
 
