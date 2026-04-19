@@ -44,12 +44,8 @@ from axi import config
 from axi.axi_types import ActivityState, AgentSession, discord_state
 from axi.discord_wire import audited_channel_send
 from axi.metrics import observe_llm_result, observe_tool_result
-from axi.rate_limits import (
-    record_session_usage as _record_session_usage,
-)
-from axi.rate_limits import (
-    update_rate_limit_quota as _update_rate_limit_quota,
-)
+from axi.rate_limits import record_session_usage as _record_session_usage
+from axi.rate_limits import update_rate_limit_quota as _update_rate_limit_quota
 from discordquery import split_message
 
 if TYPE_CHECKING:
