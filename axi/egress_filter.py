@@ -102,13 +102,16 @@ _MIN_SECRET_LEN = 8
 def register_literal_secrets(values: Iterable[str]) -> int:
     """Register exact secret values to scrub from outgoing text.
 
-    Empty strings and values shorter than ``_MIN_SECRET_LEN`` are skipped to
-    avoid mass-redacting common tokens like ``"true"`` or ``"localhost"``.
+    Empty strings, values shorter than ``_MIN_SECRET_LEN``, and absolute paths
+    (values starting with ``/``) are skipped. Paths are config, not secrets,
+    and redacting them breaks normal output like file listings or log paths.
     Returns the number of values newly added.
     """
     added = 0
     for v in values:
         if not v or len(v) < _MIN_SECRET_LEN:
+            continue
+        if v.startswith("/"):
             continue
         if v not in _LITERAL_SECRETS:
             _LITERAL_SECRETS.add(v)

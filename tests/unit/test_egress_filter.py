@@ -431,3 +431,21 @@ class TestEnvScanner:
         # the example value was never registered, so it survives
         assert "do_not_register_me" in result
         assert result.count("[REDACTED:secret]") == 2
+
+    def test_absolute_paths_not_registered(self, tmp_path):
+        # Absolute paths look like secrets to the scanner but are config, not
+        # credentials — redacting them mangles normal output like file paths.
+        (tmp_path / ".env").write_text(
+            "SECRET=SomeRealSecret123\n"
+            "DEFAULT_CWD=/home/user/project\n"
+            "AXI_USER_DATA=/var/lib/axi\n"
+        )
+        added = register_secrets_from_dir(str(tmp_path))
+        assert added == 1  # only SomeRealSecret123 registered
+        assert "SomeRealSecret123" in egress_filter._LITERAL_SECRETS
+        assert "/home/user/project" not in egress_filter._LITERAL_SECRETS
+        assert "/var/lib/axi" not in egress_filter._LITERAL_SECRETS
+
+        # Bonus: the path strings pass through scrub_secrets unchanged.
+        msg = "cwd=/home/user/project data=/var/lib/axi"
+        assert scrub_secrets(msg) == msg
