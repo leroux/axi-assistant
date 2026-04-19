@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -395,6 +396,26 @@ async def axi_kill_agent(args: McpArgs) -> McpResult:
                     await agents.send_system(agent_ch, f"Agent **{agent_name}** moved to Killed.")
 
             await agents.sleep_agent(session, force=True)
+
+            # Stop any test-instance systemd service for this agent BEFORE
+            # cleaning up the worktree. Otherwise unlink-while-open semantics
+            # leave a zombie service bound to the bot token slot.
+            try:
+                result = subprocess.run(
+                    ["uv", "run", "python", "axi_test.py", "down", agent_name],
+                    cwd=config.BOT_DIR,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    stderr = (result.stderr or "").strip()
+                    if "No reservation found" not in stderr:
+                        log.warning(
+                            "axi_test.py down '%s' failed (rc=%d): %s",
+                            agent_name, result.returncode, stderr,
+                        )
+            except Exception:
+                log.exception("Error running axi_test.py down for '%s'", agent_name)
 
             # Auto-merge if agent was in an auto-created worktree
             if worktrees.is_auto_worktree(agent_cwd):

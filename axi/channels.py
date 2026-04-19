@@ -663,12 +663,19 @@ async def ensure_category_positions() -> None:
     # Build position list: Axi, Axi 2, ..., Active, Active 2, ..., Killed, Killed 2, ...
     updates = []
     pos = 1
+    all_correct = True
     for group in (axi_categories, active_categories, killed_categories):
         for cat in group:
             updates.append({"id": str(cat.id), "position": pos})
+            if cat.position != pos:
+                all_correct = False
             pos += 1
 
     if not updates:
+        return
+
+    if all_correct:
+        log.debug("Category positions already correct — skipping PATCH")
         return
 
     try:

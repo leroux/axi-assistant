@@ -281,15 +281,28 @@ def _health_check(slots: dict[str, Any], config: dict[str, Any]) -> None:
 
         # Worktree directory gone → definitely orphaned
         if not os.path.isdir(worktree):
-            to_remove.append(name)
             mode = _slot_mode(slots, name)
             if is_instance_running(name, mode):
+                all_stopped = True
                 for unit in reversed(_service_units(name, mode)):
-                    subprocess.run(
+                    result = subprocess.run(
                         ["systemctl", "--user", "stop", unit],
                         capture_output=True,
                         env=_systemctl_env(),
                     )
+                    if result.returncode != 0:
+                        all_stopped = False
+                        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+                        print(
+                            f"ERROR: Failed to stop {unit} for orphaned '{name}' "
+                            f"(rc={result.returncode}): {stderr}. Keeping slot to avoid dual-allocation.",
+                            file=sys.stderr,
+                        )
+                if not all_stopped:
+                    # Service still alive — slot correctly represents that.
+                    # Do NOT drop it; another holder could claim the same token.
+                    continue
+            to_remove.append(name)
 
     for name in to_remove:
         del slots[name]
