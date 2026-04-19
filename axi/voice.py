@@ -20,6 +20,13 @@ log = logging.getLogger(__name__)
 # Icecast stream URL — defaults to local MP3 mount.
 STREAM_URL = os.environ.get("ICECAST_STREAM_URL", "http://localhost:8000/dynamicradio.mp3")
 
+# Watchdog poll interval (seconds) — catches stalls that the playback-end
+# callback misses, e.g. when FFmpeg dies during a VC WebSocket reconnect.
+WATCHDOG_INTERVAL = 30
+
+# Active watchdog tasks, keyed by guild ID.
+_watchdogs: dict[int, asyncio.Task] = {}
+
 
 # ---------------------------------------------------------------------------
 # State persistence (voice_state.json)
@@ -93,6 +100,7 @@ async def join(channel: discord.VoiceChannel | discord.StageChannel) -> discord.
         log.info("Connected to #%s in %s", channel.name, guild.name)
 
     _play_stream(vc)
+    _start_watchdog(vc)
     _save_state(guild.id, channel.id)
     return vc
 
@@ -102,6 +110,7 @@ async def leave(guild: discord.Guild) -> bool:
     vc = guild.voice_client
     if vc is None:
         return False
+    await _stop_watchdog(guild.id)
     await vc.disconnect()
     log.info("Disconnected from voice in %s", guild.name)
     _clear_state(guild.id)
@@ -176,3 +185,41 @@ async def _retry_stream(vc: discord.VoiceClient, max_retries: int = 10) -> None:
         delay = min(delay * 2, 60.0)
 
     log.error("Stream recovery failed after %d attempts — giving up", max_retries)
+
+
+async def _watchdog_loop(vc: discord.VoiceClient) -> None:
+    """Periodically restart the stream if the VC is connected but not playing.
+
+    Complements _on_playback_end — that path misses cases where FFmpeg dies
+    during a VC WebSocket reconnect, because vc.is_connected() briefly
+    returns False and no retry gets scheduled.
+    """
+    while True:
+        await asyncio.sleep(WATCHDOG_INTERVAL)
+        try:
+            if vc.is_connected() and not vc.is_playing():
+                log.info("watchdog detected stalled stream, restarting")
+                _play_stream(vc)
+        except Exception:
+            log.warning("watchdog iteration failed", exc_info=True)
+
+
+def _start_watchdog(vc: discord.VoiceClient) -> None:
+    """Start the per-guild watchdog task, replacing any existing one."""
+    guild_id = vc.guild.id
+    old = _watchdogs.get(guild_id)
+    if old is not None and not old.done():
+        old.cancel()
+    _watchdogs[guild_id] = asyncio.create_task(_watchdog_loop(vc))
+
+
+async def _stop_watchdog(guild_id: int) -> None:
+    """Cancel the per-guild watchdog task if running."""
+    task = _watchdogs.pop(guild_id, None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
