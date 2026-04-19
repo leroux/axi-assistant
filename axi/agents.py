@@ -87,6 +87,7 @@ from axi.discord_ui import (  # noqa: F401
     parse_question_answer,
     resolve_reaction_answer,
 )
+from axi.discord_wire import audited_channel_send, log_discordpy_reaction
 from axi.extensions import DEFAULT_EXTENSIONS, resolve_extension_hooks, resolve_prompt_hooks
 from axi.log_context import set_agent_context, set_trigger
 from axi.metrics import observe_agent_message_event
@@ -520,8 +521,10 @@ async def add_reaction(message: discord.Message | None, emoji: str) -> None:
         return
     try:
         await message.add_reaction(emoji)
+        log_discordpy_reaction(message, emoji, operation="reaction.add", outcome="success")
         log.info("Reaction +%s on message %s", emoji, message.id)
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+        log_discordpy_reaction(message, emoji, operation="reaction.add", outcome="error", error=f"{type(exc).__name__}: {exc}")
         log.warning("Reaction +%s failed on message %s: %s", emoji, message.id, exc)
 
 
@@ -533,8 +536,10 @@ async def remove_reaction(message: discord.Message | None, emoji: str) -> None:
         assert _bot is not None
         assert _bot.user is not None
         await message.remove_reaction(emoji, _bot.user)
+        log_discordpy_reaction(message, emoji, operation="reaction.remove", outcome="success")
         log.info("Reaction -%s on message %s", emoji, message.id)
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+        log_discordpy_reaction(message, emoji, operation="reaction.remove", outcome="error", error=f"{type(exc).__name__}: {exc}")
         log.warning("Reaction -%s failed on message %s: %s", emoji, message.id, exc)
 
 
@@ -693,6 +698,7 @@ async def send_long(channel: TextChannel, text: str) -> discord.Message | None:
     last_msg: discord.Message | None = None
     for i, chunk in enumerate(chunks):
         if chunk:
+            caller = "?"
             if log.isEnabledFor(logging.INFO):
                 caller = "".join(f.name or "?" for f in traceback.extract_stack(limit=4)[:-1])
                 log.info(
@@ -705,7 +711,13 @@ async def send_long(channel: TextChannel, text: str) -> discord.Message | None:
                     chunk[:80],
                 )
             try:
-                last_msg = await _retry_discord_503(channel.send, chunk)
+                last_msg = await audited_channel_send(
+                    channel,
+                    chunk,
+                    retry_fn=_retry_discord_503,
+                    operation="message.create",
+                    details={"chunk_index": i + 1, "chunk_total": len(chunks), "caller": caller},
+                )
             except discord.NotFound:
                 agent_name = channel_to_agent.get(channel.id)
                 if agent_name:
@@ -714,7 +726,12 @@ async def send_long(channel: TextChannel, text: str) -> discord.Message | None:
                     new_ch = await ensure_agent_channel(agent_name, cwd=session.cwd if session else None)
                     if session:
                         discord_state(session).channel_id = new_ch.id
-                    last_msg = await new_ch.send(chunk)
+                    last_msg = await audited_channel_send(
+                        new_ch,
+                        chunk,
+                        operation="message.create",
+                        details={"chunk_index": i + 1, "chunk_total": len(chunks), "caller": caller, "recreated_channel": True},
+                    )
                 else:
                     raise
     return last_msg
@@ -871,7 +888,7 @@ def init_shutdown_coordinator() -> None:
     async def _send_goodbye() -> None:
         master_ch = await get_master_channel()
         if master_ch:
-            await master_ch.send("*System:* Shutting down \u2014 see you soon!")
+            await audited_channel_send(master_ch, "*System:* Shutting down — see you soon!", operation="shutdown.goodbye")
 
     bot_ref = _bot
 
@@ -1435,7 +1452,12 @@ async def _maybe_compact(session: AgentSession, channel: TextChannel) -> None:
         usage_pct * 100, cmd[:80],
     )
 
-    await _retry_discord_503(channel.send, f"\U0001f504 Context at {usage_pct:.0%} ({pre_tokens:,} tokens) \u2014 compacting...")
+    await audited_channel_send(
+        channel,
+        f"\U0001f504 Context at {usage_pct:.0%} ({pre_tokens:,} tokens) — compacting...",
+        retry_fn=_retry_discord_503,
+        operation="context.compacting",
+    )
     _self_compacting.add(session.name)
     _compact_start_times[session.name] = time.monotonic()
     session.compacting = True

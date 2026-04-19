@@ -64,10 +64,11 @@ class DiscordFrontend:
 
     async def broadcast(self, text: str) -> None:
         from axi.channels import get_master_channel
+        from axi.discord_wire import audited_channel_send
 
         master_ch = await get_master_channel()
         if master_ch:
-            await master_ch.send(text)
+            await audited_channel_send(master_ch, text, operation="frontend.broadcast")
 
     # --- Agent lifecycle events ---
 
@@ -91,13 +92,14 @@ class DiscordFrontend:
 
     async def on_reconnect(self, agent_name: str, was_mid_task: bool) -> None:
         from axi.channels import get_agent_channel
+        from axi.discord_wire import audited_channel_send
 
         channel = await get_agent_channel(agent_name)
         if channel:
             if was_mid_task:
-                await channel.send("*(reconnected after restart — resuming output)*")
+                await audited_channel_send(channel, "*(reconnected after restart — resuming output)*", operation="frontend.reconnect")
             else:
-                await channel.send("*(reconnected after restart)*")
+                await audited_channel_send(channel, "*(reconnected after restart)*", operation="frontend.reconnect")
 
     # --- Stream rendering ---
 

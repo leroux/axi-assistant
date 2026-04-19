@@ -42,6 +42,7 @@ from opentelemetry import trace
 
 from axi import config
 from axi.axi_types import ActivityState, AgentSession, discord_state
+from axi.discord_wire import audited_channel_send
 from axi.metrics import observe_llm_result, observe_tool_result
 from axi.rate_limits import (
     record_session_usage as _record_session_usage,
@@ -121,7 +122,7 @@ async def _drain_and_send_stderr(session: AgentSession, channel: TextChannel) ->
         stderr_text = stderr_msg.strip()
         if stderr_text:
             for part in split_message(f"```\n{stderr_text}\n```"):
-                await _retry_discord_503(channel.send, part)
+                await audited_channel_send(channel, part, retry_fn=_retry_discord_503, operation="stream.stderr")
 
 # Explicit exports for re-export from agents.py (suppresses pyright reportPrivateUsage)
 __all__ = [
@@ -597,7 +598,12 @@ async def _show_thinking(ctx: _StreamCtx, channel: TextChannel) -> None:
     """Send a temporary 'thinking...' indicator message."""
     if ctx.thinking_message is None:
         try:
-            ctx.thinking_message = await _retry_discord_503(channel.send, "*thinking...*")
+            ctx.thinking_message = await audited_channel_send(
+                channel,
+                "*thinking...*",
+                retry_fn=_retry_discord_503,
+                operation="stream.thinking_indicator",
+            )
         except Exception:
             log.debug("Failed to send thinking indicator", exc_info=True)
 
@@ -692,15 +698,31 @@ async def _handle_stream_event(
             thinking = session.activity.thinking_text.strip()
             if thinking:
                 file = discord.File(io.BytesIO(thinking.encode("utf-8")), filename="thinking.md")
-                await _retry_discord_503(channel.send, "\U0001f4ad", file=file)
+                await audited_channel_send(
+                    channel,
+                    "\U0001f4ad",
+                    file=file,
+                    retry_fn=_retry_discord_503,
+                    operation="stream.thinking_file",
+                )
                 session.activity.thinking_text = ""
         elif session.activity.phase == "waiting" and session.activity.tool_name:
             tool = session.activity.tool_name
             preview = extract_tool_preview(tool, session.activity.tool_input_preview)
             if preview:
-                await _retry_discord_503(channel.send, f"`\U0001f527 {tool}: {preview[:120]}`")
+                await audited_channel_send(
+                    channel,
+                    f"`\U0001f527 {tool}: {preview[:120]}`",
+                    retry_fn=_retry_discord_503,
+                    operation="stream.tool_preview",
+                )
             else:
-                await _retry_discord_503(channel.send, f"`\U0001f527 {tool}`")
+                await audited_channel_send(
+                    channel,
+                    f"`\U0001f527 {tool}`",
+                    retry_fn=_retry_discord_503,
+                    operation="stream.tool_preview",
+                )
 
     # Log stream events
     if session.agent_log:

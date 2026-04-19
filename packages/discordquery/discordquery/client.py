@@ -219,6 +219,8 @@ class AsyncDiscordClient:
         # Optional content filter — called on outgoing message text before send/edit.
         # Set to a callable(str) -> str to scrub content (e.g. secret redaction).
         self.content_filter: Callable[[str], str] | None = None
+        # Optional audit hook — called with request/response metadata for outbound REST traffic.
+        self.audit_hook: Callable[[dict[str, Any]], None] | None = None
 
     async def __aenter__(self) -> AsyncDiscordClient:
         return self
@@ -237,6 +239,14 @@ class AsyncDiscordClient:
         """
         failures = 0
         ratelimit_retries = 0
+        audit_base = {
+            "method": method,
+            "path": path,
+            "params": kwargs.get("params"),
+            "json": kwargs.get("json"),
+            "data": kwargs.get("data"),
+            "files": kwargs.get("files"),
+        }
         while True:
             started_at = time.monotonic()
             try:
@@ -248,12 +258,41 @@ class AsyncDiscordClient:
             _record_discord_rest_attempt(self.on_request_observer, method, path, started_at, resp.status_code)
 
             if resp.status_code in (200, 201, 204):
+                if self.audit_hook:
+                    response_json = None
+                    content_type = resp.headers.get("content-type", "")
+                    if content_type.startswith("application/json"):
+                        try:
+                            response_json = resp.json()
+                        except ValueError:
+                            response_json = None
+                    self.audit_hook(
+                        {
+                            **audit_base,
+                            "outcome": "success",
+                            "status_code": resp.status_code,
+                            "response_json": response_json,
+                            "ratelimit_retries": ratelimit_retries,
+                            "server_error_retries": failures,
+                        }
+                    )
                 return resp
 
             if resp.status_code == 429:
                 ratelimit_retries += 1
                 if ratelimit_retries > MAX_RATELIMIT_RETRIES:
                     log.error("Rate limit retries exhausted (%d) on %s %s", MAX_RATELIMIT_RETRIES, method, path)
+                    if self.audit_hook:
+                        self.audit_hook(
+                            {
+                                **audit_base,
+                                "outcome": "error",
+                                "status_code": resp.status_code,
+                                "error": f"HTTPStatusError: {resp.status_code}",
+                                "ratelimit_retries": ratelimit_retries,
+                                "server_error_retries": failures,
+                            }
+                        )
                     resp.raise_for_status()
                 retry_after = float(resp.json().get("retry_after", 1.0))
                 log.warning("Rate limited on %s %s, waiting %.1fs (attempt %d/%d)...", method, path, retry_after, ratelimit_retries, MAX_RATELIMIT_RETRIES)
@@ -267,6 +306,25 @@ class AsyncDiscordClient:
                 await asyncio.sleep(wait)
                 continue
 
+            if self.audit_hook:
+                response_json = None
+                content_type = resp.headers.get("content-type", "")
+                if content_type.startswith("application/json"):
+                    try:
+                        response_json = resp.json()
+                    except ValueError:
+                        response_json = None
+                self.audit_hook(
+                    {
+                        **audit_base,
+                        "outcome": "error",
+                        "status_code": resp.status_code,
+                        "response_json": response_json,
+                        "error": f"HTTPStatusError: {resp.status_code}",
+                        "ratelimit_retries": ratelimit_retries,
+                        "server_error_retries": failures,
+                    }
+                )
             resp.raise_for_status()
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:

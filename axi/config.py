@@ -101,13 +101,11 @@ class _ColorFormatter(logging.Formatter):
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
-
+from axi.discord_wire import emit_rest_audit_event
+from axi.egress_filter import scrub_secrets
 from axi.log_context import StructuredContextFilter
+
+load_dotenv()
 
 log = logging.getLogger("axi")
 log.setLevel(logging.DEBUG)
@@ -577,6 +575,5 @@ discord_client = AsyncDiscordClient(
     ),
 )
 
-from axi.egress_filter import scrub_secrets
-
 discord_client.content_filter = scrub_secrets
+discord_client.audit_hook = emit_rest_audit_event

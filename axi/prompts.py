@@ -23,6 +23,7 @@ import discord
 from discord import TextChannel
 
 from axi import config
+from axi.discord_wire import audited_channel_send
 from axi.extensions import DEFAULT_EXTENSIONS, extension_prompt_text
 
 if TYPE_CHECKING:
@@ -221,7 +222,7 @@ async def post_system_prompt_to_channel(
     """
     if is_resume and not prompt_changed:
         sid_display = f"`{session_id[:8]}…`" if session_id else "unknown"
-        await channel.send(f"*System:* 📋 Resumed session {sid_display}")
+        await audited_channel_send(channel, f"*System:* 📋 Resumed session {sid_display}", operation="system_prompt.resume")
         return
 
     if isinstance(system_prompt, dict):
@@ -240,6 +241,16 @@ async def post_system_prompt_to_channel(
     )
     sid_suffix = f" — session `{session_id[:8]}…`" if session_id else ""
     if prompt_changed:
-        await channel.send(f"*System:* 📋 **System prompt updated** — {label} ({line_count} lines){sid_suffix}", file=file)
+        await audited_channel_send(
+            channel,
+            f"*System:* 📋 **System prompt updated** — {label} ({line_count} lines){sid_suffix}",
+            file=file,
+            operation="system_prompt.post",
+        )
     else:
-        await channel.send(f"*System:* 📋 {label} ({line_count} lines){sid_suffix}", file=file)
+        await audited_channel_send(
+            channel,
+            f"*System:* 📋 {label} ({line_count} lines){sid_suffix}",
+            file=file,
+            operation="system_prompt.post",
+        )
